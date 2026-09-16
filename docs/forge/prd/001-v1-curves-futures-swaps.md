@@ -1,0 +1,119 @@
+# PRD-001: v1 — curvas SOFR, futuros, swaps y cobertura
+
+> Escrito 2026-09-16 desde el diseño `2026-09-16-rates-engine-design.md` y el wiki compilado el mismo día. Formato forge-master. **Estado: borrador; requiere aprobación de Alan antes de `plan-design`.** Supuestos míos marcados **[asumo]**; preguntas abiertas al final.
+
+## Goal
+Publicar `finport-ratesengine` v0.1: librería Python determinista que construye curvas SOFR (descuento, cero, par, forward) desde datos gratuitos, valúa futuros SOFR con ajuste de convexidad, valúa OIS/IRS/FRA con descuento a la tasa de colateral, y cubre un swap con una tira de futuros — devolviendo con cada número la evidencia sobre la que descansa. Cero IA en runtime.
+
+## Non-Goals
+- Opciones de tasa de cualquier tipo (swaptions, caps, floors) → v2.
+- Cualquier moneda distinta de USD; nada de TIIE ni FX → v3.
+- CVA/FVA/KVA/MVA, márgenes de CCP, SA-CCR. Precio limpio.
+- Basis swaps como producto negociable (solo como instrumento de calibración en dual-curva).
+- Pronóstico de tasas; prima de riesgo; expectativas de política.
+- Vol implícita como fuente de σ (no hay opciones en v1).
+- Agregación de portafolio, atribución, backtesting.
+- UI gráfica, servidor MCP (→ v2), notebooks como parte del paquete.
+- Calendarios distintos de SIFMA US.
+- Interpolación distinta de log-lineal en DF (monotone-convex → v2).
+
+## User Stories
+
+### US-1: Convenciones explícitas
+As a quant, I want day counts, calendarios, roll y fechas IMM como tipos explícitos, so that ningún cálculo dependa de un default silencioso.
+- AC-1.1: Given `DayCount.ACT_360`, When se calcula la fracción entre 2026-01-15 y 2026-04-15, Then el resultado es 90/360 exacto; `ACT_365F` da 90/365; `THIRTY_360` da 0.25.
+- AC-1.2: Given el calendario `SIFMA_US` de 2026, When se pide el día hábil siguiente a un feriado listado, Then coincide con la fecha publicada por SIFMA para ese feriado. `[manual-check]` para la lista fuente; automatizado contra un fixture.
+- AC-1.3: Given un año, When se piden las fechas IMM, Then son los terceros miércoles de mar/jun/sep/dic.
+- AC-1.4: Given una convención no soportada (p. ej. `"ACT/ACT ISMA"`), When se construye un instrumento con ella, Then se lanza `UnsupportedConventionError` con el nombre de la convención; nunca un default.
+
+### US-2: Datos de mercado con procedencia
+As a user, I want cargar SOFR, promedios, índice, EFFR, Treasuries y settlements SR1/SR3 desde fuentes gratuitas o archivo, so that cada curva sepa de dónde salió cada input.
+- AC-2.1: Given `fred` como proveedor, When se piden `SOFR`, `SOFR30DAYAVG`, `SOFR90DAYAVG`, `SOFRINDEX`, `EFFR`, `DGS2`, Then el `MarketSnapshot` contiene cada serie con `Provenance(source, series_id, retrieved_at)`.
+- AC-2.2: Given un CSV de settlements SR1/SR3 (formato CME público o fixture), When se carga, Then cada contrato queda con `contract_month`, `settlement_price`, `settlement_date` y procedencia `file`.
+- AC-2.3: Given una fecha hábil sin fixing SOFR en el snapshot, When se construye una curva que la necesita, Then se lanza `MissingFixingError` nombrando la fecha; nunca se interpola un fixing.
+- AC-2.4: Given un día no hábil dentro de un periodo de composición, When se compone SOFR, Then se repite la última tasa publicada (regla CME/NY Fed) y la evidencia registra cuántos días se repitieron.
+- AC-2.5: Given `import rates_engine`, When se importa, Then no se toca la red ni se instalan filtros de warnings (test de side effects).
+
+### US-3: Bootstrap de la curva de descuento SOFR
+As a quant, I want construir la curva de descuento OIS-SOFR desde fixings, futuros SR1/SR3 (ajustados por convexidad) y swaps OIS par, so that pueda descontar cualquier flujo colateralizado a la tasa de colateral.
+- AC-3.1: Given un conjunto de instrumentos {stub SOFR realizado, N futuros SR3 ajustados, M swaps OIS par}, When se hace `bootstrap_discount_curve`, Then cada instrumento de entrada re-precia a residuo < 0.01 bp (roundtrip).
+- AC-3.2: Given la curva resultante, When se evalúa `df(t)` en cualquier t, Then es positiva y no creciente en t; si los inputs implican lo contrario, se lanza `CurveArbitrageError` nombrando el tramo.
+- AC-3.3: Given la misma entrada, When se hace bootstrap dos veces, Then los DFs son bit-a-bit idénticos (idempotencia y determinismo).
+- AC-3.4: Given un instrumento cuyo residuo supera la tolerancia configurada, When termina el bootstrap, Then no se descarta silenciosamente: aparece en `evidence.dropped_instruments` con la razón, o el bootstrap se rehúsa según `strict=True`.
+- AC-3.5: Given la evidencia del bootstrap, When se inspecciona, Then contiene: instrumentos usados con procedencia, residuos por instrumento en bp, nodos, método de interpolación (`log_linear_df`), modelo y σ de convexidad aplicados a los futuros.
+
+### US-4: Cuatro vistas de la curva y conversiones
+As a CFA-level user, I want obtener la curva de descuento, la curva cero (spot), la curva par y la curva forward, y convertir entre ellas, so that pueda razonar con las relaciones de no-arbitraje del temario (L1 FI Valuation, L2 Term Structure).
+- AC-4.1: Given una `DiscountCurve`, When se pide `zero_curve(compounding="continuous"|"annual"|"simple", day_count)`, Then $z(t) = -\ln P(0,t)/t$ (continuo) y las otras convenciones son consistentes con ella a 1e-12.
+- AC-4.2: Given la curva cero, When se pide el forward $f(t_1,t_2)$, Then cumple $(1+s_{t_2})^{t_2} = (1+s_{t_1})^{t_1}(1+f)^{t_2-t_1}$ (forma del wiki, [[CFA Fixed Income — Valuation]]) a 1e-12.
+- AC-4.3: Given la curva de descuento, When se pide `par_curve(tenors, frequency, day_count)`, Then para cada tenor la tasa par es la que hace $PV = 0$ de un OIS/IRS con esa frecuencia; verificado creando el swap y valuándolo con `pv()`.
+- AC-4.4: Given una curva par sintética (p. ej. plana 4%), When se hace bootstrap → cero → par, Then se recupera la curva par original a 1e-8 (roundtrip par→cero→par).
+- AC-4.5: Given las cuatro vistas, When se exportan, Then el payload incluye para cada una: convención de composición, day count, y nodos; nunca una tasa sin su convención.
+
+### US-5: Futuros SOFR y ajuste de convexidad bajo descuento a tasa de fondeo
+As a quant, I want valuar SR1 y SR3, calcular su tasa forward implícita y el ajuste futuros-vs-forward, so that pueda usar futuros como instrumentos de curva sin sesgo.
+- AC-5.1: Given fixings SOFR de un mes calendario ya cerrado, When se calcula el settlement SR1, Then es $100 - \bar{r}$ con media aritmética ACT/360 y coincide con el settlement final publicado por CME a < 0.1 bp (fixture de ≥ 6 contratos expirados).
+- AC-5.2: Given fixings entre dos terceros miércoles, When se calcula el settlement SR3, Then es $100 - R$ con $R$ compuesto ACT/360 y coincide con CME a < 0.1 bp (fixture de ≥ 6 contratos).
+- AC-5.3: Given un futuro SR3 con precio $P$, σ y modelo `ho_lee`, When se pide el ajuste, Then $\text{adj} = \tfrac12\sigma^2 T_1 T_2$ y la tasa forward = $(100-P)/100 - \text{adj}$; contra la tabla Hull/Hendricks con σ = 1%: 0.62 bp a 1y, 2.25 bp a 2y (±0.01 bp).
+- AC-5.4: Given modelo `hull_white(kappa, sigma)`, When κ → 0, Then el ajuste converge al de `ho_lee` (±0.01 bp) — test de consistencia entre modelos.
+- AC-5.5: Given σ proveniente de `realized_sofr(window=252)`, When se calcula, Then la evidencia registra ventana, fechas y valor; si la ventana tiene < 60 observaciones se rehúsa con `InsufficientDataError`.
+- AC-5.6: Given la tira de futuros, When se reporta el ajuste por contrato, Then adj(< 1y) < 1 bp y adj crece con T (monotonía), consistente con Skov-Skovmand ("material solo > 2y").
+- AC-5.7: Given un futuro valuado, When se inspecciona la evidencia, Then indica que el descuento se hizo a la tasa de colateral (curva OIS-SOFR) y no a una curva de fondeo distinta — la razón de Fujii-Shimada-Takahashi / Piterbarg, con cita al artículo del wiki en el docstring.
+
+### US-6: Valuación de OIS, IRS y FRA
+As a user, I want PV, tasa par, anualidad y DV01 de OIS, IRS fijo-vs-Term SOFR 3M y FRA, so that pueda valuar y medir riesgo de los instrumentos lineales básicos.
+- AC-6.1: Given un OIS creado a su `par_rate`, When se calcula `pv`, Then $|PV| < 10^{-8}$ del nocional.
+- AC-6.2: Given un OIS payer y el mismo receiver, When se calcula `dv01` (bump paralelo 1 bp), Then signos opuestos y magnitud igual a 1e-10.
+- AC-6.3: Given un IRS fijo-vs-Term SOFR 3M con curva de tenor ≠ curva OIS, When se valúa, Then los flujos flotantes se proyectan en la curva de tenor y se descuentan en la OIS (Mercurio/Bianchetti); test: con tenor = OIS, el resultado coincide con el OIS equivalente.
+- AC-6.4: Given un FRA, When se calcula su tasa justa en multi-curva, Then difiere del forward simple de la curva de descuento cuando hay basis, y coincide cuando basis = 0 (test de las dos ramas).
+- AC-6.5: Given `dv01(mode="key_rate", tenors=[...])`, When se suma sobre tenores, Then iguala el DV01 paralelo a 1e-6 y la evidencia dice qué nodos movió cada bump.
+- AC-6.6: Given un swap de 2 años, When se valúa contra la curva CME 2025 reconstruida, Then el cupón IMM par es **3.3304% ± 0.5 bp** (whitepaper CME/Rogerson 2025, [[SOFR Futures — Pricing, Convexity and Hedging Swaps]]).
+
+### US-7: Bootstrap dual-curva
+As a quant, I want resolver simultáneamente curva OIS y curva de tenor con basis swaps, so that mida la diferencia entre bootstrap secuencial y simultáneo.
+- AC-7.1: Given OIS par, IRS par sobre tenor y basis swaps, When se resuelve con `mode="simultaneous"`, Then todos los instrumentos re-precian a < 0.01 bp.
+- AC-7.2: Given el mismo set, When se compara con `mode="sequential"`, Then el payload reporta la diferencia por tenor en bp; con basis ≡ 0 la diferencia es < 0.01 bp.
+- AC-7.3: Given la curva de tenor y la OIS, When se calcula el forward basis $BA_{fd}$ (Bianchetti eq. 20), Then reproduce el basis swap de entrada a < 0.1 bp.
+- AC-7.4: Given un sistema mal condicionado (más nodos que instrumentos), When se resuelve, Then se rehúsa con `UnderdeterminedCurveError` nombrando nodos sin instrumento.
+
+### US-8: Cobertura de un swap con tira de futuros
+As a risk manager, I want el número de contratos SR3 por periodo IMM para cubrir un swap y una tabla de P&L bajo shocks, so that vea el residuo de convexidad en dólares y en bp.
+- AC-8.1: Given un OIS 2y de USD 100M contra la tira SR3 (curva CME 2025 reconstruida), When se pide `strip_hedge`, Then el total es **779 ± 2 contratos** y la distribución por periodo suma ese total.
+- AC-8.2: Given la cobertura anterior, When se aplica shock −100 bp, Then el P&L neto (swap + tira) es **+22,292 USD ± 3%** y el DV01 del swap pasa de **19,480 a 19,921 ± 3%**.
+- AC-8.3: Given `shock_table` con shocks ±10/25/50/100 bp, When se genera, Then por fila reporta P&L swap, P&L tira, neto, DV01 post-shock y **neto/DV01 en bp** (la "convexidad implícita en P&L").
+- AC-8.4: Given una tira con un contrato faltante para un periodo del swap, When se pide la cobertura, Then se rehúsa con `IncompleteStripError` nombrando el periodo; nunca se extrapola un contrato.
+- AC-8.5: Given DV01 por contrato, When se usa SR3, Then es USD 25/bp; SR1 usa USD 41.67/bp **[asumo, spec CME no leída]** y la evidencia marca ese valor como `assumed` hasta confirmarlo.
+
+### US-9: Evidencia, refusals y superficie JSON
+As a coding agent or pipeline, I want cada resultado con `value` + `evidence`, errores nombrados y `--json` con `schema_version`, so that pueda actuar sin scrapear texto.
+- AC-9.1: Given cualquier resultado público (`BootstrapResult`, `PriceResult`, `HedgeResult`), When se serializa, Then contiene `schema_version`, y todo campo ausente es `null`, nunca key faltante.
+- AC-9.2: Given `rateng bootstrap --config c.yaml --json`, When se ejecuta, Then stdout es un solo documento JSON parseable y toda narración va a stderr.
+- AC-9.3: Given un comando que falla antes de producir resultado, When se ejecuta con `--json`, Then stdout contiene `{error, exit_code}` y el traceback va a stderr; exit code 1 datos inutilizables, 2 curva/mandato imposible.
+- AC-9.4: Given `src/rates_engine`, When se escanea, Then no existe ningún `except: pass` ni `except Exception:` sin re-raise o registro en evidencia (test `no_silent_swallow`).
+- AC-9.5: Given `docs/ERRORS.md`, When se compara con las excepciones definidas, Then cada excepción pública aparece con: qué significa, si es recuperable, y qué hacer.
+- AC-9.6: Given todos los nombres públicos, When se mide cobertura de docstrings, Then es 100% y cada parámetro numérico declara unidad (bp, USD/bp, años ACT/360).
+
+## Constraints
+- Python ≥ 3.9; dependencias core solo `numpy`, `pandas>=2.2`, `scipy`. Extras: `data` (pyarrow), `dev` (pytest, hypothesis, ruff, mypy con allowlist que solo encoge), `docs` (pdoc).
+- Layout `src/rates_engine/`, distribución `finport-ratesengine`, CLI `rateng`. Convenciones espejo de `alanvaa06/optimization_engine` v0.7.0: `AGENTS.md`, `llms.txt`, `CHANGELOG.md` (Keep a Changelog), `docs/ERRORS.md`, `docs/RESEARCH.md` (mapa a artículos del wiki), `py.typed`.
+- Determinismo: sin aleatoriedad en v1; mismo input → mismo output bit-a-bit.
+- Windows-compatible (Alan en win32): sin comandos POSIX-only en scripts; salida de consola ASCII.
+- Sin red en import ni en tests; los tests usan fixtures versionados (settlements CME y fixings FRED congelados con fecha).
+- Tolerancias de golden tests fijadas arriba; un cambio de tolerancia requiere entrada en CHANGELOG.
+- Construcción en `C:\Proyectos\rates_engine`, nunca en el vault.
+
+## Definition of Done
+- [ ] Todos los AC verdes (`pytest -q`), incluidos property tests con `hypothesis`.
+- [ ] `[manual-check]` AC-1.2 verificado una vez contra la lista SIFMA y anotado.
+- [ ] `ruff check` y `mypy` verdes (allowlist inicial permitida, ceiling en test).
+- [ ] `AGENTS.md`, `llms.txt`, `docs/ERRORS.md`, `docs/RESEARCH.md`, `CHANGELOG.md` presentes; README con install y quickstart cuyo output impreso está verificado por test.
+- [ ] CI: ruff, matriz 3.9–3.12, core-install job, CLI smoke con `--json`.
+- [ ] Tag `v0.1.0` y publicación a TestPyPI vía Trusted Publishing; PyPI solo con aprobación de Alan.
+
+## Preguntas abiertas (cerrar antes de plan-design)
+1) Curva de entrada para los golden tests CME: ¿reconstruimos desde los precios SR3 que el whitepaper lista, o congelamos un fixture propio y aceptamos tolerancia 3%?
+   a) Reconstruir desde el whitepaper — **Recommended**, es el test que valida contra un tercero
+   b) Fixture propio con tolerancia — más fácil, menos valor probatorio
+2) Fuente de OIS par: si ICE Swap Rate no es accesible gratis, ¿aceptamos Treasuries como proxy con warning en evidencia, o v1 bootstrapea solo desde futuros hasta 3y?
+   a) Solo futuros hasta 3y en v1, OIS par cuando haya fuente — **Recommended**, no contamina con swap spread
+   b) Proxy Treasury con warning
