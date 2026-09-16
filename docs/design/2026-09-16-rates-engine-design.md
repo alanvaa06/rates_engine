@@ -41,7 +41,7 @@ Lo que no se puede calcular honestamente **se rehúsa** (raise), nunca se rellen
 
 | Fase | Módulos | Definition of Done |
 |---|---|---|
-| **1 (este doc)** | `conventions`, `market`, `instruments` (OIS, IRS, SR1, SR3, FRA), `curves`, `convexity`, `pricing`, `hedging`, `diagnostics`, `reporting`, `cli` | Reproduce el whitepaper CME 2025 dentro de tolerancia (§5); settlement SR1/SR3 vs CME < 0.1 bp; bootstrap dual-curva secuencial vs simultáneo con diferencia reportada en bp; `rateng bootstrap/price/hedge --json` |
+| **1 (este doc)** | `conventions`, `market`, `instruments` (OIS, IRS, SR1, SR3, FRA), `curves`, `convexity`, `pricing`, `risk`, `hedging`, `diagnostics`, `reporting`, `cli` | Reproduce el whitepaper CME 2025 dentro de tolerancia (§5); settlement SR1/SR3 vs CME < 0.1 bp; bootstrap dual-curva secuencial vs simultáneo con diferencia reportada en bp; `rateng bootstrap/price/hedge --json` |
 | 2 | `swaptions` (Black lognormal y Bachelier normal en bps; SABR después) | Cubo expiry×tenor×strike con vol normal; paridad payer/receiver; test contra [[Term Structure Models for Swaps and Swaptions]] |
 | 3 | `fx` (CIP + basis cross-currency, Garman-Kohlhagen, estructuras CFA L3 Reading 19) | Requiere curva MXN (TIIE) — gap del vault, research previo obligatorio |
 | Opcional | `mcp_server` | Mismos payloads que `--json`; extra `[mcp]`, Python ≥ 3.10 |
@@ -91,7 +91,16 @@ Dataclasses inmutables con `cashflows(curve_set) -> list[Cashflow]`:
 
 ### 3.6 `pricing`
 - `pv(instrument, curve_set)`, `par_rate(swap, curve_set)`, `annuity(swap, curve_set)`.
-- `dv01(instrument, curve_set, bump_bp=1, mode="parallel"|"key_rate")` por bump-and-reprice; devuelve también qué nodos movió.
+- `dv01(instrument, curve_set, bump_bp=1)`: shift **paralelo** por bump-and-reprice. Las medidas de riesgo de segundo nivel viven en `risk` (§3.6bis), no aquí.
+
+### 3.6bis `risk` (añadido 2026-09-16, decisiones E y F)
+Un módulo aparte porque la atribución de riesgo tiene sus propias trampas de convención.
+
+- `key_rate_dv01(instrument, curve_set, key_tenors)`: bumps **tent** sobre nodos de la curva cero, construidos como partición de la unidad para que la suma de shocks sea exactamente un paralelo de 1 bp (por eso la suma de KR DV01 iguala el DV01 paralelo). Evidencia: `bump_basis="zero_curve_node"`, `bump_shape="tent"`, nodos tocados, interpolación, y la advertencia de que **el perfil key rate depende de la colocación de nodos** — dos curvas que precian idéntico dan perfiles distintos.
+- Dos bases, nombradas distinto y reconciliadas: `key_rate_dv01` (por nodo de curva, riesgo de curva) vs `bucketed_delta_by_instrument` del `HedgeResult` (por cotización de instrumento, riesgo de cobertura). Ambas suman el mismo paralelo; el payload reporta la diferencia por tramo sin declarar ganadora.
+- Convenciones de duración: `pvbp` (≡ `dv01`, con test de equivalencia), `money_duration` = DV01 × 10,000, `money_convexity` (definida aun con PV = 0), `effective_duration` y `effective_convexity` (normalizadas por PV, shift de curva, re-precio completo).
+- **Refusals:** `UndefinedDurationError` cuando |PV| ≈ 0 hace indefinida cualquier medida normalizada — el caso del swap a par, donde lo válido es DV01, `money_convexity` y el `shock_table`. `KeyTenorOutOfRangeError` en vez de extrapolar. `macaulay_duration`/`modified_duration` son stubs que lanzan `NotImplementedError` explicando que necesitan un rendimiento único y por tanto un `FixedRateBond` (v1.1); **nunca se sirve `effective_duration` bajo esos nombres**.
+- Reconciliación con §3.7: ½·`money_convexity`·Δy² debe predecir el P&L neto del `shock_table` dentro de 1% a ±10 bp y 10% a ±100 bp.
 
 ### 3.7 `hedging`
 - `strip_hedge(swap, futures_strip, curve_set) -> HedgeResult`: contratos por periodo IMM, DV01 del swap vs de la tira, ratio.
@@ -136,6 +145,8 @@ Filosofía de optengine: `test_analytical_rigor`, `test_no_silent_swallow`, `tes
 - DFs decrecientes y positivos; forwards positivos salvo que los inputs los impliquen (entonces refusal).
 - Swap creado a `par_rate` tiene `pv == 0` ± 1e-8.
 - `dv01` de receiver > 0 y de payer < 0, misma magnitud.
+- Los shocks tent suman exactamente un paralelo de 1 bp; por tanto Σ KR DV01 = DV01 paralelo.
+- Toda medida de duración normalizada se rehúsa cuando |PV| ≈ 0; la monetaria equivalente sí responde.
 - Roundtrip: bootstrap → re-precio de los instrumentos de entrada → residuo 0.
 - Idempotencia: `price()` dos veces = mismo resultado (optengine tuvo el bug de Black-Litterman no idempotente; se prueba desde el día 1).
 
@@ -181,6 +192,8 @@ Filosofía de optengine: `test_analytical_rigor`, `test_no_silent_swallow`, `tes
 | 6 | Par OIS largo plazo | **Proxy Treasury con warning**, opt-in explícito y prohibido en goldens |
 | 7 | Dual-curva en fase 1 | **Sí, con inputs sintéticos**; proveedor real en v1.1 |
 | 8 | Baseline de Python | **≥ 3.11** |
+| 9 | Key rate | **US propia** (PRD-001 US-10): bumps tent sobre nodos de curva cero, evidencia con base/forma/dependencia de interpolación, reconciliado con el delta por instrumento del hedge |
+| 10 | Convenciones de duración | **Solo las que el bump sostiene** (pvbp, money duration/convexity, effective duration/convexity, con refusals). Macaulay/modified y `FixedRateBond` → v1.1 |
 
 ---
 

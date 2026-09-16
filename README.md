@@ -30,7 +30,8 @@ author's private knowledge base (Obsidian vault) and do not resolve here.
 
 1. **v0.1** (PRD-001): bootstrap OIS-SOFR from fixings, SR1/SR3 futures and an opt-in
    Treasury par proxy for the long end;
-   four curve views; Ho-Lee / Hull-White convexity; OIS, IRS, FRA pricing; DV01;
+   four curve views; Ho-Lee / Hull-White convexity; OIS, IRS, FRA pricing; DV01, key rate DV01
+   and effective duration/convexity;
    strip hedge with shock table. Golden test: CME/Rogerson 2025 whitepaper
    (2y OIS 100M -> 779 SR3 contracts, +22,292 USD at -100 bp).
 2. **v0.2** (PRD-002): Black / Bachelier swaptions, caps/floors, SABR vol cube,

@@ -13,6 +13,7 @@ Publicar `finport-ratesengine` v0.1: librería Python determinista que construye
 - Fuentes de par OIS licenciadas (ICE Swap Rate, CME Term SOFR comercial): fuera de v1 por costo/redistribución. El largo plazo usa proxy Treasury opt-in (decisión B2).
 - Pronóstico de tasas; prima de riesgo; expectativas de política.
 - Vol implícita como fuente de σ (no hay opciones en v1).
+- Macaulay y modified duration, y con ellas `FixedRateBond`: requieren un rendimiento único y por tanto un instrumento de precio ≠ 0, que v1 no tiene → v1.1. v1 sí cubre *effective* duration/convexity y las medidas monetarias (US-10).
 - Agregación de portafolio, atribución, backtesting.
 - UI gráfica, servidor MCP (→ v2), notebooks como parte del paquete.
 - Calendarios distintos de SIFMA US.
@@ -71,7 +72,7 @@ As a user, I want PV, tasa par, anualidad y DV01 de OIS, IRS fijo-vs-Term SOFR 3
 - AC-6.2: Given un OIS payer y el mismo receiver, When se calcula `dv01` (bump paralelo 1 bp), Then signos opuestos y magnitud igual a 1e-10.
 - AC-6.3: Given un IRS fijo-vs-Term SOFR 3M con curva de tenor ≠ curva OIS, When se valúa, Then los flujos flotantes se proyectan en la curva de tenor y se descuentan en la OIS (Mercurio/Bianchetti); test: con tenor = OIS, el resultado coincide con el OIS equivalente. Curva de tenor de origen sintético en v1 (ver US-7).
 - AC-6.4: Given un FRA, When se calcula su tasa justa en multi-curva, Then difiere del forward simple de la curva de descuento cuando hay basis, y coincide cuando basis = 0 (test de las dos ramas).
-- AC-6.5: Given `dv01(mode="key_rate", tenors=[...])`, When se suma sobre tenores, Then iguala el DV01 paralelo a 1e-6 y la evidencia dice qué nodos movió cada bump.
+- AC-6.5: Given `dv01(instrument, curve_set, bump_bp=1)`, When se calcula, Then es un shift **paralelo** con re-precio completo y la evidencia declara `bump_bp` y unidad (USD/bp). Key rate, duración y convexidad viven en **US-10**, no aquí.
 - AC-6.6: Given un swap de 2 años, When se valúa contra la curva CME 2025 reconstruida desde los precios SR3 que publica el whitepaper, Then el cupón IMM par es **3.3304% ± 0.5 bp** (whitepaper CME/Rogerson 2025, [[SOFR Futures — Pricing, Convexity and Hedging Swaps]]).
 
 ### US-7: Bootstrap dual-curva (solver validado contra curvas sintéticas)
@@ -104,6 +105,28 @@ As a coding agent or pipeline, I want cada resultado con `value` + `evidence`, e
 - AC-9.7: Given un `HedgeResult` producido a partir de un `PriceResult` que a su vez usó un `BootstrapResult`, When se inspecciona `evidence`, Then la evidencia del hedge contiene la del precio y la del bootstrap como `evidence.sources: list[Evidence]` (encadenamiento, no aplanado ni pérdida), y `to_dict()` serializa la cadena completa de forma recursiva. **Decisión de arquitectura: `Evidence` es un tipo único y componible desde el primer commit**; retrofitearlo en fase de hedging es caro.
 - AC-9.8: Given cualquier `Evidence` en la cadena, When contiene un nodo o serie con `data_quality != "observed"`, Then esa marca se propaga hacia arriba: un `HedgeResult` construido sobre curva con proxy declara el proxy en su nivel superior. La degradación no se pierde al componer.
 
+### US-10: Medidas de riesgo — key rate, duración y convexidad
+As a risk manager and CFA-level user, I want KR DV01 con base y forma de bump declaradas, más las convenciones de duración que la curva permite calcular honestamente, so that pueda atribuir riesgo por tramo y usar el vocabulario del temario sin inventar medidas indefinidas.
+
+**Key rate DV01 (base: nodo de curva cero, bumps tent)**
+- AC-10.1: Given `key_rate_dv01(instrument, curve_set, key_tenors=[...])`, When se construyen los shocks, Then son **triangulares (tent) sobre la curva cero**, con vértice en cada key tenor y soporte hasta los key tenors vecinos, de modo que **la suma de los shocks es exactamente un shift paralelo de 1 bp** (partición de la unidad). El test verifica los shocks mismos, no solo el resultado.
+- AC-10.2: Given esos bumps, When se suman los KR DV01, Then iguala el DV01 paralelo de AC-6.5 a 1e-6. (Este es el test del viejo AC-6.5, ahora con la condición que lo hace cierto.)
+- AC-10.3: Given el resultado, When se inspecciona la evidencia, Then declara `bump_basis="zero_curve_node"`, `bump_shape="tent"`, los key tenors, los nodos de la curva tocados por cada bump y el método de interpolación, **junto con la advertencia de que el perfil key rate depende de la colocación de nodos y de la interpolación**: dos curvas que precian idéntico pueden dar perfiles distintos. La advertencia es un campo, no un comentario en el docstring.
+- AC-10.4: Given un key tenor fuera del rango de la curva, When se pide, Then se rehúsa con `KeyTenorOutOfRangeError` nombrando el tenor y el rango disponible; nunca se extrapola.
+- AC-10.5: Given `key_rate_duration` (KR DV01 normalizado por precio), When |PV| < 1e-8 × nocional (swap a par), Then se rehúsa con `UndefinedDurationError` explicando que con PV = 0 la medida normalizada no existe y que la medida correcta es `key_rate_dv01`. Given un instrumento con PV ≠ 0, Then devuelve KR DV01 / (PV × 1bp) con unidad declarada.
+
+**Reconciliación con la vista por instrumento del hedge**
+- AC-10.6: Given el `HedgeResult` de US-8, When se inspecciona, Then la exposición por periodo IMM se expone explícitamente como `bucketed_delta_by_instrument` con `bump_basis="instrument_quote"` en su evidencia — es un delta bucketeado por instrumento, no un key rate por nodo, y el payload lo nombra así.
+- AC-10.7: Given las dos vistas sobre el mismo swap y la misma curva, When se comparan, Then ambas suman el mismo DV01 paralelo a 1e-6 y el payload reporta la diferencia por tramo en USD/bp **sin declarar que una es la correcta**: responden preguntas distintas (riesgo de curva vs. riesgo de cobertura).
+
+**Convenciones de duración y convexidad**
+- AC-10.8: Given `pvbp(instrument, curve_set)` y el `dv01` paralelo de AC-6.5, When se comparan, Then son el mismo número (test de equivalencia, no dos implementaciones). `money_duration` = dP/dy = DV01 × 10,000, y cada uno declara su unidad: USD por unidad de rendimiento vs USD/bp. Nunca se devuelve un número de duración sin unidad.
+- AC-10.9: Given `money_convexity(instrument, curve_set, bump_bp)`, When se calcula, Then es (PV₊ + PV₋ − 2·PV₀)/Δy² por re-precio completo con shift paralelo, en **USD por unidad de rendimiento al cuadrado**, y está definido también cuando PV₀ = 0 (por eso existe además de la versión normalizada).
+- AC-10.10: Given la posición cubierta de US-8 (swap + tira, DV01 ≈ 0), When se predice el P&L con ½·`money_convexity`·Δy², Then coincide con el re-precio completo del `shock_table` dentro de **1% a ±10 bp y 10% a ±100 bp**. Es la reconciliación entre la convexidad medida y la observada; una discrepancia mayor significa que uno de los dos está mal.
+- AC-10.11: Given `effective_duration(instrument, curve_set, bump_bp)`, When se calcula, Then es (PV₋ − PV₊)/(2·PV₀·Δy) con shift paralelo de la **curva** y re-precio completo, y la evidencia declara `bump_bp` y que es *effective* — derivada de la curva, no de un rendimiento único. `effective_convexity` = (PV₊ + PV₋ − 2·PV₀)/(PV₀·Δy²) bajo la misma definición.
+- AC-10.12: Given `effective_duration` o `effective_convexity` sobre un instrumento con |PV| < 1e-8 × nocional, When se calculan, Then se rehúsan con `UndefinedDurationError`; para un swap a par las vistas válidas son `dv01`, `money_convexity` y el `shock_table` de AC-8.3. Test: el mismo OIS a par rehúsa la medida normalizada y devuelve la monetaria.
+- AC-10.13: Given `macaulay_duration` o `modified_duration`, When se invocan, Then existen como **stubs explícitos** que lanzan `NotImplementedError` explicando que requieren un rendimiento único y por tanto un instrumento de precio ≠ 0 (`FixedRateBond`, v1.1). Existen para que un agente que las busque reciba la razón y no un `AttributeError`. **Nunca se aproxima una con `effective_duration` bajo otro nombre.**
+
 ## Constraints
 - **Python ≥ 3.11** (decisión D1: 3.9 está EOL desde oct-2025 y ata a numpy 1.x). Dependencias core solo `numpy>=2.0`, `pandas>=2.2`, `scipy`. Extras: `data` (pyarrow), `dev` (pytest, hypothesis, ruff, mypy con allowlist que solo encoge), `docs` (pdoc).
 - Layout `src/rates_engine/`, distribución `finport-ratesengine`, CLI `rateng`. Convenciones espejo de `alanvaa06/optimization_engine` v0.7.0: `AGENTS.md`, `llms.txt`, `CHANGELOG.md` (Keep a Changelog), `docs/ERRORS.md`, `docs/RESEARCH.md` (mapa a artículos del wiki), `py.typed`.
@@ -119,7 +142,7 @@ No vinculante; entrada para `plan-design`. El objetivo es poner el golden test C
 1. `conventions` (US-1) → `market` solo con proveedor `file` (US-2 parcial) → settlement SR1/SR3 contra fixture CME (AC-5.1, AC-5.2).
 2. Ajuste Ho-Lee (AC-5.3) → `bootstrap_discount_curve` solo desde futuros (US-3 sin proxy) → `pv`/`dv01` de OIS (AC-6.1, AC-6.2).
 3. `strip_hedge` + `shock_table` → goldens 779 / +22,292 (US-8) → CLI `--json` (US-9 parcial).
-4. Después: proveedor `fred`, proxy Treasury (AC-3.6–3.8), vistas par/cero/forward (US-4), key-rate DV01 (AC-6.5), dual-curva sintética (US-7).
+4. Después: proveedor `fred`, proxy Treasury (AC-3.6–3.8), vistas par/cero/forward (US-4), medidas de riesgo (US-10), dual-curva sintética (US-7).
 
 ## Definition of Done
 - [ ] Todos los AC verdes (`pytest -q`), incluidos property tests con `hypothesis`.
@@ -137,5 +160,7 @@ No vinculante; entrada para `plan-design`. El objetivo es poner el golden test C
 | B | Fuente de par OIS para el largo plazo | **Proxy Treasury `DGS*` con warning** | AC-2.6, AC-3.6, AC-3.7, AC-3.8; Non-Goal de fuentes licenciadas |
 | C | Alcance de US-7 (dual-curva) | **Queda en v1, solo con inputs sintéticos** | US-7 reencabezada; AC-7.5; AC-6.3 anotado |
 | D | Baseline de Python | **≥ 3.11** | Constraints; matriz de CI 3.11–3.13 |
+| E | Alcance del key rate | **US propia con base decidida**: bumps tent sobre nodos de curva cero, evidencia que declara base/forma/dependencia de interpolación, refusal de la medida normalizada a PV = 0, y reconciliación con el delta por instrumento del hedge | US-10 (AC-10.1–10.7); AC-6.5 reducido al DV01 paralelo |
+| F | Convenciones de duración | **Solo lo que el bump sostiene**: `pvbp`, `money_duration`, `money_convexity`, `effective_duration`, `effective_convexity`, con refusals. Macaulay/modified y `FixedRateBond` → v1.1 | US-10 (AC-10.8–10.13); Non-Goals |
 
 Riesgo aceptado en B: el proxy Treasury incorpora swap spread (negativo y variable, [[Swap Spreads — Credit, Duration Demand and Limits to Arbitrage]]) en todo nodo largo. Mitigación contratada: opt-in explícito, marca `data_quality="proxy"` propagada hacia arriba (AC-9.8), y prohibición de usarlo en goldens (AC-3.8).
