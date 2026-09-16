@@ -20,6 +20,7 @@ end; dual-curve solver validated on synthetic inputs; Python >= 3.11).
 | --- | --- |
 | Architecture (phase 1) | `docs/design/2026-09-16-rates-engine-design.md` |
 | PRD-001 v1: curves, futures, swaps, hedging | `docs/forge/prd/001-v1-curves-futures-swaps.md` |
+| Plan-design v1 (phases, interfaces, AC map) | `docs/forge/plan/001-v1-plan-design.md` |
 | PRD-002 v2: swaptions, caps/floors, vol cube, curve models, MCP | `docs/forge/prd/002-v2-swaptions-vol-mcp.md` |
 | PRD-003 v3: MXN curve, FX forwards, FX options, hedge comparator | `docs/forge/prd/003-v3-fx-mxn-hedging.md` |
 
