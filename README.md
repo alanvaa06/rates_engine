@@ -12,7 +12,9 @@ Conventions mirror [`alanvaa06/optimization_engine`](https://github.com/alanvaa0
 
 ## Status
 
-Design and PRDs only. No code yet.
+Design and PRDs only. No code yet. PRD-001 open questions closed 2026-09-16
+(golden curve reconstructed from the CME whitepaper; Treasury par proxy for the long
+end; dual-curve solver validated on synthetic inputs; Python >= 3.11).
 
 | Document | Path |
 | --- | --- |
@@ -26,7 +28,8 @@ author's private knowledge base (Obsidian vault) and do not resolve here.
 
 ## Roadmap
 
-1. **v0.1** (PRD-001): bootstrap OIS-SOFR from fixings, SR1/SR3 futures and OIS par;
+1. **v0.1** (PRD-001): bootstrap OIS-SOFR from fixings, SR1/SR3 futures and an opt-in
+   Treasury par proxy for the long end;
    four curve views; Ho-Lee / Hull-White convexity; OIS, IRS, FRA pricing; DV01;
    strip hedge with shock table. Golden test: CME/Rogerson 2025 whitepaper
    (2y OIS 100M -> 779 SR3 contracts, +22,292 USD at -100 bp).

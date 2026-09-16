@@ -73,14 +73,14 @@ Dataclasses inmutables con `cashflows(curve_set) -> list[Cashflow]`:
 - `SOFRFuture1M(contract_month)`: settlement = 100 − media aritmética del mes calendario (eq. 14 del wiki).
 - `SOFRFuture3M(imm_start, imm_end)`: settlement = 100 − compuesto ACT/360 entre terceros miércoles (eq. 18).
 - `FRA(start, end, rate)`: valuada en multi-curva; **la tasa FRA no es el forward simple de la curva de descuento** (Bianchetti / Mercurio en [[Multi-Curve Framework and Collateral Discounting]]).
-- DV01 por contrato: SR3 = USD 25/bp (confirmado); SR1 = USD 41.67/bp **[asumo — spec CME no leída, marcado en el wiki]**.
+- DV01 por contrato, **derivado del nocional y el plazo, no de una tabla**: SR3 = 1,000,000 × 0.25 × 0.0001 = USD 25.00/bp; SR1 = 5,000,000 × (30/360) × 0.0001 = USD 41.67/bp. Lo **[asumo]** es el nocional SR1 = USD 5,000,000 (spec CME no leída); la evidencia lo marca `notional_source="assumed"` hasta confirmarlo (PRD-001 AC-8.5).
 
 ### 3.4 `curves`
 - `DiscountCurve(nodes, dfs, interpolation)`; interpolaciones: `log_linear_df` (default), `monotone_convex` (v2). Exponer `df(t)`, `forward(t1, t2, day_count)`, `zero(t)`.
 - **Cuatro vistas y conversiones (añadido 2026-09-16 a petición de Alan):** `zero_curve(compounding, day_count)`, `par_curve(tenors, frequency, day_count)`, `forward_curve(tenor)`; relaciones de no-arbitraje del temario ([[CFA Fixed Income — Valuation]], [[CFA L2 Fixed Income — Term Structure and Arbitrage-Free Valuation]]) como tests de roundtrip par→cero→par. Ninguna tasa se exporta sin su convención de composición.
 - **Descuento a la tasa de fondeo/colateral:** los futuros y swaps colateralizados se descuentan en la curva OIS-SOFR porque el colateral se remunera a SOFR (Fujii-Shimada-Takahashi, Piterbarg en [[Multi-Curve Framework and Collateral Discounting]]); la evidencia lo declara. Instrumentos de bootstrap: stub de SOFR realizado → futuros SR1/SR3 ajustados por convexidad → swaps OIS par (PRD-001 US-3, US-5).
 - `bootstrap_ois(snapshot, instruments) -> BootstrapResult` — secuencial, un nodo por instrumento.
-- `solve_dual_curve(ois_instruments, tenor_instruments, basis_instruments, mode="simultaneous"|"sequential") -> DualCurveResult` — `scipy.optimize.least_squares` sobre todos los nodos; residuales por instrumento; `basis_adjustment_bp` (Bianchetti eq. 20) y `sequential_vs_simultaneous_bp` por tenor.
+- `solve_dual_curve(...)` **con inputs sintéticos en fase 1** (decisión C1: no hay fuente gratuita de par Term SOFR ni de basis swaps; se valida el solver, no el mercado — PRD-001 US-7). Firma: `solve_dual_curve(ois_instruments, tenor_instruments, basis_instruments, mode="simultaneous"|"sequential") -> DualCurveResult` — `scipy.optimize.least_squares` sobre todos los nodos; residuales por instrumento; `basis_adjustment_bp` (Bianchetti eq. 20) y `sequential_vs_simultaneous_bp` por tenor.
 - Evidencia obligatoria: residuos, condición del jacobiano, nodos, instrumentos descartados.
 
 ### 3.5 `convexity`
@@ -110,7 +110,7 @@ Dataclasses inmutables con `cashflows(curve_set) -> list[Cashflow]`:
 |---|---|---|
 | Fixings SOFR, promedios, índice | FRED | Diario, sin API key |
 | Settlements SR1/SR3 | CME público (retraso) / Nasdaq Data Link `CHRIS/CME_SR3` si sigue | Histórico limitado; el wiki lo flaggea |
-| Par OIS SOFR | ICE Swap Rate | Acceso a confirmar; si no, **proxy Treasury `DGS*` con warning** — el wiki advierte que el swap spread domina |
+| Par OIS SOFR (largo plazo) | **Proxy Treasury `DGS*`** (decisión B2) | ICE Swap Rate y CME Term SOFR comercial quedan fuera por licencia. El proxy es **opt-in explícito** (`long_end_source="treasury_proxy"`), marca los nodos `data_quality="proxy"` y está prohibido en golden tests — el swap spread domina |
 | Fechas FOMC | federalreserve.gov | Para experimento Heitfield-Park (§7) |
 | Calendario SIFMA | Codificado | Mantener como dato, no como código |
 
@@ -152,10 +152,10 @@ Filosofía de optengine: `test_analytical_rigor`, `test_no_silent_swallow`, `tes
 
 ## 6. Repo, empaquetado, CI (espejo de optengine)
 
-- `src/` layout, `pyproject.toml` con `dependencies = [numpy, pandas>=2.2, scipy]` **solo**; extras `data` (yfinance no aplica; `pyarrow`), `mcp`, `dev` (pytest, hypothesis, ruff, mypy con allowlist que solo puede encogerse), `docs` (pdoc).
+- `src/` layout, `pyproject.toml` con `requires-python = ">=3.11"` y `dependencies = [numpy>=2.0, pandas>=2.2, scipy]` **solo**; extras `data` (yfinance no aplica; `pyarrow`), `mcp`, `dev` (pytest, hypothesis, ruff, mypy con allowlist que solo puede encogerse), `docs` (pdoc).
 - `AGENTS.md` + `llms.txt` desde el commit 1: "las cosas que muerden" (e.g., "`SOFRFuture3M` toma fechas IMM, no mes de contrato"; "DV01 es por bp, no por %").
 - `docs/ERRORS.md` (contrato de refusals), `docs/RESEARCH.md` (mapa a los artículos del wiki con las fórmulas y su estado leído/abstract), `CHANGELOG.md` Keep-a-Changelog, `docs/RELEASING.md` Trusted Publishing.
-- CI: ruff, matriz 3.9–3.12, core-install job (ninguna extra se cuela), CLI smoke, docs `--strict`.
+- CI: ruff, matriz **3.11–3.13** (decisión D1; 3.9 está EOL desde oct-2025 y ata a numpy 1.x), core-install job (ninguna extra se cuela), CLI smoke, docs `--strict`.
 - **Build con forge-master en el repo del producto, nunca en el vault** (CLAUDE.md del vault lo prohíbe).
 
 ---
@@ -177,15 +177,21 @@ Filosofía de optengine: `test_analytical_rigor`, `test_no_silent_swallow`, `tes
 | 2 | Repo | Repo nuevo **`alanvaa06/rates_engine`**; comparte convenciones con optengine, no código |
 | 3 | Interpolación default | **Log-lineal en DF**; monotone-convex como opción |
 | 4 | MCP | **Fase 2**, extra `[mcp]`; fase 1 solo `--json` |
+| 5 | Curva de entrada de los goldens CME | **Reconstruir desde los precios SR3 del whitepaper**; si no entra en tolerancia se marca `xfail` documentado, nunca se afloja la tolerancia |
+| 6 | Par OIS largo plazo | **Proxy Treasury con warning**, opt-in explícito y prohibido en goldens |
+| 7 | Dual-curva en fase 1 | **Sí, con inputs sintéticos**; proveedor real en v1.1 |
+| 8 | Baseline de Python | **≥ 3.11** |
 
 ---
 
 ## 9. Riesgos y gaps conocidos
 
 - **Inputs del whitepaper CME:** el wiki reporta outputs (779, +22,292, DV01) pero la curva exacta de entrada del documento se reconstruye; por eso la tolerancia de 3%, no exactitud.
-- **OIS par gratis:** incierto. Proxy Treasury contamina con swap spread — [[Swap Spreads — Credit, Duration Demand and Limits to Arbitrage]] explica por qué hoy es negativo y variable.
+- **OIS par gratis:** resuelto por decisión, no por dato. El proxy Treasury contamina con swap spread — [[Swap Spreads — Credit, Duration Demand and Limits to Arbitrage]] explica por qué hoy es negativo y variable. **Riesgo aceptado**; contenido con opt-in, marca `data_quality="proxy"` propagada al resultado compuesto, y exclusión de los goldens.
+- **Composición de la evidencia:** `Evidence` debe ser un tipo único y componible (`evidence.sources: list[Evidence]`) desde el primer commit; encadenar bootstrap → price → hedge retrofiteando es caro (PRD-001 AC-9.7/9.8).
+- **Determinismo entre versiones:** bit-exactitud solo dentro de un mismo intérprete; entre versiones de la matriz se exige 1e-14 relativo (PRD-001 AC-3.3).
 - **Fórmula Hull-White de convexidad:** transcrita vía Skov-Skovmand, no leída en Henrard 2018.
-- **SR1 tick:** asumido.
+- **SR1 nocional:** asumido USD 5,000,000; el DV01 de 41.67/bp se deriva de ahí.
 - **Calendarios:** SIFMA codificado a mano en fase 1; riesgo de holiday mal cargado → test contra settlements reales lo detecta.
 - **MX/TIIE:** nada en el vault; fase 3 requiere research (transición TIIE 28 → TIIE de Fondeo, convenciones MXN).
 
