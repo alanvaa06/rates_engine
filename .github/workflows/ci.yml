@@ -1,0 +1,237 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# A new push supersedes an in-flight run on the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # Ruff needs none of the project's dependencies, so this reports style
+      # failures in seconds rather than after a full scientific-stack install.
+      - name: Install ruff
+        run: pip install "ruff>=0.5"
+      - name: Check
+        run: ruff check src tests
+
+  typecheck:
+    name: Type check (mypy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      # mypy cannot work from the source tree alone: most of what it has to
+      # say here is about numpy and pandas types, which it knows only from the
+      # installed packages and their stubs.
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,config]"
+      - name: Check
+        run: mypy src/rates_engine
+      # The allowlist ceiling is zero. This package is new and has no
+      # inherited type debt, so the number worth watching is whether that is
+      # still true. Reported even on failure, because a red check is exactly
+      # when somebody wants to know.
+      - name: Report the deferred-module allowlist
+        if: always()
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import tomllib
+          from pathlib import Path
+
+          config = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+          modules = [
+              module
+              for override in config["tool"]["mypy"].get("overrides", [])
+              if override.get("ignore_errors")
+              for module in override["module"]
+          ]
+          print("### mypy allowlist")
+          print()
+          print(f"**{len(modules)}** modules have their type errors deferred. The ceiling is 0.")
+          for module in modules:
+              print(f"- `{module}`")
+          PY
+
+  test:
+    name: Tests (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      # Written out rather than generated from a cross product: an include
+      # entry whose keys match a generated cell is merged into it rather than
+      # added alongside, and one Windows cell is deliberate — see below.
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python-version: "3.11"
+            label: "3.11"
+          - os: ubuntu-latest
+            python-version: "3.12"
+            label: "3.12"
+          - os: ubuntu-latest
+            python-version: "3.13"
+            label: "3.13"
+          # One Windows cell, not three. What differs on Windows here is the
+          # filesystem and the console encoding, not the language, and this
+          # package is developed on win32 — so the cell is load-bearing rather
+          # than decorative. It runs on the version used for development.
+          - os: windows-latest
+            python-version: "3.12"
+            label: "3.12 / Windows"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,config]"
+      - name: Test
+        # Fully offline: the FRED provider is stubbed and every number comes
+        # from a versioned fixture.
+        run: pytest -q --durations=10
+
+  core:
+    name: Core install (no extras)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      # Deliberately no extras. A module-level import of pyyaml or pyarrow
+      # added anywhere on a load-time path would pass every other job here and
+      # fail only for people who installed without extras.
+      - name: Install core only
+        run: |
+          python -m pip install --upgrade pip
+          pip install .
+      - name: No optional dependency leaked into the core
+        run: |
+          python - <<'PY'
+          import importlib, sys
+          leaked = []
+          for module in ("yaml", "pyarrow", "matplotlib", "statsmodels"):
+              try:
+                  importlib.import_module(module)
+              except ImportError:
+                  continue
+              leaked.append(module)
+          if leaked:
+              sys.exit(f"optional dependencies present in a core install: {leaked}")
+          print("core install is clean")
+          PY
+      - name: The core bootstraps, prices and hedges
+        run: |
+          python - <<'PY'
+          from datetime import date, timedelta
+
+          from rates_engine import (
+              CurveSet, FuturesNode, OISSwap, RealizedStubNode,
+              bootstrap_discount_curve, dv01, imm_date, next_imm_on_or_after, par_rate,
+          )
+          from rates_engine.hedging import shock_table, strip_hedge
+
+          as_of, start = date(2026, 1, 15), imm_date(2026, 3)
+          items = [RealizedStubNode(end=start,
+                                    accrual_factor=1 + 0.04 * ((start - as_of).days / 360))]
+          period = start
+          for index in range(9):
+              nxt = next_imm_on_or_after(period + timedelta(days=1))
+              items.append(FuturesNode(start=period, end=nxt, forward_rate=0.04,
+                                       label=f"SR3-{index + 1}"))
+              period = nxt
+          items = tuple(items)
+
+          curve = bootstrap_discount_curve(as_of, items)
+          assert max(abs(r) for r in curve.residuals_bp.values()) < 0.01
+          curve_set = CurveSet(curve.curve)
+          swap = OISSwap(effective=start, maturity=period, fixed_rate=0.04,
+                         notional=100_000_000.0)
+          swap = OISSwap(effective=start, maturity=period,
+                         fixed_rate=par_rate(swap, curve_set).value, notional=100_000_000.0)
+          assert dv01(swap, curve_set).value < 0
+          hedge = strip_hedge(swap, items, as_of=as_of)
+          assert abs(hedge.hedge_ratio + 1.0) < 1e-6
+          assert len(shock_table(hedge).table) == 8
+          print("core engine OK")
+          PY
+      - name: A missing extra names the extra
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from rates_engine.cli import load_config
+          from rates_engine.errors import MissingDependencyError
+
+          Path("c.yaml").write_text("as_of: 2026-01-15\n", encoding="utf-8")
+          try:
+              load_config("c.yaml")
+          except MissingDependencyError as exc:
+              assert "finport-ratesengine[config]" in str(exc), str(exc)
+              print("error message points at the right extra")
+          else:
+              raise SystemExit("expected MissingDependencyError without pyyaml")
+          PY
+
+  smoke:
+    name: CLI smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,config]"
+      # Exercises the installed console script, which unit tests calling
+      # main() directly would not catch if packaging broke.
+      - name: Describe
+        run: rateng describe --json | python -c "import json,sys; json.load(sys.stdin)"
+      - name: Write an example config
+        run: python scripts/write_example_config.py config.json
+      - name: Bootstrap, price and hedge
+        run: |
+          for command in bootstrap price hedge; do
+            rateng "$command" --config config.json --json \
+              | python -c "import json,sys; d=json.load(sys.stdin); assert d['schema_version']"
+          done
+      - name: A failure is still one document, with an exit code
+        run: |
+          set +e
+          rateng bootstrap --config missing.json --json > out.json
+          code=$?
+          set -e
+          test "$code" = "1"
+          python -c "import json; d=json.load(open('out.json')); assert d['exit_code']==1"

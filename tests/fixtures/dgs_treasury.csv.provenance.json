@@ -1,0 +1,15 @@
+{
+  "file": "dgs_treasury.csv",
+  "generated_by": "tests/fixtures/generate.py",
+  "generated_at": "2026-09-16T23:27:11.825217+00:00",
+  "seed": 20260916,
+  "series_ids": [
+    "DGS2",
+    "DGS3",
+    "DGS5",
+    "DGS10"
+  ],
+  "data_quality": "proxy",
+  "units": "decimal rate",
+  "note": "Constructed. Classified as a proxy on load regardless of source, because a Treasury par yield standing in for OIS par carries the swap spread."
+}

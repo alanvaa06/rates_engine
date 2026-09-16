@@ -1,0 +1,3 @@
+time_to_start,time_to_end,sigma,adjustment_bp
+1.0,1.25,0.01,0.62
+2.0,2.25,0.01,2.25

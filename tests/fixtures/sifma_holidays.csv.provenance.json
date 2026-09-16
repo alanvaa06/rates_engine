@@ -1,0 +1,8 @@
+{
+  "file": "sifma_holidays.csv",
+  "generated_by": "tests/fixtures/generate.py",
+  "generated_at": "2026-09-16T23:27:11.825647+00:00",
+  "seed": 20260916,
+  "data_quality": "assumed",
+  "note": "Generated FROM rates_engine.conventions.calendar, so it cannot catch a wrong rule \u2014 it exists to be diffed against SIFMA's published calendar by a human. PRD-001 AC-1.2 marks that check [manual-check]; it has NOT been done, because this environment cannot reach sifma.org. The Saturday-observed-on-Friday rule is the specific line to confirm."
+}

@@ -1,0 +1,75 @@
+# finport-ratesengine
+
+> A deterministic SOFR rates engine that reports the evidence behind a number,
+> not just the number. Every curve says which instruments pinned it and what
+> each one's repricing residual was; every price says which curve discounted
+> it and why that curve; every risk figure says which bump basis and shape
+> produced it, and every degradation along the way — a Treasury par yield
+> standing in for an OIS quote, a contract notional nobody verified — travels
+> up the chain to the result that rests on it.
+
+Install `finport-ratesengine`, import `rates_engine`, run `rateng`. The three
+names differ because the obvious distribution name follows the convention of
+its sibling project. Python 3.11+. MIT.
+
+The core install is numpy, pandas and scipy, and nothing else. YAML configs
+for the CLI are the one extra (`config`); JSON configs are native precisely so
+that a core install can run every command.
+
+Two ways in. As a library, importing `rates_engine`. As a CLI, `rateng`, where
+`bootstrap`, `price`, `hedge` and `describe` take `--json` and put one
+parseable document on stdout with all narration on stderr. An MCP server is
+planned for v2.
+
+## What it does
+
+Builds an OIS-SOFR discount curve from a realised stub, SOFR futures adjusted
+for convexity, and par quotes; exposes it as discount factors, zero rates, par
+rates and forwards, each carrying the compounding basis and day count that
+make it mean something. Prices OIS, fixed-versus-Term-SOFR IRS and FRAs under
+collateral discounting, with the projection curve and the discount curve kept
+apart. Measures risk: parallel DV01, a key-rate profile built from tent shocks
+that sum exactly to a parallel shift, PVBP, money duration, money convexity,
+and the effective measures where the price is not zero. Sizes a futures strip
+against a swap and shocks the hedged position, so the convexity the strip
+cannot hedge shows up in dollars and in basis points.
+
+## What it refuses
+
+A missing fixing is never interpolated. An unimplemented convention never
+falls back to a default. A Treasury par yield never enters a curve without
+being declared. A key rate is never extrapolated past the curve. A duration is
+never divided by a zero price. Macaulay and modified duration are never
+approximated by effective duration under their own names. Seventeen named
+exceptions, each with an exit code and an entry in `docs/ERRORS.md` saying
+whether it is recoverable and what to do.
+
+## What it is not
+
+Not an agent and not a model. No LLM is invoked from the library, and no
+token is spent at runtime. There is no randomness: the same input on the same
+interpreter gives the same output bit for bit, and across interpreter versions
+to 1e-14 relative.
+
+Not a volatility engine. Swaptions, caps, floors and the SABR cube are v2.
+Not multi-currency: TIIE, FX forwards and FX options are v3. No CVA, FVA, KVA
+or MVA; no CCP margin; no SA-CCR. Clean prices only.
+
+## Honest limits in v1
+
+The dual-curve solver is validated against synthetic inputs, because no free
+source of Term SOFR par or basis swap quotes exists; every such result
+declares `inputs_origin="synthetic"`. The long end can use Treasury par
+yields as a proxy for OIS par, which carries a swap spread that is negative,
+variable and not quantified here — it is opt-in, it marks every node it
+touches, and it is barred from any test that validates a published number. The
+SR1 contract notional is assumed rather than read from the contract spec, and
+the evidence says `notional_source="assumed"`.
+
+## Links
+
+- Source: https://github.com/alanvaa06/rates_engine
+- Agent notes: AGENTS.md
+- Refusal contract: docs/ERRORS.md
+- Formula provenance: docs/RESEARCH.md
+- Changelog: CHANGELOG.md

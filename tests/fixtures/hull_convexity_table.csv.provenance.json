@@ -1,0 +1,9 @@
+{
+  "file": "hull_convexity_table.csv",
+  "generated_by": "tests/fixtures/generate.py",
+  "generated_at": "2026-09-16T23:27:11.825819+00:00",
+  "seed": 20260916,
+  "data_quality": "observed",
+  "source": "Hull, via the vault note 'Forward vs Futures and the Eurodollar Convexity Bias'",
+  "note": "Transcribed from the wiki, which cites Hull. Not read in Hull directly, which is why PRD-001 records it as verified in a secondary source."
+}

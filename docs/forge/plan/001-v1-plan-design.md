@@ -263,6 +263,14 @@ Salidas posibles:
 
 Hacer esto en F0 cuesta una hora. Descubrirlo en F9 cuesta nueve fases construidas hacia un golden que no existe.
 
+### Resultado (2026-09-16): **sin tira**, por causa ambiental
+
+El entorno de construcción tenía egress limitado a registries de paquetes y GitHub por política de la organización. `fred.stlouisfed.org` devolvió 403 en el proxy y CME era inalcanzable, así que no se pudo abrir el whitepaper ni descargar los settlements finales ni los fixings. La causa no es que el whitepaper no traiga la tira — eso sigue sin saberse — sino que no se pudo mirar.
+
+Aplicada la cláusula de A1: los tres goldens del whitepaper y los dos de settlement CME quedan `skip` con la razón nombrando el fixture faltante, **las tolerancias no se movieron**, y se activan solos en cuanto los archivos existan. `tests/fixtures/cme_published/README.md` dice exactamente qué archivo hace falta, con qué columnas, y qué hipótesis de reconstrucción debe registrar el sidecar. Nada se sustituyó.
+
+Que el escalamiento llegara en F0 y no en F9 es el valor que esta tarea tenía que entregar, y lo entregó.
+
 ---
 
 ## 8. Determinismo, en concreto (AC-3.3)
