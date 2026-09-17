@@ -15,7 +15,6 @@ Exit code 0 when every criterion is covered, 1 when any is not.
 
 from __future__ import annotations
 
-import json
 import re
 import subprocess
 import sys
