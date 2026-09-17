@@ -64,9 +64,17 @@ def assert_no_proxy(result) -> None:
     assert result.evidence.worst_quality is not DataQuality.PROXY
 
 
-def _load_whitepaper_strip():
-    """Build the calibration set from the whitepaper's published SR3 prices."""
-    path = require_published("whitepaper_2025_strip.csv")[0]
+def _load_whitepaper_strip(ac: str):
+    """Build the calibration set from the whitepaper's published SR3 prices.
+
+    Args:
+        ac: The acceptance criterion the caller serves, so the skip message
+            names it.
+
+    Returns:
+        The valuation date and the calibration instruments.
+    """
+    path = require_published("whitepaper_2025_strip.csv", ac=ac)[0]
     import json
 
     sidecar = path.with_suffix(path.suffix + ".provenance.json")
@@ -111,7 +119,7 @@ class TestWhitepaperGoldens:
 
     def test_two_year_imm_par_coupon(self):
         """AC-6.6: 3.3304% within half a basis point."""
-        as_of, instruments = _load_whitepaper_strip()
+        as_of, instruments = _load_whitepaper_strip(ac="6.6")
         result = bootstrap_discount_curve(as_of, instruments)
         assert_no_proxy(result)
         futures = [i for i in instruments if isinstance(i, FuturesNode)]
@@ -129,7 +137,7 @@ class TestWhitepaperGoldens:
 
     def test_contract_count(self):
         """AC-8.1: 779 contracts, plus or minus two, summing over the periods."""
-        as_of, instruments = _load_whitepaper_strip()
+        as_of, instruments = _load_whitepaper_strip(ac="8.1")
         result = bootstrap_discount_curve(as_of, instruments)
         assert_no_proxy(result)
         futures = [i for i in instruments if isinstance(i, FuturesNode)]
@@ -151,7 +159,7 @@ class TestWhitepaperGoldens:
 
     def test_minus_one_hundred_basis_points(self):
         """AC-8.2: +22,292 USD net, and the DV01 moving 19,480 -> 19,921."""
-        as_of, instruments = _load_whitepaper_strip()
+        as_of, instruments = _load_whitepaper_strip(ac="8.2")
         result = bootstrap_discount_curve(as_of, instruments)
         assert_no_proxy(result)
         futures = [i for i in instruments if isinstance(i, FuturesNode)]

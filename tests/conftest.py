@@ -140,12 +140,22 @@ def published(name: str) -> Path | None:
     return candidate if candidate.exists() else None
 
 
-def require_published(*names: str) -> list[Path]:
-    """Skip the calling test unless every named third-party fixture exists."""
+def require_published(*names: str, ac: str) -> list[Path]:
+    """Skip the calling test unless every named third-party fixture exists.
+
+    Args:
+        *names: File names inside ``tests/fixtures/cme_published``.
+        ac: The acceptance criterion this comparison serves, named in the skip
+            message so that ``scripts/audit_acceptance.py`` can attribute the
+            skip exactly rather than guessing from the module it sits in.
+
+    Returns:
+        The paths, when they all exist.
+    """
     missing = [n for n in names if published(n) is None]
     if missing:
         pytest.skip(
-            "third-party fixture not supplied: "
+            f"AC-{ac}: third-party fixture not supplied: "
             + ", ".join(missing)
             + f". See {CME_PUBLISHED / 'README.md'} — this comparison is against a "
             "published number and is skipped rather than faked."

@@ -80,7 +80,9 @@ class TestSR1Settlement:
 
     def test_against_cme_final_settlements(self):
         """AC-5.1's third-party half: skipped until the settlements are supplied."""
-        settlements, fixings = require_published("sr1_final_settlements.csv", "sofr_fixings.csv")
+        settlements, fixings = require_published(
+            "sr1_final_settlements.csv", "sofr_fixings.csv", ac="5.1"
+        )
         from rates_engine.market import load_settlements_csv
 
         snapshot = MarketSnapshot(
@@ -126,7 +128,9 @@ class TestSR3Settlement:
 
     def test_against_cme_final_settlements(self):
         """AC-5.2's third-party half: skipped until the settlements are supplied."""
-        settlements, fixings = require_published("sr3_final_settlements.csv", "sofr_fixings.csv")
+        settlements, fixings = require_published(
+            "sr3_final_settlements.csv", "sofr_fixings.csv", ac="5.2"
+        )
         from rates_engine.market import load_settlements_csv
 
         snapshot = MarketSnapshot(

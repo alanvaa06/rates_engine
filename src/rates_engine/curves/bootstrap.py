@@ -387,6 +387,7 @@ def bootstrap_discount_curve(
                 for i in ordered
             ],
             "fit_residuals_bp": dict(residuals),
+            "dropped_instruments": [dict(d) for d in dropped] or None,
             "max_abs_residual_bp": max((abs(r) for r in residuals.values()), default=0.0),
             "nodes": [n.isoformat() for n in curve.nodes],
             "convexity_models": sorted(_convexity_models(ordered)) or None,

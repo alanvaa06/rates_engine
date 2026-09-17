@@ -168,6 +168,17 @@ class TestRefusalsAndDrops:
         with pytest.raises(CurveArbitrageError, match="stubborn"):
             bootstrap_discount_curve(as_of, (Stubborn(),))
 
+    def test_drops_are_recorded_in_the_evidence_not_only_on_the_result(self, as_of, strip):
+        lenient = bootstrap_discount_curve(as_of, strip, strict=False, tolerance_bp=1e-18)
+        recorded = lenient.evidence.fields["dropped_instruments"]
+        assert recorded is not None
+        assert len(recorded) == len(lenient.dropped_instruments)
+        assert all("reason" in entry and "residual_bp" in entry for entry in recorded)
+
+    def test_a_clean_fit_records_none_rather_than_omitting_the_key(self, flat_curve):
+        assert "dropped_instruments" in flat_curve.evidence.fields
+        assert flat_curve.evidence.fields["dropped_instruments"] is None
+
     def test_lenient_mode_records_the_reason(self, as_of, strip):
         # Tolerance tightened below machine noise so a real fit trips it.
         with pytest.raises(BootstrapResidualError, match="residual"):

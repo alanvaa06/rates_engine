@@ -72,11 +72,23 @@ def test_treasuries_arrive_classified_as_proxies(stub_urlopen):
     assert series.provenance.instrument_kind == "treasury_par_yield"
 
 
-def test_a_snapshot_fetches_every_series(stub_urlopen):
-    snapshot = fred.fetch_snapshot(date(2026, 1, 15), ("SOFR", "EFFR", "DGS2"))
-    assert set(snapshot.series) == {"SOFR", "EFFR", "DGS2"}
-    assert len(stub_urlopen) == 3
+#: The six series AC-2.1 names.
+AC_2_1_SERIES = ("SOFR", "SOFR30DAYAVG", "SOFR90DAYAVG", "SOFRINDEX", "EFFR", "DGS2")
+
+
+def test_a_snapshot_fetches_every_series_ac_2_1_names(stub_urlopen):
+    snapshot = fred.fetch_snapshot(date(2026, 1, 15), AC_2_1_SERIES)
+    assert set(snapshot.series) == set(AC_2_1_SERIES)
+    assert len(stub_urlopen) == len(AC_2_1_SERIES)
     assert snapshot.worst_quality() is DataQuality.PROXY
+
+
+def test_every_one_of_the_six_carries_the_three_provenance_fields(stub_urlopen):
+    snapshot = fred.fetch_snapshot(date(2026, 1, 15), AC_2_1_SERIES)
+    for name, provenance in snapshot.provenance.items():
+        assert provenance.source == "fred", name
+        assert provenance.series_id == name
+        assert provenance.retrieved_at is not None, name
 
 
 def test_the_series_ac_2_1_names_are_all_classifiable():
