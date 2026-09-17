@@ -19,28 +19,12 @@ from typing import Any
 
 from rates_engine.conventions.calendar import SIFMA_US, BusinessDayConvention, SIFMAUSCalendar
 from rates_engine.conventions.daycount import DayCount, year_fraction
-from rates_engine.conventions.schedule import Schedule
+from rates_engine.conventions.schedule import Schedule, add_months
 from rates_engine.curves.discount import CURVE_TIME_BASIS, DiscountCurve
 from rates_engine.evidence import Evidence
 from rates_engine.results import EngineResult
 
 __all__ = ["CurveView", "CurveViews", "zero_curve", "par_curve", "forward_curve", "all_views"]
-
-
-def _shift_months(day: date, months: int) -> date:
-    """Shift by whole months, clamping to the last valid day of the target month.
-
-    Only the forward view needs this, to name the end of a rolling tenor.
-    """
-    total = day.month - 1 + months
-    year = day.year + total // 12
-    month = total % 12 + 1
-    for candidate in (day.day, 30, 29, 28):
-        try:
-            return date(year, month, candidate)
-        except ValueError:
-            continue
-    raise AssertionError("unreachable: day 28 exists in every month")  # pragma: no cover
 
 
 @dataclass(frozen=True)
@@ -241,8 +225,9 @@ def forward_curve(
         values=tuple(
             curve.forward(
                 d,
-                Schedule.generate(d, _shift_months(d, tenor_months), frequency_months=tenor_months)
-                .accrual_end[-1],
+                Schedule.generate(
+                    d, add_months(d, tenor_months), frequency_months=tenor_months
+                ).accrual_end[-1],
                 day_count=day_count,
                 compounding=compounding,
             )

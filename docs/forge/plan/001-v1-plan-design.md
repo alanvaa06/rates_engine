@@ -233,10 +233,10 @@ Todo fixture lleva un `<nombre>.provenance.json` al lado: `source`, `url`, `retr
 | `test_determinism.py` | 3.3 |
 | `test_curve_views.py` | 4.1, 4.2, 4.3, 4.4, 4.5 |
 | `test_pricing.py` | 6.1, 6.2, 6.3, 6.4, 6.5 |
-| `test_hedging.py` | 8.3, 8.4 |
+| `test_hedging.py` | 8.3, 8.4, 10.10 |
 | `test_golden_cme.py` | 6.6, 8.1, 8.2 |
 | `test_risk_key_rate.py` | 10.1, 10.2, 10.3, 10.4, 10.5, 10.6, 10.7 |
-| `test_risk_duration.py` | 10.8, 10.9, 10.10, 10.11, 10.12, 10.13 |
+| `test_risk_duration.py` | 10.8, 10.9, 10.11, 10.12, 10.13 |
 | `test_dual_curve.py` | 7.1, 7.2, 7.3, 7.4, 7.5 |
 | `test_payloads.py` | 9.1 |
 | `test_cli_json.py` | 9.2, 9.3 |
@@ -245,6 +245,11 @@ Todo fixture lleva un `<nombre>.provenance.json` al lado: `source`, `url`, `retr
 | `test_properties.py` | propiedades hypothesis (diseño, sección *Propiedades*) |
 | `test_typecheck_allowlist.py` | DoD (ceiling) |
 | `test_readme_quickstart.py` | DoD (quickstart verificado) |
+| `test_layering.py` | Arquitectura: el grafo de módulos es acíclico y por capas |
+
+`test_layering.py` se añadió durante la construcción: no cubre un AC, cubre la afirmación de §1 de que el diseño es por capas. La primera arista hacia arriba nunca es la cara; la cara es la segunda, que ya está permitida porque existe la primera.
+
+AC-10.10 vive en `test_hedging.py` y no en `test_risk_duration.py`: la reconciliación necesita el `shock_table`, y separar el test de la tabla que reconcilia habría significado construirla dos veces.
 
 Los 67 ACs de PRD-001 están cubiertos, ninguno aparece dos veces y ninguna fila mapea un AC inexistente — verificado programáticamente contra el PRD, no a ojo.
 

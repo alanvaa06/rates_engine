@@ -36,6 +36,7 @@ from rates_engine.curves.bootstrap import (
 from rates_engine.curves.discount import CURVE_TIME_BASIS, CurveSet
 from rates_engine.curves.views import all_views
 from rates_engine.errors import MissingDependencyError, UndefinedDurationError
+from rates_engine.errors import __all__ as EXCEPTION_NAMES
 from rates_engine.evidence import DataQuality, Provenance
 from rates_engine.hedging import DEFAULT_SHOCKS_BP, SR3_DV01, shock_table, strip_hedge
 from rates_engine.instruments.swaps import OISSwap, Side
@@ -181,8 +182,6 @@ def _build_swap(config: dict[str, Any]) -> OISSwap:
 
 def _command_describe(_config: dict[str, Any] | None) -> dict[str, Any]:
     """Describe the engine's surface without computing anything."""
-    from rates_engine import errors as error_module
-
     return {
         "schema_version": SCHEMA_VERSION,
         "result_type": "Description",
@@ -209,7 +208,7 @@ def _command_describe(_config: dict[str, Any] | None) -> dict[str, Any]:
             "macaulay_duration": "needs a single yield, and therefore a bond (v1.1)",
             "modified_duration": "needs a single yield, and therefore a bond (v1.1)",
         },
-        "exceptions": sorted(error_module.__all__),
+        "exceptions": sorted(EXCEPTION_NAMES),
         "exit_codes": {"0": "ok", "1": "inputs unusable", "2": "calculation impossible"},
         "key_rate_caveat": INTERPOLATION_CAVEAT,
         "evidence": None,

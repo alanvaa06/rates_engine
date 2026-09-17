@@ -9,7 +9,8 @@ from rates_engine.instruments.futures import (
     SOFRFuture1M,
     SOFRFuture3M,
 )
-from rates_engine.instruments.swaps import IRSwap, OISSwap, Side
+from rates_engine.instruments.side import Side, fixed_leg_sign
+from rates_engine.instruments.swaps import IRSwap, OISSwap
 
 __all__ = [
     "BASIS_POINT",
@@ -22,4 +23,5 @@ __all__ = [
     "SR1_NOTIONAL",
     "SR3_NOTIONAL",
     "Side",
+    "fixed_leg_sign",
 ]

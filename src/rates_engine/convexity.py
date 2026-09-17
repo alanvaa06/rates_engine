@@ -36,6 +36,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from datetime import date
+from enum import StrEnum
 from typing import Any
 
 from rates_engine.errors import InsufficientDataError, UnsupportedConventionError
@@ -68,15 +69,27 @@ evidence records that it was taken.
 """
 
 
-class ConvexityModel(str):
-    """Names of the implemented convexity models, as plain strings with a home."""
+class ConvexityModel(StrEnum):
+    """The implemented convexity models.
+
+    ``NONE``
+        No adjustment. Honest when sigma is unknown and the strip is short.
+    ``HO_LEE``
+        ``0.5 * sigma^2 * T1 * T2``, one parameter.
+    ``HULL_WHITE``
+        Mean reversion and volatility, converging to Ho-Lee as kappa vanishes.
+
+    A :class:`~enum.StrEnum`, so a plain ``"ho_lee"`` from a config file
+    compares equal to the member and no caller has to import the enum to pass
+    a model by name.
+    """
 
     NONE = "none"
     HO_LEE = "ho_lee"
     HULL_WHITE = "hull_white"
 
 
-_MODELS = (ConvexityModel.NONE, ConvexityModel.HO_LEE, ConvexityModel.HULL_WHITE)
+_MODELS = tuple(ConvexityModel)
 
 
 @dataclass(frozen=True)
@@ -157,7 +170,8 @@ def convexity_adjustment(
     """
     if model not in _MODELS:
         raise UnsupportedConventionError(
-            f"convexity model {model!r} is not implemented; supported: {_MODELS}"
+            f"convexity model {model!r} is not implemented; "
+            f"supported: {', '.join(m.value for m in ConvexityModel)}"
         )
     if sigma < 0.0:
         raise ValueError(f"sigma must be non-negative, got {sigma!r}")

@@ -23,25 +23,12 @@ from rates_engine.conventions.calendar import SIFMA_US, BusinessDayConvention, S
 from rates_engine.conventions.daycount import DayCount, year_fraction
 from rates_engine.conventions.schedule import Schedule
 from rates_engine.instruments.cashflow import Cashflow
+from rates_engine.instruments.side import Side, fixed_leg_sign
 
 if TYPE_CHECKING:  # pragma: no cover - import for typing only, avoids a cycle
     from rates_engine.curves.discount import CurveSet
 
 __all__ = ["Side", "OISSwap", "IRSwap"]
-
-
-class Side(str):
-    """Which side of a swap is held."""
-
-    PAYER = "payer"
-    RECEIVER = "receiver"
-
-
-def _sign(side: str) -> float:
-    """``-1`` for a payer's fixed leg, ``+1`` for a receiver's."""
-    if side not in (Side.PAYER, Side.RECEIVER):
-        raise ValueError(f"side must be {Side.PAYER!r} or {Side.RECEIVER!r}, got {side!r}")
-    return -1.0 if side == Side.PAYER else 1.0
 
 
 @dataclass(frozen=True)
@@ -118,7 +105,7 @@ class OISSwap:
         """The fixed leg, signed for :attr:`side`. ``curve_set`` is unused but kept
         in the signature so both legs read the same at the call site."""
         del curve_set
-        sign = _sign(self.side)
+        sign = fixed_leg_sign(self.side)
         schedule = self.schedule
         return tuple(
             Cashflow(
@@ -145,7 +132,7 @@ class OISSwap:
         the period's discount factors on a deterministic curve, so no separate
         projection is needed and none is invented.
         """
-        sign = -_sign(self.side)
+        sign = -fixed_leg_sign(self.side)
         curve = curve_set.discount
         schedule = self.schedule
         flows: list[Cashflow] = []
@@ -261,7 +248,7 @@ class IRSwap:
     def fixed_cashflows(self, curve_set: CurveSet) -> tuple[Cashflow, ...]:
         """The fixed leg, signed for :attr:`side`."""
         del curve_set
-        sign = _sign(self.side)
+        sign = fixed_leg_sign(self.side)
         schedule = self.fixed_schedule
         return tuple(
             Cashflow(
@@ -290,7 +277,7 @@ class IRSwap:
         the two are the same object the basis is zero and the result collapses
         onto the OIS answer.
         """
-        sign = -_sign(self.side)
+        sign = -fixed_leg_sign(self.side)
         projection = curve_set.projection
         schedule = self.float_schedule
         flows: list[Cashflow] = []

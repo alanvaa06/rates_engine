@@ -17,7 +17,7 @@ from rates_engine.conventions.calendar import (
     _nth_weekday,
 )
 
-__all__ = ["imm_dates", "imm_date", "next_imm_on_or_after", "Schedule"]
+__all__ = ["imm_dates", "imm_date", "next_imm_on_or_after", "add_months", "Schedule"]
 
 _IMM_MONTHS = (3, 6, 9, 12)
 
@@ -70,8 +70,20 @@ def next_imm_on_or_after(day: date) -> date:
     raise AssertionError("unreachable: an IMM date always exists within a year")  # pragma: no cover
 
 
-def _add_months(day: date, months: int) -> date:
-    """Shift by whole months, clamping to the last valid day of the target month."""
+def add_months(day: date, months: int) -> date:
+    """Shift by whole months, clamping to the last valid day of the target month.
+
+    Public because two callers need it and two implementations of month
+    arithmetic is two chances to disagree about what a month after 31 January
+    is. Negative counts go backwards.
+
+    Args:
+        day: Starting date.
+        months: Whole months to shift by; negative goes back.
+
+    Returns:
+        The shifted date, clamped to the target month's last day.
+    """
     total = day.month - 1 + months
     year = day.year + total // 12
     month = total % 12 + 1
@@ -139,7 +151,7 @@ class Schedule:
         cursor = maturity
         while cursor > effective:
             ends.append(cursor)
-            cursor = _add_months(maturity, -frequency_months * (len(ends)))
+            cursor = add_months(maturity, -frequency_months * (len(ends)))
         ends.reverse()
         starts = [effective, *ends[:-1]]
 

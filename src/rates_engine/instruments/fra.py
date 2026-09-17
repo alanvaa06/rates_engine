@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 
 from rates_engine.conventions.daycount import DayCount, year_fraction
 from rates_engine.instruments.cashflow import Cashflow
-from rates_engine.instruments.swaps import Side, _sign
+from rates_engine.instruments.side import Side, fixed_leg_sign
 
 if TYPE_CHECKING:  # pragma: no cover - import for typing only, avoids a cycle
     from rates_engine.curves.discount import CurveSet
@@ -69,7 +69,7 @@ class FRA:
 
     def cashflows(self, curve_set: CurveSet) -> tuple[Cashflow, ...]:
         """The single settlement, signed for :attr:`side`."""
-        sign = -_sign(self.side)
+        sign = -fixed_leg_sign(self.side)
         projected = self.fair_rate(curve_set)
         tau = self.year_fraction
         return (

@@ -15,6 +15,7 @@ from rates_engine.conventions.calendar import (
 from rates_engine.conventions.daycount import DayCount, day_count_from_name, year_fraction
 from rates_engine.conventions.schedule import (
     Schedule,
+    add_months,
     imm_date,
     imm_dates,
     next_imm_on_or_after,
@@ -27,6 +28,7 @@ __all__ = [
     "SIFMAUSCalendar",
     "SIFMA_US",
     "Schedule",
+    "add_months",
     "day_count_from_name",
     "easter_sunday",
     "imm_date",
