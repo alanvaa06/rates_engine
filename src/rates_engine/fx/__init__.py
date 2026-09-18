@@ -17,13 +17,23 @@ from rates_engine.fx.delta import (
     strike_from_delta,
 )
 from rates_engine.fx.quote import USDMXN, CurrencyPair
+from rates_engine.fx.vannavolga import (
+    ATMConvention,
+    SmileQuotes,
+    SmileReading,
+    VannaVolgaSmile,
+)
 
 __all__ = [
+    "ATMConvention",
     "CurrencyPair",
     "DeltaBasis",
     "DeltaConvention",
     "PremiumAdjustment",
+    "SmileQuotes",
+    "SmileReading",
     "USDMXN",
+    "VannaVolgaSmile",
     "delta_conventions",
     "garman_kohlhagen",
     "strike_from_delta",

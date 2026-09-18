@@ -45,6 +45,23 @@ def _parametric(as_of, par_swap):
     return fit, price_on_parametric(par_swap, parametric, CurveSet(exact), fit=fit)
 
 
+def _fx_smile():
+    """A vanna-volga reading, as `test_fx_smile.py` builds the smile."""
+    from rates_engine.fx.delta import DeltaBasis, DeltaConvention, PremiumAdjustment
+    from rates_engine.fx.vannavolga import ATMConvention, SmileQuotes, VannaVolgaSmile
+
+    smile = VannaVolgaSmile(
+        spot=18.50,
+        expiry=0.25,
+        r_domestic=0.0950,
+        r_foreign=0.0420,
+        quotes=SmileQuotes(atm=0.1150, risk_reversal_25=0.0180, butterfly_25=0.0035),
+        delta_convention=DeltaConvention(DeltaBasis.SPOT, PremiumAdjustment.UNADJUSTED),
+        atm_convention=ATMConvention.DELTA_NEUTRAL_STRADDLE,
+    )
+    return smile.volatility_at(19.0)
+
+
 def _volatility(option_curve_set, atm_swaption, forward_swap_rate):
     """A cube read, the fit behind it, a swaption price and its greeks."""
     vol = Volatility(90.0, VolUnits.NORMAL_BP)
@@ -149,6 +166,7 @@ def _all_results(par_swap, curve_set, flat_curve, strip, as_of,
         _dual_curve(as_of),
         _fomc_fit(),
         realized_sofr_sigma(snapshot),
+        _fx_smile(),
         *_volatility(option_curve_set, atm_swaption, forward_swap_rate),
     ]
 
