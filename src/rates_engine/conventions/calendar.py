@@ -23,8 +23,11 @@ from rates_engine.conventions.daycount import DayCount, year_fraction
 from rates_engine.errors import UnsupportedConventionError
 
 __all__ = [
+    "BMV",
+    "BMVCalendar",
     "BusinessDayConvention",
     "Calendar",
+    "HolidayCalendar",
     "SIFMAUSCalendar",
     "SIFMA_US",
     "easter_sunday",
@@ -118,47 +121,59 @@ def _observed(day: date) -> date:
     return day
 
 
-class SIFMAUSCalendar:
-    """SIFMA's recommended US holiday schedule for the fixed income market.
+class HolidayCalendar:
+    """Everything a calendar does once it can answer "is this a holiday?".
 
-    Twelve holidays. Juneteenth only from 2022, the year it became a federal
-    holiday; asking about 2021 correctly reports 19 June as a business day.
+    Subclasses supply :attr:`name` and :meth:`holidays`; rolling, counting
+    and stepping are derived here. Extracted when the second calendar
+    arrived, because the alternative was eighty lines of identical
+    date-stepping in two places, where the two would eventually stop being
+    identical without anyone noticing.
     """
 
-    name = "SIFMA_US"
+    name: str = "unnamed"
 
     def holidays(self, year: int) -> frozenset[date]:
         """Every holiday observed in ``year``, as observed dates.
 
-        Args:
-            year: Calendar year.
-
-        Returns:
-            The observed dates, already rolled off weekends where the rule
-            applies. Good Friday and the n-th-weekday holidays never need it.
+        "Observed dates" is the subtlety: a weekend-observance rule can move
+        a holiday *out of its own year*. New Year's Day 2022 fell on a
+        Saturday, so it is observed on Friday 31 December 2021, and that
+        date belongs to ``holidays(2022)`` because it is the 2022 holiday.
+        :meth:`is_business_day` accounts for this; see there.
         """
-        days = {
-            _observed(date(year, 1, 1)),
-            _nth_weekday(year, 1, 0, 3),
-            _nth_weekday(year, 2, 0, 3),
-            easter_sunday(year) - timedelta(days=2),
-            _last_weekday(year, 5, 0),
-            _observed(date(year, 7, 4)),
-            _nth_weekday(year, 9, 0, 1),
-            _nth_weekday(year, 10, 0, 2),
-            _observed(date(year, 11, 11)),
-            _nth_weekday(year, 11, 3, 4),
-            _observed(date(year, 12, 25)),
-        }
-        if year >= 2022:
-            days.add(_observed(date(year, 6, 19)))
-        return frozenset(days)
+        raise NotImplementedError
+
+    def _observed_near(self, year: int) -> frozenset[date]:
+        """Holidays that could fall in ``year``, cached.
+
+        The union of three years, because an observance rule can push a
+        holiday backwards or forwards across a year boundary. Cached per
+        instance because calendars are stateless singletons and
+        :meth:`business_days` would otherwise recompute the same sets on
+        every step.
+        """
+        cache = self.__dict__.setdefault("_holiday_cache", {})
+        if year not in cache:
+            cache[year] = frozenset(self.holidays(year))
+        nxt = self.__dict__["_holiday_cache"]
+        for adjacent in (year - 1, year + 1):
+            if adjacent not in nxt:
+                nxt[adjacent] = frozenset(self.holidays(adjacent))
+        return cache[year] | nxt[year - 1] | nxt[year + 1]
 
     def is_business_day(self, day: date) -> bool:
-        """True when ``day`` is neither a weekend nor an observed holiday."""
+        """True when ``day`` is neither a weekend nor an observed holiday.
+
+        Checks the neighbouring years as well as ``day``'s own, because an
+        observance rule can move a holiday across a year boundary: with New
+        Year's Day on a Saturday, the observed holiday is 31 December of the
+        preceding year. Looking only in ``holidays(day.year)`` reported that
+        Friday as a business day, which is the bug this guards.
+        """
         if day.weekday() >= 5:
             return False
-        return day not in self.holidays(day.year)
+        return day not in self._observed_near(day.year)
 
     def next_business_day(self, day: date) -> date:
         """The first business day strictly after ``day``."""
@@ -231,8 +246,122 @@ class SIFMAUSCalendar:
         return current
 
 
+class SIFMAUSCalendar(HolidayCalendar):
+    """SIFMA's recommended US holiday schedule for the fixed income market.
+
+    Twelve holidays. Juneteenth only from 2022, the year it became a federal
+    holiday; asking about 2021 correctly reports 19 June as a business day.
+    """
+
+    name = "SIFMA_US"
+
+    def holidays(self, year: int) -> frozenset[date]:
+        """Every holiday observed in ``year``, as observed dates.
+
+        Args:
+            year: Calendar year.
+
+        Returns:
+            The observed dates, already rolled off weekends where the rule
+            applies. Good Friday and the n-th-weekday holidays never need it.
+        """
+        days = {
+            _observed(date(year, 1, 1)),
+            _nth_weekday(year, 1, 0, 3),
+            _nth_weekday(year, 2, 0, 3),
+            easter_sunday(year) - timedelta(days=2),
+            _last_weekday(year, 5, 0),
+            _observed(date(year, 7, 4)),
+            _nth_weekday(year, 9, 0, 1),
+            _nth_weekday(year, 10, 0, 2),
+            _observed(date(year, 11, 11)),
+            _nth_weekday(year, 11, 3, 4),
+            _observed(date(year, 12, 25)),
+        }
+        if year >= 2022:
+            days.add(_observed(date(year, 6, 19)))
+        return frozenset(days)
+
+
+class BMVCalendar(HolidayCalendar):
+    """The Mexican stock exchange's holiday schedule.
+
+    **Named for what it is.** PRD-003 AC-1.2 asks for Banxico's calendar,
+    which is the *banking* calendar and a different list. This is the BMV
+    one, because that is what the research gate could establish: Banxico
+    returns 403 from the build environment, and the reachable source —
+    QuantLib's ``ql/time/calendars/mexico.cpp``, whose implementation class
+    is literally ``BmvImpl`` and reports "Mexican stock exchange" — answers
+    the neighbouring question. Building it and calling it Banxico would be a
+    plausible list with the wrong name on it.
+
+    The diff against Banxico's published list is `[manual-check]`, recorded
+    in ``tests/fixtures/bmv_holidays.csv.provenance.json`` and outstanding.
+    Where the two agree, nothing changes when it is done; where they differ,
+    an MXN curve moves, which is exactly why the name matters now.
+
+    **Thirteen rules.** Three of them moved to Monday observance in 2006
+    under the *Ley Federal del Trabajo* reform: Constitution Day, Benito
+    Juárez's birthday and Revolution Day are fixed dates through 2005 and
+    the first, third and third Monday of their months thereafter. Asking
+    about 2005 correctly reports 5 February, and about 2026 the first
+    Monday.
+
+    Inauguration Day is 1 October every sixth year from 2024 — the six-year
+    presidential term, not an annual holiday.
+
+    Unlike SIFMA's, these are not rolled off weekends: a fixed-date Mexican
+    holiday falling on a Saturday is simply not observed. That is what the
+    source implements, and inventing an observance rule would be the same
+    error as renaming the calendar.
+    """
+
+    name = "BMV"
+
+    #: The first inauguration under the current six-year cycle.
+    INAUGURATION_BASE_YEAR = 2024
+    #: The year the Monday-observance reform took effect.
+    MONDAY_OBSERVANCE_FROM = 2006
+
+    def holidays(self, year: int) -> frozenset[date]:
+        """Every holiday observed in ``year``.
+
+        Args:
+            year: Calendar year.
+
+        Returns:
+            The dates. No weekend-observance roll is applied, because this
+            calendar does not have one.
+        """
+        easter = easter_sunday(year)
+        days = {
+            date(year, 1, 1),
+            easter - timedelta(days=3),  # Holy Thursday
+            easter - timedelta(days=2),  # Good Friday
+            date(year, 5, 1),
+            date(year, 9, 16),
+            date(year, 11, 2),
+            date(year, 12, 12),
+            date(year, 12, 25),
+        }
+        if year >= self.MONDAY_OBSERVANCE_FROM:
+            days.add(_nth_weekday(year, 2, 0, 1))   # Constitution Day
+            days.add(_nth_weekday(year, 3, 0, 3))   # Benito Juarez
+            days.add(_nth_weekday(year, 11, 0, 3))  # Revolution Day
+        else:
+            days.add(date(year, 2, 5))
+            days.add(date(year, 3, 21))
+            days.add(date(year, 11, 20))
+        if year >= self.INAUGURATION_BASE_YEAR and (year - self.INAUGURATION_BASE_YEAR) % 6 == 0:
+            days.add(date(year, 10, 1))
+        return frozenset(days)
+
+
 SIFMA_US = SIFMAUSCalendar()
 """The single :class:`SIFMAUSCalendar` instance the package uses."""
+
+BMV = BMVCalendar()
+"""The single :class:`BMVCalendar` instance the package uses."""
 
 
 def accrual(start: date, end: date, day_count: DayCount) -> float:

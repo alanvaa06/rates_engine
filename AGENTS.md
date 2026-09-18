@@ -140,6 +140,26 @@ forward *between* nodes, which no instrument constrains.
 `curves.compare_interpolations` measures that gap rather than declaring a
 winner.
 
+**A currency is carried, and two of them never mix silently.**
+`DiscountCurve` and `Cashflow` both have one, defaulting to `USD` — which
+is what every v1 and v2 object already was. Discounting a flow on a curve
+of another currency raises `CurrencyMismatchError` before any arithmetic.
+There is no conversion here at all: that needs a spot rate, a date and a
+quoting convention, and `rates_engine.fx` is where those are stated.
+
+**`holidays(year)` returns dates observed *for* that year, not dates *in*
+it.** With New Year's Day on a Saturday, the observed holiday is 31
+December of the year before, and it lives in `holidays(next_year)`. Use
+`is_business_day`, which checks the neighbouring years; do not test
+membership of `holidays(day.year)` yourself. That exact shortcut was a bug
+in 0.1.0 and 0.2.0.
+
+**The Mexican calendar is `BMV`, and that is not Banxico.** It is the stock
+exchange calendar, which is the one a reachable source documents. Banxico's
+banking calendar is a different list and the comparison has not been made.
+It also has no weekend-observance rule: a fixed-date Mexican holiday on a
+Saturday is simply not observed.
+
 **An extra that is installed at the wrong version says so.** The MCP server
 is written against `mcp>=2.0,<3`, where the server class is `MCPServer`; it
 was `FastMCP` in 1.x. `IncompatibleDependencyError` names the range and what

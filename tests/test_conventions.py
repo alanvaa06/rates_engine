@@ -201,3 +201,52 @@ class TestSchedule:
             Schedule.generate(
                 date(2026, 1, 1), date(2027, 1, 1) + timedelta(days=0), frequency_months=0
             )
+
+
+class TestObservanceAcrossAYearBoundary:
+    """A v1 bug, found while adding the second calendar.
+
+    `holidays(year)` returns the dates a year's holidays are *observed on*,
+    and a weekend rule can push one out of its own year: New Year's Day 2022
+    fell on a Saturday, so it is observed on Friday 31 December 2021 and
+    lives in `holidays(2022)`. `is_business_day` looked only in
+    `holidays(day.year)` and therefore reported that Friday as a business
+    day. Anything that rolled or counted across it — a schedule, an accrual,
+    a settlement date — was off by a day.
+    """
+
+    @pytest.mark.parametrize("year", [2022, 2028, 2033])
+    def test_new_year_on_a_saturday_is_observed_on_the_previous_friday(self, year):
+        from datetime import date
+
+        from rates_engine.conventions.calendar import SIFMA_US
+
+        if date(year, 1, 1).weekday() != 5:
+            pytest.skip(f"1 January {year} is not a Saturday")
+        friday = date(year - 1, 12, 31)
+        assert friday in SIFMA_US.holidays(year)
+        assert not SIFMA_US.is_business_day(friday)
+
+    def test_the_roll_lands_past_the_boundary(self):
+        from datetime import date
+
+        from rates_engine.conventions.calendar import SIFMA_US
+
+        assert SIFMA_US.next_business_day(date(2021, 12, 30)) == date(2022, 1, 3)
+
+    def test_an_ordinary_year_end_is_still_a_business_day(self):
+        from datetime import date
+
+        from rates_engine.conventions.calendar import SIFMA_US
+
+        # 31 December 2026 is a Thursday and no holiday is observed on it.
+        assert SIFMA_US.is_business_day(date(2026, 12, 31))
+
+    def test_business_days_across_the_boundary_omits_it(self):
+        from datetime import date
+
+        from rates_engine.conventions.calendar import SIFMA_US
+
+        days = SIFMA_US.business_days(date(2021, 12, 29), date(2022, 1, 5))
+        assert date(2021, 12, 31) not in days
+        assert date(2022, 1, 3) in days

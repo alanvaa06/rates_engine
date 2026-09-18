@@ -9,6 +9,35 @@ claims, so it belongs here too.
 
 ## [Unreleased]
 
+### Added
+
+- **`Currency`**, carried on `DiscountCurve`, on `Cashflow` and derived on
+  `CurveSet`. Defaults to `USD`, so every v1 and v2 call means what it
+  always meant. `CurrencyMismatchError` (exit code 2) refuses to discount a
+  cashflow on a curve of another currency, or to build a `CurveSet` whose
+  two curves disagree. There is no implicit conversion: that needs a rate,
+  a date and a quoting convention, and those are decisions.
+- **`BMVCalendar`** and the `BMV` instance: the Mexican stock exchange
+  calendar, thirteen rules including the 2006 Monday-observance reform and
+  the sexennial inauguration day. Named BMV rather than Banxico because it
+  *is* the exchange calendar — Banxico's banking calendar is a different
+  list, and the diff is `[manual-check]` and outstanding.
+- **`HolidayCalendar`**, the shared base every calendar's rolling,
+  counting and stepping now comes from. Extracted when the second calendar
+  arrived rather than duplicated.
+
+### Fixed
+
+- **A holiday observed across a year boundary was reported as a business
+  day.** When New Year's Day falls on a Saturday, SIFMA observes it on the
+  preceding Friday — 31 December of the *previous* year, which correctly
+  belongs to `holidays(next_year)`. `is_business_day` looked only in
+  `holidays(day.year)` and so reported 31 December 2021 and 31 December
+  2027 as business days. Anything that rolled or counted across those dates
+  — a schedule, an accrual, a settlement date — was off by a day. Present
+  in 0.1.0 and 0.2.0. Found while writing the second calendar's tests; no
+  existing test caught it because every fixture starts in January.
+
 ## [0.2.0] - 2026-09-18
 
 Rate options, a volatility cube, two parametric curves, a second
