@@ -35,6 +35,7 @@ __all__ = [
     "IncompatibleDependencyError",
     "ConfigurationError",
     "CurrencyMismatchError",
+    "DeltaConventionError",
     "CurveError",
     "CurveArbitrageError",
     "BootstrapResidualError",
@@ -154,6 +155,20 @@ class CurrencyMismatchError(RatesEngineError):
     """
 
     exit_code = 2
+
+
+class DeltaConventionError(RatesEngineError):
+    """A delta was used without saying which of the four conventions it is.
+
+    "25 delta" names a strike only once spot-versus-forward and
+    premium-adjusted-versus-not are both stated; the four combinations give
+    four different strikes for the same quoted number. Also raised when a
+    delta is not attainable under the convention given, which happens for
+    real: premium-adjusted delta is not monotone in the strike, so a delta
+    above its peak names no strike at all.
+    """
+
+    exit_code = 1
 
 
 class CurveError(RatesEngineError):

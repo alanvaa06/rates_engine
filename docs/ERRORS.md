@@ -5,13 +5,13 @@ helps if the refusal is legible, so this is the contract: every exception the
 library raises on purpose, what causes it, whether it is recoverable, and what
 to catch.
 
-There are twenty-six exception classes plus the base. You almost never want to
+There are twenty-seven exception classes plus the base. You almost never want to
 catch all of them, because they mean two different things — and the exit code
 says which.
 
 | It means | Recoverable | Do this | Exit code | Examples |
 | --- | --- | --- | --- | --- |
-| **Your inputs cannot support the calculation** | Yes, by changing the input | Supply the missing data, name a convention that exists, or declare the proxy you meant to use. Retrying unchanged is pointless. | `1` | `MissingFixingError`, `UnsupportedConventionError`, `InsufficientDataError`, `ProxySourceNotDeclaredError`, `MissingDependencyError`, `IncompatibleDependencyError`, `ConfigurationError` |
+| **Your inputs cannot support the calculation** | Yes, by changing the input | Supply the missing data, name a convention that exists, or declare the proxy you meant to use. Retrying unchanged is pointless. | `1` | `MissingFixingError`, `UnsupportedConventionError`, `InsufficientDataError`, `ProxySourceNotDeclaredError`, `MissingDependencyError`, `IncompatibleDependencyError`, `ConfigurationError`, `DeltaConventionError` |
 | **The calculation is impossible or undefined on inputs that are fine** | No | Ask a different question, or relax the thing the message names. | `2` | `CurveArbitrageError`, `BootstrapResidualError`, `UnderdeterminedCurveError`, `NoTenorQuoteSourceError`, `IncompleteStripError`, `UndefinedDurationError`, `KeyTenorOutOfRangeError`, `CurrencyMismatchError`, `ShiftRequiredError`, `ExpansionBreakdownError`, `MissingForwardError`, `SliceNotQuotedError`, `CalibrationError` |
 
 Everything derives from `RatesEngineError`, so one `except` catches the lot:
@@ -199,6 +199,22 @@ a spot rate, a date and a quoting convention, all of which are decisions;
 `rates_engine.fx` is where they are made explicitly. Until v3 the engine had
 one currency and never said so, which is why `Currency` defaults to `USD`:
 every v1 and v2 call means what it always meant.
+
+### `DeltaConventionError`
+
+**Exit code 1. Recoverable: state the convention.**
+
+"25 delta" does not name a strike. FX has four conventions in common use —
+spot or forward, premium-adjusted or not — and they give four *different*
+strikes for the same quoted number, hundreds of pips apart at ordinary
+volatilities. There is no default, because PRD-003's research gate could
+not establish which one USD/MXN trades on and a default would let an
+unverified convention set every strike in the smile.
+
+Also raised when the delta is not attainable under the convention given,
+which is a real condition rather than a guard: a spot delta cannot exceed
+`e^{-r_f T}`, and premium-adjusted delta is not monotone in the strike, so
+a delta above its peak names no strike at all.
 
 ### `CurveError`
 

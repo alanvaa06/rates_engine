@@ -34,6 +34,7 @@ LAYERS: tuple[str, ...] = (
     "convexity",
     "volatility",
     "curves",
+    "fx",
     "instruments",
     "pricing",
     "optionpricing",
