@@ -118,6 +118,13 @@ calibrate them was not reachable. Each is therefore a named, documented
 constant — `MAX_PLAUSIBLE_BASIS_BP` — that a caller can widen deliberately,
 rather than a magic number inside a comparison.
 
+The second condition is not a band at all. `solve_zero_cost_strike` raises
+it when the protection asked for costs more than the entire opposite wing
+is worth, so no strike funds it and no zero-cost collar exists at that
+protective level. The refusal names the strike to widen. It is here rather
+than under a solver error because nothing failed to converge: the bracket
+is exhausted and the answer is that there isn't one.
+
 ### `MissingDependencyError`
 
 **Exit code 1. Recoverable: install the extra the message names.**
@@ -173,7 +180,14 @@ shortens it and changes nothing else.
 
 ### `MarketDataError`
 
-The parent of the first three. Catch it to cover any data problem.
+The parent of `MissingFixingError`, `InsufficientDataError`,
+`ProxySourceNotDeclaredError` and `ImplausibleInputError`. Catch it to
+cover any data problem.
+
+The rest of this section is filed here because that is where a caller
+looks for them, not because they descend from it: the two dependency
+errors and `ConfigurationError` come straight off `RatesEngineError`, and
+`UnresolvedConventionError` is a `ConventionError`.
 
 ---
 
@@ -236,6 +250,14 @@ There is no free source of either, so v1 validates the solver against
 synthetic inputs and says so: pass `inputs_origin="synthetic"`. A real
 provider arrives in v1.1.
 
+### `CurveError`
+
+The parent of the five above.
+
+---
+
+## Currency and FX
+
 ### `CurrencyMismatchError`
 
 **Exit code 2. Not recoverable by changing the input.**
@@ -244,6 +266,12 @@ Two currencies met where the operation needs one: discounting a peso
 cashflow on a dollar curve, or summing present values in different
 currencies. Exit code 2 rather than 1 because each input is fine on its own
 — it is the combination that has no meaning.
+
+Both halves of that are enforced. `pv` checks every flow against the
+discount curve, and `PriceResult.__add__` checks the two units, which is
+why adding present values is spelled `a + b` rather than
+`a.value + b.value`: the obvious spelling is the one that refuses, and it
+carries both evidence chains into the total instead of dropping them.
 
 There is no implicit conversion and there will not be one. Converting needs
 a spot rate, a date and a quoting convention, all of which are decisions;
@@ -266,10 +294,6 @@ Also raised when the delta is not attainable under the convention given,
 which is a real condition rather than a guard: a spot delta cannot exceed
 `e^{-r_f T}`, and premium-adjusted delta is not monotone in the strike, so
 a delta above its peak names no strike at all.
-
-### `CurveError`
-
-The parent of the four above.
 
 ---
 

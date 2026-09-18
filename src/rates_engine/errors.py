@@ -150,11 +150,13 @@ class ConfigurationError(RatesEngineError):
 class CurrencyMismatchError(RatesEngineError):
     """Two currencies met where the operation needs one.
 
-    Discounting a peso cashflow on a dollar curve, or summing present values
-    in different currencies. Exit code 2 rather than 1: the inputs are each
-    fine, it is the combination that has no meaning. Converting between them
-    needs a rate, a date and a quoting convention, which is
-    :mod:`rates_engine.fx`'s job and never an implicit one.
+    Discounting a peso cashflow on a dollar curve, raised by
+    :func:`rates_engine.pricing.pv`, or summing present values in different
+    currencies, raised by :meth:`rates_engine.pricing.PriceResult.__add__`.
+    Exit code 2 rather than 1: the inputs are each fine, it is the
+    combination that has no meaning. Converting between them needs a rate, a
+    date and a quoting convention, which is :mod:`rates_engine.fx`'s job and
+    never an implicit one.
     """
 
     exit_code = 2

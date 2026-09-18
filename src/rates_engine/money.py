@@ -9,7 +9,10 @@ A second currency makes the omission dangerous. Discounting peso cashflows
 on the dollar curve produces a number. Adding a dollar present value to a
 peso one produces a number. Neither raises, and the evidence chain — the
 whole argument of this package — records nothing, because nothing in it
-ever knew what a currency was.
+ever knew what a currency was. Both now refuse:
+:func:`rates_engine.pricing.pv` checks each flow against the curve that
+discounts it, and :meth:`rates_engine.pricing.PriceResult.__add__` checks
+the two units.
 
 The fix is the one v2 used for volatility units: the type carries the fact,
 so the mistake cannot be made rather than being caught downstream. The

@@ -21,6 +21,7 @@ from datetime import date
 from typing import Any, Protocol, runtime_checkable
 
 from rates_engine.curves.discount import CurveSet
+from rates_engine.errors import CurrencyMismatchError
 from rates_engine.evidence import Evidence
 from rates_engine.instruments.cashflow import Cashflow
 from rates_engine.instruments.swaps import Side
@@ -129,6 +130,61 @@ class PriceResult(EngineResult):
                 [c.to_dict() for c in self.cashflows] if self.cashflows is not None else None
             ),
         }
+
+    def __add__(self, other: object) -> PriceResult:
+        """Two results of the same measure and unit, added, with both evidence chains.
+
+        A portfolio present value is a sum of leg present values, and before
+        this existed the natural way to write one was ``a.value + b.value``,
+        which adds pesos to dollars without complaint and throws away both
+        evidence chains on the way. Addition is defined here so that the
+        obvious spelling is the safe one.
+
+        Refuses a unit mismatch rather than converting: a peso present value
+        and a dollar one are not commensurable, and making them so needs a
+        rate, a date and a quoting convention that only
+        :mod:`rates_engine.fx` may supply. A measure mismatch — a par rate
+        plus an annuity — raises ``TypeError`` instead, because that is a
+        mistake in the calling code rather than a problem with the data, and
+        :mod:`rates_engine.errors` is for the latter.
+
+        The result's evidence names this sum as its producer and carries both
+        operands as sources, so ``worst_quality`` degrades to the weaker of
+        the two: adding an ``ASSUMED`` peso leg to an ``OBSERVED`` dollar one
+        cannot launder the assumption.
+
+        Raises:
+            CurrencyMismatchError: The two units differ.
+            TypeError: ``other`` is not a :class:`PriceResult`, or the two
+                measures differ.
+        """
+        if not isinstance(other, PriceResult):
+            return NotImplemented
+        if self.measure != other.measure:
+            raise TypeError(
+                f"cannot add a {self.measure!r} to a {other.measure!r}: "
+                "addition is defined between results of the same measure"
+            )
+        if self.unit != other.unit:
+            raise CurrencyMismatchError(
+                f"cannot add {self.unit} to {other.unit}: converting between them "
+                "needs a rate, a date and a quoting convention, which is "
+                "rates_engine.fx's job and never an implicit one"
+            )
+        flows: tuple[Cashflow, ...] | None = None
+        if self.cashflows is not None and other.cashflows is not None:
+            flows = self.cashflows + other.cashflows
+        return PriceResult(
+            evidence=Evidence(
+                produced_by="pricing.PriceResult.__add__",
+                fields={"measure": self.measure, "unit": self.unit, "terms": 2},
+                sources=(self.evidence, other.evidence),
+            ),
+            value=self.value + other.value,
+            measure=self.measure,
+            unit=self.unit,
+            cashflows=flows,
+        )
 
 
 def _discount_note() -> dict[str, Any]:

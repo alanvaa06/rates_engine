@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import math
+from dataclasses import replace
 from datetime import date, timedelta
 
 import pytest
@@ -254,6 +255,82 @@ class TestARealInstrumentNotJustAProbe:
         curves = CurveSet(_curve(Currency.USD))
         with pytest.raises(CurrencyMismatchError):
             pv(_OneFlow(_flow(Currency.MXN)), curves)
+
+
+class TestAddingTwoPresentValues:
+    """`docs/ERRORS.md` and `money.py` both name "summing present values in
+    different currencies" as a thing this package refuses. Until `__add__`
+    existed the claim had no code behind it: `a.value + b.value` is two
+    floats and floats add.
+    """
+
+    @staticmethod
+    def _priced(currency: Currency, rate: float = 0.04):
+        swap = TestARealInstrumentNotJustAProbe._swap()
+        return pv(swap, CurveSet(_curve(currency, rate)))
+
+    def test_two_dollar_present_values_add(self):
+        one = self._priced(Currency.USD)
+        assert (one + one).value == pytest.approx(2 * one.value)
+
+    def test_the_sum_keeps_the_measure_and_the_unit(self):
+        one = self._priced(Currency.USD)
+        total = one + one
+        assert (total.measure, total.unit) == ("pv", "USD")
+
+    def test_a_peso_present_value_plus_a_dollar_one_refuses(self):
+        with pytest.raises(CurrencyMismatchError) as caught:
+            _ = self._priced(Currency.MXN, 0.09) + self._priced(Currency.USD)
+        assert "MXN" in str(caught.value) and "USD" in str(caught.value)
+
+    def test_the_refusal_names_where_conversion_lives(self):
+        with pytest.raises(CurrencyMismatchError) as caught:
+            _ = self._priced(Currency.MXN, 0.09) + self._priced(Currency.USD)
+        assert "rates_engine.fx" in str(caught.value)
+
+    def test_adding_a_rate_to_a_present_value_is_a_type_error_not_a_refusal(self):
+        """A measure mismatch is a bug in the caller, not a data problem, so
+        it is not in the RatesEngineError taxonomy."""
+        from rates_engine.pricing import par_rate
+
+        priced = self._priced(Currency.USD)
+        rate = par_rate(TestARealInstrumentNotJustAProbe._swap(), CurveSet(_curve()))
+        with pytest.raises(TypeError, match="same measure"):
+            _ = priced + rate
+        with pytest.raises(TypeError):
+            _ = priced + 1.0
+
+    def test_the_sum_carries_both_evidence_chains(self):
+        one = self._priced(Currency.USD)
+        total = one + one
+        assert len(total.evidence.sources) == 2
+        assert total.evidence.produced_by == "pricing.PriceResult.__add__"
+
+    def test_it_concatenates_the_cashflows_rather_than_dropping_them(self):
+        one = self._priced(Currency.USD)
+        assert len((one + one).cashflows or ()) == 2 * len(one.cashflows or ())
+
+    def test_an_assumed_leg_degrades_the_total(self):
+        """The reason the sum composes evidence instead of picking one side:
+        adding a marked result to a clean one must not launder the mark."""
+        from rates_engine.evidence import DataQuality, Degradation
+
+        clean = self._priced(Currency.USD)
+        marked = replace(
+            clean,
+            evidence=clean.evidence.__class__(
+                produced_by="test",
+                warnings=(
+                    Degradation(
+                        code="unverified_convention",
+                        message="a convention this build assumes rather than knows",
+                        data_quality=DataQuality.ASSUMED,
+                    ),
+                ),
+            ),
+        )
+        assert clean.evidence.worst_quality is DataQuality.OBSERVED
+        assert (clean + marked).evidence.worst_quality is DataQuality.ASSUMED
 
 
 class TestItTravelsIntoThePayload:
