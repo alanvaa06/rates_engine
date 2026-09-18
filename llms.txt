@@ -37,6 +37,16 @@ and the effective measures where the price is not zero. Sizes a futures strip
 against a swap and shocks the hedged position, so the convexity the strip
 cannot hedge shows up in dollars and in basis points.
 
+Carries a currency on every curve and cashflow, so discounting pesos on the
+dollar curve raises rather than returning a number. Builds the USD/MXN
+forward from covered interest parity and reports the cross-currency basis
+separately, because parity has not held since 2007 and the residual is a
+real, signed cost. Prices FX options with Garman-Kohlhagen and builds their
+smile with vanna-volga from the three quotes the market makes, under a delta
+convention that has to be stated because FX has four and they differ by
+hundreds of pips. Compares seven hedge structures against a transaction
+exposure, and audits a proposed hedge against a policy loaded from data.
+
 Prices European swaptions and caps and floors with Bachelier when the
 volatility is normal and Black when it is lognormal — the units pick the
 model, because a volatility here is never a bare float. Fits SABR to a
@@ -66,11 +76,16 @@ token is spent at runtime. There is no randomness: the same input on the same
 interpreter gives the same output bit for bit, and across interpreter versions
 to 1e-14 relative.
 
-Not multi-currency: TIIE, FX forwards and FX options are v3. No CVA, FVA,
-KVA or MVA; no CCP margin; no SA-CCR. Clean prices only. No Bermudan or
-American swaptions, no CMS, no HJM or LMM beyond the closed-form convexity
-already in v1. No live market data behind the volatility cube: v2 calibrates
-to a cube the caller supplies.
+Two currencies, USD and MXN, and no others. No CVA, FVA, KVA or MVA; no CCP
+margin; no SA-CCR. Clean prices only. No Bermudan or American swaptions, no
+CMS, no HJM or LMM beyond the closed-form convexity already in v1. No exotic
+FX. No live market data behind any volatility surface: the caller supplies
+the cube and the smile.
+
+**And it does not advise.** The hedge comparator returns cost, worst case,
+best case and upside participation for seven structures and the trade-off
+between them as labelled axes. It does not rank them, there is no "best
+structure" function, and no name in the package contains `recommend`.
 
 ## Honest limits
 

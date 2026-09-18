@@ -81,9 +81,11 @@ class TestStdoutIsOneDocument:
     def test_describe_needs_no_config(self):
         done = _run("describe", "--json")
         assert done.returncode == 0
-        assert json.loads(done.stdout)["commands"] == [
-            "bootstrap", "price", "hedge", "describe", "list-instruments",
-        ]
+        # Read the list from the CLI's own table rather than repeating it,
+        # so adding a command cannot leave this asserting the old set.
+        from rates_engine.cli import _COMMANDS
+
+        assert set(json.loads(done.stdout)["commands"]) == set(_COMMANDS)
 
     def test_narration_goes_to_stderr(self, config_path):
         done = _run("bootstrap", "--config", str(config_path))

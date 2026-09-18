@@ -37,6 +37,9 @@ from rates_engine.reporting.payloads import dumps
 
 CONFIGLESS = ("describe", "list-instruments")
 NEEDS_CONFIG = ("bootstrap", "price", "hedge")
+#: The v3 commands need an `fx` block the v1 config shape does not carry, so
+#: they are exercised through their own tests rather than this file's fixture.
+NOT_EXERCISED_HERE = ("fx-forward", "hedge-structures")
 
 
 def _config(as_of, *, price: float = 96.0) -> dict:
@@ -91,8 +94,14 @@ def config_path(tmp_path, config) -> Path:
 class TestTheToolTableMirrorsTheCLI:
     """A tool that drifts from its command is the failure mode this prevents."""
 
-    def test_the_five_tools_are_the_five_commands(self):
+    def test_the_tools_are_the_commands(self):
         assert set(mcp_server.TOOLS) == set(cli._COMMANDS)
+
+    def test_this_file_accounts_for_every_tool(self):
+        """Adding a command must not quietly leave it untested here."""
+        assert set(NEEDS_CONFIG) | set(CONFIGLESS) | set(NOT_EXERCISED_HERE) == set(
+            mcp_server.TOOLS
+        )
 
     def test_each_tool_is_the_command_itself(self):
         for name, handler in mcp_server.TOOLS.items():

@@ -1,11 +1,11 @@
-"""PRD-003 AC-1.1, AC-1.3 and AC-1.4: the peso curve, and what it admits.
+"""PRD-003 AC-1.1, PRD-003 AC-1.3 and PRD-003 AC-1.4: the peso curve, and what it admits.
 
 This is the phase the research gate shaped. Banxico, ISDA and CME are all
 403 from the build environment and QuantLib has no TIIE index, so the day
 count, the coupon period and the distinction between the two benchmarks are
 assumptions. The machinery is testable anyway — a bootstrap reprices what
 it was built from regardless of whether the convention is right — and the
-assumptions are testable *as assumptions*, which is what AC-1.4 asks for.
+assumptions are testable *as assumptions*, which is what PRD-003 AC-1.4 asks for.
 
 So the tests split three ways. The bootstrap arithmetic, which is exact.
 The benchmark marking, which is bookkeeping and must not be skippable. And
@@ -102,7 +102,7 @@ class TestTheSchedule:
 
 
 class TestTheBootstrapArithmetic:
-    """AC-1.1: every instrument reprices, whatever the convention turns out to be."""
+    """PRD-003 AC-1.1: every instrument reprices, whatever the convention turns out to be."""
 
     def test_every_instrument_reprices_inside_a_hundredth_of_a_basis_point(self):
         result = _curve()
@@ -160,7 +160,7 @@ class TestTheBootstrapArithmetic:
 
 
 class TestTheBenchmarkIsAlwaysNamed:
-    """AC-1.3: which rate this is, carried rather than inferable."""
+    """PRD-003 AC-1.3: which rate this is, carried rather than inferable."""
 
     def test_the_benchmark_is_required(self):
         with pytest.raises(TypeError):
@@ -181,7 +181,7 @@ class TestTheBenchmarkIsAlwaysNamed:
 
 
 class TestComparingTheTwoBenchmarks:
-    """AC-1.3's second half: the difference, in basis points."""
+    """PRD-003 AC-1.3's second half: the difference, in basis points."""
 
     @pytest.fixture
     def comparison(self):
@@ -229,7 +229,7 @@ class TestComparingTheTwoBenchmarks:
 
 
 class TestTheUnresolvedConventions:
-    """AC-1.4, which is the whole reason this phase is honest."""
+    """PRD-003 AC-1.4, which is the whole reason this phase is honest."""
 
     def test_every_result_names_them(self):
         result = _curve()
@@ -287,7 +287,7 @@ class TestTheUnresolvedConventions:
 
 
 class TestStrictConventionsRefuses:
-    """AC-1.4's second half: a caller can demand verified conventions."""
+    """PRD-003 AC-1.4's second half: a caller can demand verified conventions."""
 
     def test_it_refuses_while_anything_is_unresolved(self):
         with pytest.raises(UnresolvedConventionError) as excinfo:

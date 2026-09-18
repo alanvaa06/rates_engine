@@ -9,6 +9,11 @@ claims, so it belongs here too.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-18
+
+A second currency, FX forwards and options, and a hedge-structure
+comparator that does not recommend. No v1 or v2 number moves.
+
 ### Added
 
 - **`Currency`**, carried on `DiscountCurve`, on `Cashflow` and derived on
@@ -22,9 +27,63 @@ claims, so it belongs here too.
   the sexennial inauguration day. Named BMV rather than Banxico because it
   *is* the exchange calendar — Banxico's banking calendar is a different
   list, and the diff is `[manual-check]` and outstanding.
-- **`HolidayCalendar`**, the shared base every calendar's rolling,
-  counting and stepping now comes from. Extracted when the second calendar
-  arrived rather than duplicated.
+- **`HolidayCalendar`**, the shared base every calendar's rolling, counting
+  and stepping now comes from. Extracted when the second calendar arrived
+  rather than duplicated.
+- **FX.** `CurrencyPair` carrying the pip its forward points are counted
+  in; `garman_kohlhagen` with price, delta, gamma, vega, vanna, volga and
+  theta, each checked against a bump; `forward_from_curves` and
+  `implied_basis`, which keep the cross-currency basis separate from the
+  covered-interest-parity forward rather than folding it in.
+- **Four delta conventions, and no default.** `DeltaConvention` is spot or
+  forward crossed with premium-adjusted or not. They give four *different*
+  strikes for the same quoted delta — over 300 pips apart on USD/MXN at
+  three months — and `DeltaConventionError` refuses rather than picking
+  one, because the research gate could not establish which USD/MXN trades
+  on. Premium-adjusted delta is not monotone in the strike, so the
+  inversion locates the peak and returns the out-of-the-money branch, and
+  refuses a delta above the peak instead of approximating it.
+- **Vanna-volga.** `VannaVolgaSmile` builds a smile from ATM, risk reversal
+  and butterfly and reproduces all three quoted pillars exactly. Past the
+  outer pillars it holds the volatility flat and marks the reading
+  unreliable rather than extrapolating a construction that can imply a
+  negative density. `ATMConvention` is explicit for the same reason the
+  delta convention is: "at the money" is three different strikes.
+- **The MXN curve.** `bootstrap_mxn_curve` with `TIIEBenchmark`, and
+  `compare_benchmarks` reporting the zero-rate gap between the two.
+- **`UNRESOLVED_MXN` and `UnresolvedConventionError`.** Every MXN
+  convention this build assumes rather than knows, carried as a
+  `Degradation` on every peso result so `worst_quality` reaches `assumed`
+  and anything priced on it inherits that. `strict_conventions=True` turns
+  the marking into a refusal.
+- **Seven hedge structures.** `compare_structures` returns a table —
+  unhedged, forward at a ratio, protective option at and out of the money,
+  collar, zero-cost collar, option spread, seagull — with cost, worst case,
+  best case, upside participation and a payoff grid, plus the residual
+  variance decomposition when a correlation is supplied. It does not rank
+  them, and no name in the package contains `recommend`.
+- **`HedgeProgram`.** The hedging policy as data, loaded strictly — an
+  unknown key refuses and names itself — and `audit_hedge`, which reports
+  departures with a severity and what would bring them back.
+- **A Banxico SIE client.** Token from the caller or the environment, never
+  the repository; parsing tested against recorded payload shapes because
+  this build has never reached the live endpoint.
+- **`rateng fx-forward` and `rateng hedge-structures`**, which the MCP
+  server picks up as tools automatically because it takes its table from
+  the CLI's.
+- **`ImplausibleInputError`.** A well-formed number outside the band this
+  build accepts — a cross-currency basis beyond ±500 bp. The band is a
+  named constant a caller can widen deliberately, and its own message
+  admits it is a plausibility check rather than a measurement.
+
+### Changed
+
+- `rateng describe` reports the currencies, the FX models, the four delta
+  conventions and their absent defaults, the hedge structures, the
+  unresolved MXN conventions, and `recommends: false`.
+- `bootstrap_discount_curve` takes a `currency`, defaulting to USD.
+- `DiscountCurve.shifted`, `.with_node` and the parametric samplers carry
+  the currency through.
 
 ### Fixed
 
@@ -36,7 +95,8 @@ claims, so it belongs here too.
   2027 as business days. Anything that rolled or counted across those dates
   — a schedule, an accrual, a settlement date — was off by a day. Present
   in 0.1.0 and 0.2.0. Found while writing the second calendar's tests; no
-  existing test caught it because every fixture starts in January.
+  existing test caught it because every fixture in the suite starts in
+  January.
 
 ## [0.2.0] - 2026-09-18
 
@@ -201,6 +261,7 @@ divided by a zero price.
 - The Hull-White convexity formula is transcribed via Skov and Skovmand rather
   than read in Henrard 2018. The Ho-Lee limit test is what guards it.
 
-[Unreleased]: https://github.com/alanvaa06/rates_engine/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/alanvaa06/rates_engine/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/alanvaa06/rates_engine/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/alanvaa06/rates_engine/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/alanvaa06/rates_engine/releases/tag/v0.1.0

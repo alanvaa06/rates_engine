@@ -1,4 +1,4 @@
-"""PRD-003 AC-2.1 to AC-2.4: the forward, and the part parity does not explain.
+"""PRD-003 AC-2.1 to PRD-003 AC-2.4: the forward, and the part parity does not explain.
 
 Covered interest parity is an arbitrage relation, so every test of it here
 is an identity that needs no market data — which is the whole reason US-2
@@ -59,7 +59,7 @@ def delivery() -> date:
 
 
 class TestCoveredInterestParity:
-    """AC-2.1: `F = S P_foreign / P_domestic`, an identity."""
+    """PRD-003 AC-2.1: `F = S P_foreign / P_domestic`, an identity."""
 
     def test_the_parity_relation_holds_exactly(self, usd, mxn, delivery):
         result = forward_from_curves(USDMXN, SPOT, delivery, mxn, usd)
@@ -87,7 +87,7 @@ class TestCoveredInterestParity:
         assert result.forward_points == pytest.approx(0.0, abs=1e-9)
 
     def test_the_points_are_reported_in_the_pairs_pips(self, usd, mxn, delivery):
-        """AC-2.1 asks for pips under a declared quoting convention, so the
+        """PRD-003 AC-2.1 asks for pips under a declared quoting convention, so the
         pip travels with the pair rather than being assumed downstream."""
         result = forward_from_curves(USDMXN, SPOT, delivery, mxn, usd)
         assert result.forward_points == pytest.approx((result.outright - SPOT) / USDMXN.pip)
@@ -108,7 +108,7 @@ class TestCoveredInterestParity:
 
 
 class TestTheBasisIsKeptSeparate:
-    """AC-2.2: the payload decomposes rather than summing."""
+    """PRD-003 AC-2.2: the payload decomposes rather than summing."""
 
     def test_the_outright_is_the_parity_forward_plus_the_basis_part(self, usd, mxn, delivery):
         result = forward_from_curves(USDMXN, SPOT, delivery, mxn, usd, basis_bp=-25.0)
@@ -158,7 +158,7 @@ class TestTheBasisIsKeptSeparate:
 
 
 class TestInvertingAQuotedForward:
-    """AC-2.3: whatever parity does not explain is the basis."""
+    """PRD-003 AC-2.3: whatever parity does not explain is the basis."""
 
     @pytest.mark.parametrize("basis", [-120.0, -25.0, 0.0, 40.0])
     def test_the_round_trip_is_exact(self, usd, mxn, delivery, basis):
@@ -188,7 +188,7 @@ class TestInvertingAQuotedForward:
 
 
 class TestPlausibility:
-    """AC-2.4: a number no market produces is refused, not used."""
+    """PRD-003 AC-2.4: a number no market produces is refused, not used."""
 
     @pytest.mark.parametrize("basis", [600.0, -600.0, 5000.0])
     def test_a_basis_outside_the_band_refuses(self, usd, mxn, delivery, basis):

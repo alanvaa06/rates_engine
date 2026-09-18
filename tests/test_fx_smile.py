@@ -97,7 +97,7 @@ class TestTheQuotesArithmetic:
 
 
 class TestExactReproductionOfThePillars:
-    """AC-3.2, tested on the price rather than on the lookup short circuit."""
+    """PRD-003 AC-3.2, tested on the price rather than on the lookup short circuit."""
 
     @pytest.mark.parametrize("kind", list(OptionKind))
     def test_the_price_at_each_pillar_is_the_market_price(self, smile, kind):

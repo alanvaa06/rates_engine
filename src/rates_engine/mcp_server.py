@@ -5,7 +5,7 @@ reformat: every tool calls the same handler the corresponding ``--json``
 command calls and returns the same document, so PRD-002 AC-6.1's byte
 equality is a structural property rather than something kept true by hand.
 
-**Why the handlers are ordinary functions.** The five tools live in
+**Why the handlers are ordinary functions.** The tools live in
 :data:`TOOLS` as plain callables over a config mapping. The SDK is imported
 inside :func:`main` and wraps them. That keeps the contract testable without
 the SDK installed — the equality with the CLI, the error mapping, the absence
@@ -40,7 +40,7 @@ from rates_engine.reporting.payloads import dumps, error_payload
 __all__ = ["TOOLS", "TOOL_DESCRIPTIONS", "call_tool", "build_server", "main"]
 
 TOOLS: dict[str, Callable[[dict[str, Any] | None], dict[str, Any]]] = dict(_COMMANDS)
-"""The five tools, each the same callable the CLI dispatches to.
+"""Every tool, each the same callable the CLI dispatches to.
 
 Taken from the CLI's table rather than re-declared, so a command added there
 cannot silently fail to appear here, and a tool here cannot drift from the
@@ -53,6 +53,14 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "bootstrap": "Build the discount curve from a config and return it with its four views.",
     "price": "Price the configured swap and return every risk measure that is defined.",
     "hedge": "Size a futures strip against the swap and shock the hedged position.",
+    "fx-forward": (
+        "USD/MXN forward from spot and two rates, with the cross-currency basis "
+        "reported separately from the covered-interest-parity part."
+    ),
+    "hedge-structures": (
+        "Compare seven hedge structures against a transaction exposure: cost, worst "
+        "case, best case, upside participation. Compares; does not recommend."
+    ),
 }
 """One line per tool, for the agent choosing between them."""
 
@@ -86,7 +94,7 @@ def _failure(exc: BaseException) -> str:
 
 
 def build_server() -> Any:
-    """Construct the MCP server with the five tools registered.
+    """Construct the MCP server with every tool registered.
 
     Returns:
         The SDK's server object, ready to run.

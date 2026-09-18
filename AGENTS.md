@@ -140,6 +140,26 @@ forward *between* nodes, which no instrument constrains.
 `curves.compare_interpolations` measures that gap rather than declaring a
 winner.
 
+**A delta does not name a strike.** FX has four conventions — spot or
+forward, premium-adjusted or not — and they give four different strikes for
+the same quoted number, over three hundred pips apart on USD/MXN at three
+months. There is no default and `DeltaConventionError` says why: the
+research gate could not establish which one the pair trades on. "At the
+money" is likewise three strikes, and `ATMConvention` is explicit for the
+same reason.
+
+**Every MXN convention in this build is a guess, and says so.**
+`UNRESOLVED_MXN` names them; every peso result carries one `Degradation`
+per entry, so `worst_quality` reaches `ASSUMED` and anything priced on the
+curve inherits it. Pass `strict_conventions=True` to refuse instead. The
+gap is stored as data: resolving it shortens the tuple and changes no code.
+
+**The engine compares hedges; it does not recommend one.** There is no
+function whose name contains `recommend`, and a test scans for it.
+`compare_structures` returns cost, worst case, best case and upside
+participation, and `TRADE_OFF_FRAME` labels the axes without choosing a
+point on them.
+
 **A currency is carried, and two of them never mix silently.**
 `DiscountCurve` and `Cashflow` both have one, defaulting to `USD` — which
 is what every v1 and v2 object already was. Discounting a flow on a curve

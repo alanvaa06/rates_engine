@@ -1,4 +1,4 @@
-"""PRD-003 AC-3.1 and AC-3.5: Garman-Kohlhagen and its greeks.
+"""PRD-003 AC-3.1 and PRD-003 AC-3.5: Garman-Kohlhagen and its greeks.
 
 Garman-Kohlhagen is Black-Scholes with the dividend yield replaced by the
 foreign interest rate, so almost everything here is a closed-form identity
@@ -36,7 +36,7 @@ def _price(strike: float, kind: OptionKind = OptionKind.CALL, **kw) -> float:
 
 
 class TestPutCallParity:
-    """AC-3.1: `C - P = S e^{-r_f T} - K e^{-r_d T}` to 1e-10."""
+    """PRD-003 AC-3.1: `C - P = S e^{-r_f T} - K e^{-r_d T}` to 1e-10."""
 
     @pytest.mark.parametrize("strike", STRIKES)
     def test_it_holds_at_every_strike(self, strike):
@@ -149,7 +149,7 @@ class TestArgumentRefusals:
 
 
 class TestGreeks:
-    """AC-3.5. Each analytic greek is checked against a numerical bump."""
+    """PRD-003 AC-3.5. Each analytic greek is checked against a numerical bump."""
 
     STRIKE = 19.0
     BUMP = 1e-5

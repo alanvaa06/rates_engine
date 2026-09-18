@@ -2,10 +2,10 @@
 
 Deterministic SOFR rates engine: curve construction (discount, zero, par, forward),
 SOFR futures with convexity adjustment, OIS/IRS/FRA pricing under collateral
-discounting, key-rate and duration risk, swap hedging with futures strips, and —
-since v0.2 — swaptions, caps and floors with Bachelier and Black, a SABR
-volatility cube, Nelson-Siegel and FOMC-step curves, monotone-convex
-interpolation and an MCP server.
+discounting, key-rate and duration risk, swap hedging with futures strips; swaptions, caps and floors with Bachelier
+and Black, a SABR volatility cube, Nelson-Siegel and FOMC-step curves,
+monotone-convex interpolation and an MCP server; and — since v0.3 — a second
+currency, USD/MXN forwards and options, and a hedge-structure comparator.
 Every result returns the number **and** the evidence it rests on. No AI in runtime.
 
 Distribution: `finport-ratesengine`. Import: `rates_engine`. CLI: `rateng`.
@@ -99,6 +99,8 @@ rateng bootstrap --config config.json --json   # curve plus its four views
 rateng price --config config.json --json       # pv, par, annuity, every risk measure
 rateng hedge --config config.json --json       # contracts per period plus the shock table
 rateng list-instruments --json              # what this build prices, and what each needs
+rateng fx-forward --config fx.json --json      # CIP forward, with the basis kept separate
+rateng hedge-structures --config fx.json --json  # seven structures, costed side by side
 ```
 
 `python scripts/write_example_config.py config.json` writes a config to start
@@ -133,6 +135,16 @@ never divided by a zero price — a par swap is worth nothing, so
 Macaulay and modified duration need a yield, and therefore a bond, so they
 raise rather than being approximated by effective duration under their own
 names.
+
+A currency never mixes with another: discounting a peso cashflow on a dollar
+curve raises rather than returning a number, and there is no implicit
+conversion anywhere, because converting needs a rate, a date and a quoting
+convention. A delta never names a strike until the convention is stated —
+FX has four, and they differ by hundreds of pips. A Mexican convention this
+build could not verify is never presented as one it knows: every peso result
+names what it assumed and can be made to refuse outright. And the engine
+never recommends a hedge: it compares them and reports the trade-off as
+labelled axes, with no function anywhere whose name contains `recommend`.
 
 A volatility is never a bare float, and never converted between normal and
 lognormal, because there is no such conversion — only an at-the-money
@@ -226,6 +238,20 @@ pricing or hedging code knowing what a proxy is.
   and not the solver. Each says so in its provenance sibling.
 - **SABR's β is fixed, not calibrated.** With one smile, β and ρ are close to
   unidentifiable. The choice travels in every calibration payload.
+- **No MXN convention is verified.** Banxico, ISDA and CME are all unreachable
+  from the build environment, and QuantLib — the one substantive source that
+  is — has no TIIE index at all. The TIIE day count, the 28-day coupon period,
+  the TIIE 28 versus TIIE de Fondeo distinction and the SIE series identifiers
+  are assumptions, named in `UNRESOLVED_MXN`, carried as a degradation on
+  every peso result, and refusable with `strict_conventions=True`. Resolving
+  them shortens a tuple and changes nothing else.
+- **The Mexican calendar is the BMV's, not Banxico's.** Different lists, and
+  the diff has not been made. See `tests/fixtures/bmv_holidays.csv`.
+- **There is no default FX delta convention, and no default ATM convention.**
+  Same reason. Asking for a strike without stating one raises.
+- **Vanna-volga is not arbitrage free.** Past the quoted pillars the
+  volatility is held flat and the reading is marked unreliable rather than
+  extrapolated into a negative density.
 
 [`docs/RESEARCH.md`](docs/RESEARCH.md) maps every formula to its source and
 says whether that source was read directly.
@@ -253,12 +279,14 @@ point to the author's private knowledge base and do not resolve here.
    futures and an opt-in Treasury par proxy for the long end; four curve
    views; Ho-Lee and Hull-White convexity; OIS, IRS and FRA pricing; DV01,
    key-rate DV01 and the duration conventions; strip hedge with a shock table.
-2. **v0.2** (PRD-002, this release): Black and Bachelier swaptions, caps and
+2. **v0.2** (PRD-002): Black and Bachelier swaptions, caps and
    floors, a SABR vol cube, Nelson-Siegel and FOMC-step curves,
    monotone-convex interpolation, an MCP server.
-3. **v0.3** (PRD-003): TIIE curve, USD/MXN forwards with cross-currency basis,
-   Garman-Kohlhagen with vanna-volga, a CFA Level III hedge-structure
-   comparator.
+3. **v0.3** (PRD-003, this release): a second currency carried in the type,
+   the BMV calendar, a TIIE curve that marks every convention it could not
+   verify, USD/MXN forwards with the cross-currency basis kept separate,
+   Garman-Kohlhagen with vanna-volga and four explicit delta conventions, a
+   CFA Level III hedge-structure comparator, and the hedging policy as data.
 
 Planned for v1.1: `FixedRateBond`, which brings Macaulay and modified
 duration with it, and a real quote source for the dual-curve solver.

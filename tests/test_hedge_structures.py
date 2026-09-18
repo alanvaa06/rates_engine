@@ -1,12 +1,12 @@
-"""PRD-003 AC-4.1 to AC-4.5: seven structures, a table, and no recommendation.
+"""PRD-003 AC-4.1 to PRD-003 AC-4.5: seven structures, a table, and no recommendation.
 
-The criterion that shapes this file is AC-4.5: there is no "best structure"
+The criterion that shapes this file is PRD-003 AC-4.5: there is no "best structure"
 function, and the test for that is a scan of the public surface. Everything
 else follows from it — the comparator returns numbers and labelled
 trade-off axes, and the ordering tests assert what the costs *are* rather
 than which cost is right.
 
-One honest finding is recorded here rather than tuned away. AC-4.2's
+One honest finding is recorded here rather than tuned away. PRD-003 AC-4.2's
 premium ordering — seagull ≤ spread ≤ collar ≤ OTM ≤ ATM — holds exactly
 for the PRD's own example, a payable, at coherent strikes. It does not hold
 universally: for a receivable at the same offsets the collar and the spread
@@ -64,7 +64,7 @@ def receivable():
 
 
 class TestTheTableHasWhatWasAskedFor:
-    """AC-4.1."""
+    """PRD-003 AC-4.1."""
 
     def test_every_structure_is_present(self, payable):
         assert [s.name for s in payable.structures] == [
@@ -141,7 +141,7 @@ class TestTheBaselineRows:
 
 
 class TestThePremiumOrdering:
-    """AC-4.2, for the case it holds in, and honesty about the case it does not."""
+    """PRD-003 AC-4.2, for the case it holds in, and honesty about the case it does not."""
 
     def test_the_ordering_holds_for_the_prds_own_example(self, payable):
         costs = [payable.by_name(name).upfront_cost for name in ORDERED_BY_COST]
@@ -186,7 +186,7 @@ class TestThePremiumOrdering:
 
 
 class TestTheZeroCostCollar:
-    """AC-4.2's second half: net premium zero, with the strike solved."""
+    """PRD-003 AC-4.2's second half: net premium zero, with the strike solved."""
 
     def test_its_net_premium_is_zero(self, payable, receivable):
         for comparison in (payable, receivable):
@@ -287,7 +287,7 @@ class TestDirectionMatters:
 
 
 class TestTheHedgeRatio:
-    """AC-4.3: a fraction, applied linearly."""
+    """PRD-003 AC-4.3: a fraction, applied linearly."""
 
     def test_half_a_hedge_is_halfway_between(self):
         full = compare_structures(_exposure(), QUOTE, hedge_ratio=1.0).by_name("forward")
@@ -313,7 +313,7 @@ class TestTheHedgeRatio:
 
 
 class TestTheVarianceDecomposition:
-    """AC-4.3's second half."""
+    """PRD-003 AC-4.3's second half."""
 
     @pytest.fixture
     def decomposed(self):
@@ -367,7 +367,7 @@ class TestTheVarianceDecomposition:
 
 
 class TestItDoesNotRecommend:
-    """AC-4.4 and AC-4.5, which are the reason this module exists in this shape."""
+    """PRD-003 AC-4.4 and PRD-003 AC-4.5, which are the reason this module exists in this shape."""
 
     def test_no_public_name_contains_recommend(self):
         import rates_engine

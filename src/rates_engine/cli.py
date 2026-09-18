@@ -20,13 +20,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import traceback
 from collections.abc import Callable
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
+from rates_engine.conventions.daycount import year_fraction
 from rates_engine.convexity import ConvexityModel, convexity_adjustment
 from rates_engine.curves.bootstrap import (
     FuturesNode,
@@ -34,7 +36,8 @@ from rates_engine.curves.bootstrap import (
     RealizedStubNode,
     bootstrap_discount_curve,
 )
-from rates_engine.curves.discount import CURVE_TIME_BASIS, CurveSet
+from rates_engine.curves.discount import CURVE_TIME_BASIS, CurveSet, DiscountCurve
+from rates_engine.curves.mxn import UNRESOLVED_MXN
 from rates_engine.curves.views import all_views
 from rates_engine.errors import (
     ConfigurationError,
@@ -43,8 +46,20 @@ from rates_engine.errors import (
 )
 from rates_engine.errors import __all__ as EXCEPTION_NAMES
 from rates_engine.evidence import DataQuality, Provenance
+from rates_engine.fx.delta import DeltaBasis, PremiumAdjustment
+from rates_engine.fx.forward import forward_from_curves
+from rates_engine.fx.quote import USDMXN
+from rates_engine.fx.vannavolga import ATMConvention
+from rates_engine.hedge_program import audit_hedge, load_program
 from rates_engine.hedging import DEFAULT_SHOCKS_BP, SR3_DV01, shock_table, strip_hedge
+from rates_engine.hedging_structures import (
+    Exposure,
+    ExposureDirection,
+    StructureQuote,
+    compare_structures,
+)
 from rates_engine.instruments.swaps import OISSwap, Side
+from rates_engine.money import Currency
 from rates_engine.pricing import annuity, dv01, par_rate, pv
 from rates_engine.reporting.payloads import dumps, error_payload, result_payload
 from rates_engine.results import SCHEMA_VERSION
@@ -153,7 +168,6 @@ def _build_instruments(config: dict[str, Any], as_of: date) -> tuple[Any, ...]:
     sigma = float(convexity.get("sigma", 0.0))
     kappa = convexity.get("kappa")
 
-    from rates_engine.conventions.daycount import year_fraction
 
     for entry in curve.get("futures", ()):
         start, end = _as_date(entry["start"]), _as_date(entry["end"])
@@ -262,7 +276,11 @@ def _command_describe(_config: dict[str, Any] | None) -> dict[str, Any]:
         "distribution": "finport-ratesengine",
         "import_name": "rates_engine",
         "console_script": "rateng",
-        "commands": ["bootstrap", "price", "hedge", "describe", "list-instruments"],
+        "commands": [
+            "bootstrap", "price", "hedge", "describe", "list-instruments",
+            "fx-forward", "hedge-structures",
+        ],
+        "currencies": [c.value for c in Currency],
         "day_counts": ["ACT/360", "ACT/365F", "30/360"],
         "calendars": ["SIFMA_US"],
         "interpolation": ["log_linear_df", "monotone_convex"],
@@ -271,6 +289,35 @@ def _command_describe(_config: dict[str, Any] | None) -> dict[str, Any]:
         "volatility_units": [u.value for u in VolUnits],
         "smile_model": "sabr_hagan_2002",
         "parametric_curves": ["nelson_siegel", "fomc_step"],
+        "calendars_v3": ["BMV"],
+        "fx": {
+            "pairs": [USDMXN.name],
+            "option_model": "garman_kohlhagen",
+            "smile_model": "vanna_volga",
+            "delta_conventions": [
+                f"{basis.value} {adjustment.value}"
+                for basis in DeltaBasis
+                for adjustment in PremiumAdjustment
+            ],
+            "atm_conventions": [c.value for c in ATMConvention],
+            "delta_convention_default": None,
+            "atm_convention_default": None,
+        },
+        "hedge_structures": [
+            "unhedged", "forward", "protective_option_atm", "protective_option_otm",
+            "collar", "collar_zero_cost", "option_spread", "seagull",
+        ],
+        "recommends": False,
+        "recommends_note": (
+            "This engine compares hedge structures and does not rank them. There is "
+            "no function whose name contains 'recommend'; the payload reports cost, "
+            "worst case, best case and upside participation, and the trade-off "
+            "between them as labelled axes. Which point on that line is right is a "
+            "treasury policy question."
+        ),
+        "unresolved_conventions": {
+            "MXN": [name for name, _ in UNRESOLVED_MXN],
+        },
         "curve_views": ["discount", "zero", "par", "forward"],
         "risk_measures": [
             "dv01",
@@ -371,12 +418,109 @@ def _command_hedge(config: dict[str, Any] | None) -> dict[str, Any]:
     return result_payload(hedge, shock_table=table.to_dict(), command="hedge")
 
 
+def _flat_curve(as_of: date, rate: float, currency: Currency, years: float) -> DiscountCurve:
+    """A single-node continuous curve, for the FX commands.
+
+    v3's FX commands take two rates rather than two bootstrapped curves,
+    because a treasurer comparing hedge structures has a deposit rate to
+    hand and not a calibration set. The curve is built here so the forward
+    goes through the same discounting code every other price does, rather
+    than through a second exponential written out in the command.
+    """
+    node = as_of + timedelta(days=max(1, round(365.0 * years)))
+    span = year_fraction(as_of, node, CURVE_TIME_BASIS)
+    return DiscountCurve(as_of, (node,), (math.exp(-rate * span),), currency=currency)
+
+
+def _fx_inputs(config: dict[str, Any]) -> tuple[date, dict[str, Any], float]:
+    block = config.get("fx") or {}
+    if not block:
+        raise ConfigurationError(
+            "this command needs an `fx` block with spot, delivery, r_domestic and "
+            "r_foreign. See `rateng describe --json` for the shape."
+        )
+    as_of = _as_date(config["as_of"])
+    delivery = _as_date(block["delivery"])
+    return as_of, block, year_fraction(as_of, delivery, CURVE_TIME_BASIS)
+
+
+def _command_fx_forward(config: dict[str, Any] | None) -> dict[str, Any]:
+    """The USD/MXN forward, with the cross-currency basis kept separate."""
+    config = _require_config(config, "fx-forward")
+    as_of, block, years = _fx_inputs(config)
+    delivery = _as_date(block["delivery"])
+    domestic = _flat_curve(as_of, float(block["r_domestic"]), Currency.MXN, years)
+    foreign = _flat_curve(as_of, float(block["r_foreign"]), Currency.USD, years)
+    result = forward_from_curves(
+        USDMXN,
+        float(block["spot"]),
+        delivery,
+        domestic,
+        foreign,
+        basis_bp=float(block.get("basis_bp", 0.0)),
+    )
+    return result_payload(result, command="fx-forward")
+
+
+def _command_hedge_structures(config: dict[str, Any] | None) -> dict[str, Any]:
+    """Compare the seven hedge structures against a transaction exposure."""
+    config = _require_config(config, "hedge-structures")
+    as_of, block, years = _fx_inputs(config)
+    exposure_block = config.get("exposure") or {}
+    if not exposure_block:
+        raise ConfigurationError(
+            "hedge-structures needs an `exposure` block with amount and direction "
+            "('payable' or 'receivable')."
+        )
+    quote = StructureQuote(
+        spot=float(block["spot"]),
+        expiry=years,
+        r_domestic=float(block["r_domestic"]),
+        r_foreign=float(block["r_foreign"]),
+        volatility=float(block["volatility"]),
+    )
+    exposure = Exposure(
+        amount=float(exposure_block["amount"]),
+        direction=ExposureDirection(str(exposure_block["direction"])),
+        settlement=_as_date(block["delivery"]),
+        pair=USDMXN,
+    )
+    comparison = compare_structures(
+        exposure,
+        quote,
+        hedge_ratio=float(exposure_block.get("hedge_ratio", 1.0)),
+        correlation=(
+            float(exposure_block["correlation"])
+            if exposure_block.get("correlation") is not None
+            else None
+        ),
+        foreign_asset_volatility=(
+            float(exposure_block["foreign_asset_volatility"])
+            if exposure_block.get("foreign_asset_volatility") is not None
+            else None
+        ),
+    )
+    payload: dict[str, Any] = {"command": "hedge-structures"}
+    program_block = config.get("hedge_program")
+    if program_block:
+        program = load_program(dict(program_block))
+        audit = audit_hedge(
+            program,
+            float(exposure_block.get("hedge_ratio", 1.0)),
+            proposed_instrument=exposure_block.get("proposed_instrument"),
+        )
+        payload["program_audit"] = audit.to_dict()
+    return result_payload(comparison, **payload)
+
+
 _COMMANDS: dict[str, Callable[[dict[str, Any] | None], dict[str, Any]]] = {
     "describe": _command_describe,
     "list-instruments": _command_list_instruments,
     "bootstrap": _command_bootstrap,
     "price": _command_price,
     "hedge": _command_hedge,
+    "fx-forward": _command_fx_forward,
+    "hedge-structures": _command_hedge_structures,
 }
 
 

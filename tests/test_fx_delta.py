@@ -1,4 +1,4 @@
-"""PRD-003 AC-3.3 and AC-3.4: four conventions, four strikes, no default.
+"""PRD-003 AC-3.3 and PRD-003 AC-3.4: four conventions, four strikes, no default.
 
 The criterion the research gate made real. It could not establish which
 delta convention USD/MXN trades on — Banxico, ISDA and CME are all 403 from
@@ -52,7 +52,7 @@ def _delta(strike, kind, convention):
 
 
 class TestTheConventionIsNeverAssumed:
-    """AC-3.4."""
+    """PRD-003 AC-3.4."""
 
     def test_a_strike_from_a_delta_refuses_without_one(self):
         with pytest.raises(DeltaConventionError) as excinfo:
@@ -88,7 +88,7 @@ class TestTheConventionIsNeverAssumed:
 
 
 class TestTheFourGiveFourStrikes:
-    """AC-3.3: the same quoted delta, four different strikes."""
+    """PRD-003 AC-3.3: the same quoted delta, four different strikes."""
 
     def test_every_convention_round_trips(self):
         for convention in ALL_FOUR:

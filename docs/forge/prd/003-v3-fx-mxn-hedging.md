@@ -1,6 +1,6 @@
 # PRD-003: v3 — curva MXN, FX forwards USD/MXN y pricer de coberturas
 
-> Escrito 2026-09-16. Depende de PRD-001 y PRD-002 (v0.2.0 merged a main 2026-09-18). Formato forge-master. **Estado: research previo ejecutado 2026-09-18 (`docs/forge/research/003-mxn-conventions.md`); preguntas abiertas cerradas; en construcción.** Supuestos marcados **[asumo]**.
+> Escrito 2026-09-16. Depende de PRD-001 y PRD-002 (v0.2.0 merged a main 2026-09-18). Formato forge-master. **Estado: construido 2026-09-18; los 20 AC verdes.** Supuestos marcados **[asumo]**.
 
 ## Goal
 Publicar `finport-ratesengine` v0.3: segunda moneda (MXN) con curva TIIE, FX forwards USD/MXN vía paridad cubierta más basis cross-currency, opciones FX vanilla (Garman-Kohlhagen) con smile vanna-volga desde ATM/RR/BF y convenciones de delta explícitas, y un comparador determinista de estructuras de cobertura (forward, over/under-hedge, put, put OTM, collar, put spread, seagull) para una exposición de transacción — el marco de CFA L3 Reading 19 y Derivatives. Sin agentes: el "memo" es una tabla determinista, no texto generado.
@@ -106,11 +106,93 @@ el nombre de cada convención sin verificar, y `strict=True` se rehúsa.
 - Los ejemplos del README usan una exposición ficticia; ningún dato de cliente.
 
 ## Definition of Done
-- [ ] Todos los AC verdes; property tests para put-call parity, paridad forward y orden de primas.
-- [ ] `[manual-check]` AC-1.2 verificado contra Banxico.
-- [ ] `docs/RESEARCH.md` extendido con el research MXN compilado y con [[CFA L3 Derivatives — Forwards, Futures, and Options]] y Reading 19.
-- [ ] `AGENTS.md`: sección sobre convenciones de delta y por qué no hay `recommend`.
-- [ ] Tag `v0.3.0`.
+- [x] Todos los AC verdes; property tests para put-call parity, paridad forward y orden de primas.
+- [ ] `[manual-check]` AC-1.2 verificado contra Banxico — **pendiente, bloqueado por egress** (403). `tests/fixtures/bmv_holidays.csv` está listo para diffear.
+- [x] `docs/RESEARCH.md` extendido con el research MXN compilado y con [[CFA L3 Derivatives — Forwards, Futures, and Options]] y Reading 19.
+- [x] `AGENTS.md`: sección sobre convenciones de delta y por qué no hay `recommend`.
+- [ ] Tag `v0.3.0` (pendiente de aprobación de Alan, como v0.1.0 y v0.2.0).
+
+## Estado de implementación (2026-09-18)
+
+v0.3.0 construido. `pytest -q`: **1442 pasan, 5 saltan** (los goldens CME de
+v1, sin cambio). `ruff check .` limpio. `mypy src/rates_engine` limpio en 59
+archivos, allowlist vacía. `python scripts/audit_acceptance.py 003`:
+**20 AC, 0 sin cubrir, 0 parciales**.
+
+### La decisión que no estaba en el PRD, y por qué fue primero
+
+`grep -rn "currency" src/` devolvía dos resultados, ambos prosa en
+docstrings. El motor no tenía concepto de moneda porque nunca había habido
+más de una. Con MXN, descontar flujos en pesos sobre la curva USD devuelve
+un número, sumar un PV en dólares con uno en pesos devuelve un número, y la
+cadena de evidencia —que es el argumento entero del paquete— no registra
+ninguna de las dos cosas.
+
+Es la misma clase de error que las unidades de vol en v2 y tiene el mismo
+arreglo: el tipo lleva el hecho. Default USD, así que las 1276 pruebas de v1
+y v2 corren **sin modificarse** — que es la única forma de probar que el
+cambio es aditivo. Si alguna hubiera necesitado cambiar, no lo habría sido.
+
+Un bug propio salió de ahí: `DiscountCurve.shifted` y `.with_node`
+reconstruían la curva y **perdían la moneda**. El bootstrap pasa por
+`with_node` una vez por instrumento, así que toda curva bootstrapeada salía
+USD. Una moneda que un bump tira es peor que ninguna, porque la negativa
+deja de dispararse justo donde la curva pasó por más maquinaria.
+
+### El bug de v1 que encontró el segundo calendario
+
+`holidays(year)` devuelve las fechas en que se **observan** los feriados de
+ese año, y una regla de fin de semana puede sacar uno de su propio año: el
+1 de enero de 2022 cayó sábado, se observa el viernes 31 de diciembre de
+2021, y esa fecha pertenece a `holidays(2022)`. `is_business_day` sólo
+miraba `holidays(day.year)`, así que reportaba ese viernes —y el 31 de
+diciembre de 2027, y cada año equivalente— como día hábil. Cualquier cosa
+que rodara o contara a través de esas fechas quedaba corrida un día.
+Presente en 0.1.0 y 0.2.0. Ningún test lo atrapó porque todos los fixtures
+de la suite empiezan en enero; hizo falta un calendario **sin** regla de
+observancia para que la diferencia se viera.
+
+### Lo que el research gate cambió en la forma del código
+
+Nada de MXN es verificable desde aquí. La respuesta no fue adivinar ni
+parar, sino la costura que AC-1.4 ya preveía: `UNRESOLVED_MXN` es una tupla
+de `(nombre, por qué)`, cada entrada se vuelve una `Degradation` con calidad
+`ASSUMED` en todo resultado en pesos, `worst_quality` llega a `ASSUMED`,
+cualquier precio encima lo hereda, y `strict_conventions=True` lo convierte
+en negativa antes de calcular. Un test lo prueba como dato y no como código:
+se vacía la tupla con monkeypatch y `strict_conventions` deja de rehusar sin
+tocar una línea.
+
+Lo mismo con el delta: el research no estableció qué convención cotiza
+USD/MXN, así que **no hay default** y `DeltaConventionError` explica el
+motivo en el mensaje. Y lo mismo con el calendario: QuantLib da las trece
+reglas, pero su implementación se llama `BmvImpl` — es el calendario de la
+**BMV**, no el bancario de Banxico que pide AC-1.2. Se llama BMV, la
+diferencia es una de las entradas de `UNRESOLVED_MXN`, y el fixture está
+listo para que alguien lo diffee.
+
+### Un hallazgo que no se ajustó para que saliera bonito
+
+AC-4.2 pide el orden **seagull ≤ put spread ≤ collar ≤ put OTM ≤ put ATM**.
+Se cumple exactamente para el ejemplo del propio PRD, un payable con strikes
+coherentes. **No** se cumple para un receivable con los mismos offsets: el
+collar y el spread se intercambian, porque el diferencial de tasas pone el
+forward muy por encima del spot y las alas no son simétricas alrededor. Un
+orden que sólo se cumple después de ajustar los offsets para que se cumpla no
+es una propiedad de las estructuras. El test lo asiente donde se cumple y
+asiente que falla donde falla; lo que **sí** es universal —protección ATM
+completa es lo más caro, el seagull lo más barato— se prueba en ambas
+direcciones.
+
+### Lo que falta, y cuánto cuesta
+
+Una persona con navegador y media hora: las páginas de SIE para TIIE 28 y
+TIIE de Fondeo (day count, regla de publicación, ID de serie), la lista del
+calendario bancario de Banxico 2026, y una hoja de convenciones de cualquier
+broker de USD/MXN para la base de delta. Con eso `UNRESOLVED_MXN` se vacía,
+AC-1.1 pasa de "marcado" a "verificado", el calendario puede renombrarse o
+corregirse, y el default de delta deja de ser una negativa. Nada de eso
+requiere cambiar código.
 
 ## Preguntas abiertas
 

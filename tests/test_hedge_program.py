@@ -1,4 +1,4 @@
-"""PRD-003 AC-5.1 and AC-5.2: the policy is data, and a typo in it is loud.
+"""PRD-003 AC-5.1 and PRD-003 AC-5.2: the policy is data, and a typo in it is loud.
 
 The failure this guards against is specific: a policy file with
 `target_hedge_ration: 0.8` in it loads, ignores the line, and produces a
@@ -43,7 +43,7 @@ def program() -> HedgeProgram:
 
 
 class TestStrictLoading:
-    """AC-5.1: an unknown key is a refusal naming it."""
+    """PRD-003 AC-5.1: an unknown key is a refusal naming it."""
 
     def test_a_valid_programme_loads(self, program):
         assert program.name == "treasury_2026"
@@ -134,7 +134,7 @@ class TestTheBand:
 
 
 class TestTheAudit:
-    """AC-5.2: severity and suggestion, reported."""
+    """PRD-003 AC-5.2: severity and suggestion, reported."""
 
     def test_inside_the_band_is_compliant(self, program):
         audit = audit_hedge(program, 0.85, proposed_instrument="collar")
