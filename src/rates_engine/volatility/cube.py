@@ -36,7 +36,7 @@ from rates_engine.volatility.sabr import (
 )
 from rates_engine.volatility.units import Volatility, VolUnits
 
-__all__ = ["StrikeConvention", "CubePoint", "VolCube", "CubeQuote", "SliceNotQuotedError"]
+__all__ = ["StrikeConvention", "CubePoint", "VolCube", "CubeQuote"]
 
 
 class StrikeConvention(StrEnum):

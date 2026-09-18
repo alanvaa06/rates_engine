@@ -3,13 +3,16 @@
 Pure model code. Nothing here knows about curves or instruments — a pricer
 takes a forward, a strike, an expiry and a volatility, and the layers above
 are responsible for working out what those are.
+
+Every refusal raised from here is defined in :mod:`rates_engine.errors` and
+imported from there, never re-exported under a second name: one contract,
+one place to read it.
 """
 
 from rates_engine.volatility import bachelier, black
 from rates_engine.volatility.cube import (
     CubePoint,
     CubeQuote,
-    SliceNotQuotedError,
     StrikeConvention,
     VolCube,
 )
@@ -31,7 +34,6 @@ __all__ = [
     "OptionKind",
     "SABRCalibration",
     "SABRParameters",
-    "SliceNotQuotedError",
     "StrikeConvention",
     "VolCube",
     "VolUnits",

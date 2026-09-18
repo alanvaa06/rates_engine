@@ -87,7 +87,7 @@ As an agent-facing pipeline, I want `rateng-mcp` con herramientas `bootstrap`, `
 
 ## Estado de implementación (2026-09-18)
 
-v0.2.0 construido. `pytest -q`: **958 pasan, 8 saltan**. `ruff check .` limpio.
+v0.2.0 construido. `pytest -q`: **964 pasan, 8 saltan**. `ruff check .` limpio.
 `mypy src/rates_engine` limpio en 48 archivos, allowlist vacía.
 `python scripts/audit_acceptance.py 002`: **22 AC, 0 sin cubrir, 0 parciales**.
 
