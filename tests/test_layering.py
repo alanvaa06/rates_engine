@@ -27,6 +27,7 @@ ROOT = Path(rates_engine.__file__).parent
 LAYERS: tuple[str, ...] = (
     "errors",
     "evidence",
+    "money",
     "results",
     "conventions",
     "market",

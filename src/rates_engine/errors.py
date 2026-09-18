@@ -34,6 +34,7 @@ __all__ = [
     "MissingDependencyError",
     "IncompatibleDependencyError",
     "ConfigurationError",
+    "CurrencyMismatchError",
     "CurveError",
     "CurveArbitrageError",
     "BootstrapResidualError",
@@ -140,6 +141,19 @@ class ConfigurationError(RatesEngineError):
     """
 
     exit_code = 1
+
+
+class CurrencyMismatchError(RatesEngineError):
+    """Two currencies met where the operation needs one.
+
+    Discounting a peso cashflow on a dollar curve, or summing present values
+    in different currencies. Exit code 2 rather than 1: the inputs are each
+    fine, it is the combination that has no meaning. Converting between them
+    needs a rate, a date and a quoting convention, which is
+    :mod:`rates_engine.fx`'s job and never an implicit one.
+    """
+
+    exit_code = 2
 
 
 class CurveError(RatesEngineError):

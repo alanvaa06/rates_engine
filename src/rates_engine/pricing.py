@@ -24,6 +24,7 @@ from rates_engine.curves.discount import CurveSet
 from rates_engine.evidence import Evidence
 from rates_engine.instruments.cashflow import Cashflow
 from rates_engine.instruments.swaps import Side
+from rates_engine.money import require_same_currency
 from rates_engine.results import EngineResult
 
 __all__ = [
@@ -138,7 +139,21 @@ def _discount_note() -> dict[str, Any]:
 
 
 def _pv_of(flows: tuple[Cashflow, ...], curve_set: CurveSet) -> float:
-    return sum(flow.amount * curve_set.discount.df(flow.payment_date) for flow in flows)
+    """Present value, refusing any flow the curve is not denominated to discount.
+
+    The check is here rather than in ``Cashflow`` because this is the one
+    place a flow and a curve meet. Without it, pricing a peso swap on the
+    dollar curve returns a number and the evidence chain records nothing.
+    """
+    total = 0.0
+    for flow in flows:
+        require_same_currency(
+            flow.currency,
+            curve_set.discount.currency,
+            operation=f"discounting a {flow.leg} cashflow paid {flow.payment_date}",
+        )
+        total += flow.amount * curve_set.discount.df(flow.payment_date)
+    return total
 
 
 def _evidence(

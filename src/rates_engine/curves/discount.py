@@ -25,6 +25,7 @@ from datetime import date
 from rates_engine.conventions.daycount import DayCount, year_fraction
 from rates_engine.curves.interpolation import MonotoneConvex
 from rates_engine.errors import CurveArbitrageError, UnsupportedConventionError
+from rates_engine.money import Currency, require_same_currency
 
 __all__ = ["DiscountCurve", "CurveSet", "CURVE_TIME_BASIS"]
 
@@ -59,12 +60,17 @@ class DiscountCurve:
         dfs: Discount factors at those nodes, positive and non-increasing.
         interpolation: Always ``"log_linear_df"`` in v1; carried so that every
             exported curve states it rather than leaving it to be assumed.
+        currency: What the curve discounts. Defaults to USD, which is what
+            every curve in v1 and v2 was without saying so. Discounting a
+            cashflow in another currency on it raises rather than returning
+            a number nobody can interpret.
     """
 
     as_of: date
     nodes: tuple[date, ...]
     dfs: tuple[float, ...]
     interpolation: str = "log_linear_df"
+    currency: Currency = Currency.USD
 
     def __post_init__(self) -> None:
         if len(self.nodes) != len(self.dfs):
@@ -348,6 +354,7 @@ class DiscountCurve:
         return {
             "as_of": self.as_of.isoformat(),
             "interpolation": self.interpolation,
+            "currency": self.currency.value,
             "time_basis": CURVE_TIME_BASIS.value,
             "nodes": [n.isoformat() for n in self.nodes],
             "discount_factors": list(self.dfs),
@@ -369,6 +376,19 @@ class CurveSet:
 
     discount: DiscountCurve
     tenor: DiscountCurve | None = None
+
+    def __post_init__(self) -> None:
+        if self.tenor is not None:
+            require_same_currency(
+                self.discount.currency,
+                self.tenor.currency,
+                operation="a curve set",
+            )
+
+    @property
+    def currency(self) -> Currency:
+        """What this set values in. Its two curves are checked to agree."""
+        return self.discount.currency
 
     @property
     def projection(self) -> DiscountCurve:

@@ -5,14 +5,14 @@ helps if the refusal is legible, so this is the contract: every exception the
 library raises on purpose, what causes it, whether it is recoverable, and what
 to catch.
 
-There are twenty-five exception classes plus the base. You almost never want to
+There are twenty-six exception classes plus the base. You almost never want to
 catch all of them, because they mean two different things — and the exit code
 says which.
 
 | It means | Recoverable | Do this | Exit code | Examples |
 | --- | --- | --- | --- | --- |
 | **Your inputs cannot support the calculation** | Yes, by changing the input | Supply the missing data, name a convention that exists, or declare the proxy you meant to use. Retrying unchanged is pointless. | `1` | `MissingFixingError`, `UnsupportedConventionError`, `InsufficientDataError`, `ProxySourceNotDeclaredError`, `MissingDependencyError`, `IncompatibleDependencyError`, `ConfigurationError` |
-| **The calculation is impossible or undefined on inputs that are fine** | No | Ask a different question, or relax the thing the message names. | `2` | `CurveArbitrageError`, `BootstrapResidualError`, `UnderdeterminedCurveError`, `NoTenorQuoteSourceError`, `IncompleteStripError`, `UndefinedDurationError`, `KeyTenorOutOfRangeError`, `ShiftRequiredError`, `ExpansionBreakdownError`, `MissingForwardError`, `SliceNotQuotedError`, `CalibrationError` |
+| **The calculation is impossible or undefined on inputs that are fine** | No | Ask a different question, or relax the thing the message names. | `2` | `CurveArbitrageError`, `BootstrapResidualError`, `UnderdeterminedCurveError`, `NoTenorQuoteSourceError`, `IncompleteStripError`, `UndefinedDurationError`, `KeyTenorOutOfRangeError`, `CurrencyMismatchError`, `ShiftRequiredError`, `ExpansionBreakdownError`, `MissingForwardError`, `SliceNotQuotedError`, `CalibrationError` |
 
 Everything derives from `RatesEngineError`, so one `except` catches the lot:
 
@@ -184,6 +184,21 @@ labels or the nodes.
 There is no free source of either, so v1 validates the solver against
 synthetic inputs and says so: pass `inputs_origin="synthetic"`. A real
 provider arrives in v1.1.
+
+### `CurrencyMismatchError`
+
+**Exit code 2. Not recoverable by changing the input.**
+
+Two currencies met where the operation needs one: discounting a peso
+cashflow on a dollar curve, or summing present values in different
+currencies. Exit code 2 rather than 1 because each input is fine on its own
+— it is the combination that has no meaning.
+
+There is no implicit conversion and there will not be one. Converting needs
+a spot rate, a date and a quoting convention, all of which are decisions;
+`rates_engine.fx` is where they are made explicitly. Until v3 the engine had
+one currency and never said so, which is why `Currency` defaults to `USD`:
+every v1 and v2 call means what it always meant.
 
 ### `CurveError`
 
