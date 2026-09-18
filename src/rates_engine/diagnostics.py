@@ -27,7 +27,18 @@ def walk(evidence: Evidence, _depth: int = 0) -> list[tuple[int, Evidence]]:
 
 
 def all_warnings(evidence: Evidence) -> tuple[Degradation, ...]:
-    """Every degradation anywhere in the chain, deduplicated by code and message."""
+    """Every degradation anywhere in the chain, deduplicated by code and message.
+
+    Args:
+        evidence: Root of the chain. Nested ``sources`` are walked, so a
+            degradation three results deep still surfaces here.
+
+    Returns:
+        The degradations, in the order first encountered. Deduplicated on
+        ``(code, message)`` rather than ``code`` alone: two curves can carry
+        the same proxy code about different tenors, and collapsing those
+        would under-report.
+    """
     seen: dict[tuple[str, str], Degradation] = {}
     for _, node in walk(evidence):
         for warning in node.warnings:

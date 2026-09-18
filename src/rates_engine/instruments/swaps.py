@@ -102,9 +102,13 @@ class OISSwap:
         )
 
     def fixed_cashflows(self, curve_set: CurveSet) -> tuple[Cashflow, ...]:
-        """The fixed leg, signed for :attr:`side`. ``curve_set`` is unused but kept
-        in the signature so both legs read the same at the call site."""
-        del curve_set
+        """The fixed leg, signed for :attr:`side`.
+
+        ``curve_set`` contributes no rate to a fixed leg, but it does say
+        what currency the flows are in: an instrument is denominated by the
+        curve it is valued on, not by a field of its own.
+        """
+        currency = curve_set.currency
         sign = fixed_leg_sign(self.side)
         schedule = self.schedule
         return tuple(
@@ -119,6 +123,7 @@ class OISSwap:
                 accrual_end=end,
                 year_fraction=year_fraction(start, end, self.fixed_day_count),
                 rate=self.fixed_rate,
+                currency=currency,
             )
             for start, end, pay in zip(
                 schedule.accrual_start, schedule.accrual_end, schedule.payment
@@ -151,6 +156,7 @@ class OISSwap:
                     accrual_end=end,
                     year_fraction=tau,
                     rate=rate,
+                    currency=curve_set.currency,
                 )
             )
         return tuple(flows)
@@ -246,8 +252,12 @@ class IRSwap:
         return self._schedule(self.float_frequency_months)
 
     def fixed_cashflows(self, curve_set: CurveSet) -> tuple[Cashflow, ...]:
-        """The fixed leg, signed for :attr:`side`."""
-        del curve_set
+        """The fixed leg, signed for :attr:`side`.
+
+        ``curve_set`` contributes no rate here, but it does say what
+        currency the flows are in.
+        """
+        currency = curve_set.currency
         sign = fixed_leg_sign(self.side)
         schedule = self.fixed_schedule
         return tuple(
@@ -262,6 +272,7 @@ class IRSwap:
                 accrual_end=end,
                 year_fraction=year_fraction(start, end, self.fixed_day_count),
                 rate=self.fixed_rate,
+                currency=currency,
             )
             for start, end, pay in zip(
                 schedule.accrual_start, schedule.accrual_end, schedule.payment
@@ -295,6 +306,7 @@ class IRSwap:
                     accrual_end=end,
                     year_fraction=tau,
                     rate=rate,
+                    currency=curve_set.currency,
                 )
             )
         return tuple(flows)

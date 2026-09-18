@@ -81,6 +81,7 @@ class FRA:
                 accrual_end=self.end,
                 year_fraction=tau,
                 rate=projected,
+                currency=curve_set.currency,
             ),
         )
 

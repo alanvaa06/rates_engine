@@ -21,7 +21,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
-from rates_engine.conventions.calendar import SIFMA_US  # noqa: E402
+from rates_engine.conventions.calendar import BMV, SIFMA_US  # noqa: E402
 from rates_engine.conventions.schedule import add_months  # noqa: E402
 from rates_engine.curves.parametric import FOMCStepCurve  # noqa: E402
 from rates_engine.instruments.futures import imm_date, next_imm_on_or_after  # noqa: E402
@@ -324,6 +324,46 @@ def write_fomc_strip() -> None:
         )
 
 
+WEEKDAY_NAMES = (
+    "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
+)
+"""Spelled out rather than taken from ``strftime("%A")``, which is
+locale-dependent: the same fixture regenerated on a runner with a different
+locale would differ from the one committed, and the test that compares them
+would fail for a reason nobody could act on."""
+
+
+def write_bmv_holidays() -> None:
+    """The BMV calendar this package implements, dumped for human review."""
+    path = HERE / "bmv_holidays.csv"
+    rows = []
+    for year in range(2022, 2032):
+        for day in sorted(BMV.holidays(year)):
+            rows.append((year, day.isoformat(), WEEKDAY_NAMES[day.weekday()]))
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["year", "date", "weekday"])
+        writer.writerows(rows)
+    _provenance(
+        path,
+        data_quality="synthetic",
+        source=(
+            "Dumped from this package's BMVCalendar, whose rules were read from "
+            "QuantLib's ql/time/calendars/mexico.cpp."
+        ),
+        note=(
+            "This is the BMV (stock exchange) calendar, NOT Banxico's banking "
+            "calendar, which is what PRD-003 AC-1.2 asks for. They are different "
+            "lists. The file exists to be diffed against Banxico's published list "
+            "by a human: that check is [manual-check] and has NOT been done, "
+            "because this environment cannot reach banxico.org.mx (403 at the "
+            "egress proxy). Two lines to confirm first: whether Banxico observes "
+            "Holy Thursday, and whether it applies any weekend-observance roll, "
+            "which this calendar does not."
+        ),
+    )
+
+
 if __name__ == "__main__":
     write_sofr()
     write_treasuries()
@@ -332,4 +372,5 @@ if __name__ == "__main__":
     write_swaption_cube()
     write_zero_curve()
     write_fomc_strip()
+    write_bmv_holidays()
     print("fixtures written to", HERE)

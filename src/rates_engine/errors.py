@@ -34,13 +34,19 @@ __all__ = [
     "MissingDependencyError",
     "IncompatibleDependencyError",
     "ConfigurationError",
+    "CurrencyMismatchError",
+    "DeltaConventionError",
+    "ImplausibleInputError",
+    "UnresolvedConventionError",
     "CurveError",
     "CurveArbitrageError",
+    "CurveMismatchError",
     "BootstrapResidualError",
     "UnderdeterminedCurveError",
     "NoTenorQuoteSourceError",
     "HedgeError",
     "IncompleteStripError",
+    "PolicyBreachError",
     "RiskError",
     "UndefinedDurationError",
     "KeyTenorOutOfRangeError",
@@ -142,6 +148,71 @@ class ConfigurationError(RatesEngineError):
     exit_code = 1
 
 
+class CurrencyMismatchError(RatesEngineError):
+    """Two currencies met where the operation needs one.
+
+    Discounting a peso cashflow on a dollar curve, raised by
+    :func:`rates_engine.pricing.pv`, or summing present values in different
+    currencies, raised by :meth:`rates_engine.pricing.PriceResult.__add__`.
+    Exit code 2 rather than 1: the inputs are each fine, it is the
+    combination that has no meaning. Converting between them needs a rate, a
+    date and a quoting convention, which is :mod:`rates_engine.fx`'s job and
+    never an implicit one.
+    """
+
+    exit_code = 2
+
+
+class DeltaConventionError(RatesEngineError):
+    """A delta was used without saying which of the four conventions it is.
+
+    "25 delta" names a strike only once spot-versus-forward and
+    premium-adjusted-versus-not are both stated; the four combinations give
+    four different strikes for the same quoted number. Also raised when a
+    delta is not attainable under the convention given, which happens for
+    real: premium-adjusted delta is not monotone in the strike, so a delta
+    above its peak names no strike at all.
+    """
+
+    exit_code = 1
+
+
+class ImplausibleInputError(MarketDataError):
+    """A number arrived that is outside the band this build will accept.
+
+    Not a type error and not an arbitrage: a well-formed quantity so far
+    from anything a market produces that using it would be worse than
+    refusing. A five-hundred-basis-point cross-currency basis is the case
+    this exists for.
+
+    The bands are plausibility checks, not measurements — the data that
+    would calibrate them was not reachable — so each one is a named,
+    documented constant that a caller can widen deliberately rather than a
+    magic number inside a comparison.
+    """
+
+    exit_code = 1
+
+
+class UnresolvedConventionError(ConventionError):
+    """A convention this build assumes rather than knows was required to be known.
+
+    Raised only when a caller asks for it, by setting ``strict_conventions``.
+    The default is to proceed and mark: every affected result names the
+    unverified conventions and carries a ``Degradation`` per one, so
+    ``worst_quality`` reaches ``ASSUMED`` and anything priced on it inherits
+    the flag.
+
+    The case this exists for is MXN. PRD-003's research gate could not reach
+    Banxico, ISDA or CME from the build environment, so the TIIE day count,
+    the coupon period and the distinction between the two benchmarks are all
+    assumptions. They are stored as a data gap rather than a code one:
+    resolving them shortens a tuple and changes nothing else.
+    """
+
+    exit_code = 2
+
+
 class CurveError(RatesEngineError):
     """The curve implied by these instruments cannot be built honestly."""
 
@@ -155,6 +226,23 @@ class CurveArbitrageError(CurveError):
     zero-coupon yield over that segment in a currency that does not have one,
     which means the inputs disagree rather than that the curve is interesting.
     """
+
+
+class CurveMismatchError(CurveError):
+    """Two curves were combined that do not describe the same market state.
+
+    Today that means two valuation dates. Each curve discounts from its own
+    ``as_of``, so combining curves struck on different days produces a
+    number that is part forward and part stale — on USD/MXN, six months of
+    drift is around four thousand pips, with the evidence reporting one
+    year fraction for both legs.
+
+    Exit code 2, like :class:`CurrencyMismatchError` and for the same
+    reason: each curve is fine on its own and it is the combination that
+    has no meaning.
+    """
+
+    exit_code = 2
 
 
 class BootstrapResidualError(CurveError):
@@ -184,6 +272,22 @@ class IncompleteStripError(HedgeError):
 
     Names the period. A missing contract is never extrapolated from its
     neighbours: the hedge would be reported as complete when it is not.
+    """
+
+
+class PolicyBreachError(HedgeError):
+    """A proposal is well-formed and the programme forbids it anyway.
+
+    Distinct from :class:`ConfigurationError`, which is the programme
+    failing to load: here the policy file was read and understood, the
+    proposed hedge is a perfectly good hedge, and the two disagree. Exit
+    code 2 rather than 1 for the reason the base class gives — nothing about
+    the inputs is fixable by correcting them, because neither is wrong.
+
+    Raised only by ``audit_hedge(..., strict=True)``. The default is to
+    return the findings, because whether a breach stops the trade is a
+    treasury decision and not this package's to make; ``strict`` is how a
+    caller says it has already made that decision.
     """
 
 

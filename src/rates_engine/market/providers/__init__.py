@@ -1,7 +1,9 @@
 """Providers that fill a :class:`~rates_engine.market.snapshot.MarketSnapshot`.
 
-``file`` is the offline one every test uses; ``fred`` is the only one that
-touches the network, and it does so inside the call, never at import.
+``file`` is the offline one every test uses. ``fred`` and ``banxico`` touch
+the network, and both do so inside the call, never at import. Neither is
+re-exported here: reaching for one should be a deliberate import, because
+it is the moment a calculation stops being reproducible offline.
 """
 
 from rates_engine.market.providers.file import (

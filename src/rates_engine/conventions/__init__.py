@@ -6,9 +6,12 @@ time rather than a plausible number later.
 """
 
 from rates_engine.conventions.calendar import (
+    BMV,
     SIFMA_US,
+    BMVCalendar,
     BusinessDayConvention,
     Calendar,
+    HolidayCalendar,
     SIFMAUSCalendar,
     easter_sunday,
 )
@@ -22,9 +25,12 @@ from rates_engine.conventions.schedule import (
 )
 
 __all__ = [
+    "BMV",
+    "BMVCalendar",
     "BusinessDayConvention",
     "Calendar",
     "DayCount",
+    "HolidayCalendar",
     "SIFMAUSCalendar",
     "SIFMA_US",
     "Schedule",

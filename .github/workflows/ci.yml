@@ -206,11 +206,16 @@ jobs:
         run: |
           python - <<'PY'
           from rates_engine import mcp_server
+          from rates_engine.cli import _COMMANDS
           from rates_engine.errors import MissingDependencyError
 
-          assert set(mcp_server.TOOLS) == {
-              "describe", "list-instruments", "bootstrap", "price", "hedge",
-          }, sorted(mcp_server.TOOLS)
+          # Derived from the CLI's own table rather than a list written here,
+          # which is exactly the staleness that failed this job when v3 added
+          # two commands. What matters is that the two agree and that every
+          # tool is described, not what the set happens to contain today.
+          assert set(mcp_server.TOOLS) == set(_COMMANDS), sorted(mcp_server.TOOLS)
+          assert set(mcp_server.TOOL_DESCRIPTIONS) == set(mcp_server.TOOLS)
+          print("tools:", sorted(mcp_server.TOOLS))
           try:
               mcp_server.build_server()
           except MissingDependencyError as exc:

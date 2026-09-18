@@ -32,7 +32,10 @@ of claim, and a reader deserves to know which one they are getting.
 | What | Where it lives | Source | Read? |
 | --- | --- | --- | --- |
 | Bachelier (normal) option value, `A[(F-K)N(d) + σ√T n(d)]` | `volatility/bachelier.py` | Standard; the vault note *Volatility, Greeks and Option Strategy Practice (2026)* states it in this form | Secondary |
-| Black (lognormal) option value on a forward | `volatility/black.py` | Black 1976, via *CFA L2 Derivatives — Pricing and Valuation* | Secondary |
+| Black (lognormal) option value on a forward | `volatility/black.py` | Black 1976, via *CFA L2 Derivatives — Pricing and Valuation* ·
+*CFA Economics — Currency Exchange Rates* ·
+*CFA L3 Derivatives — Forwards, Futures, and Options* ·
+*CFA L3 Asset Allocation — Constraints, Currency, and Benchmarks* | Secondary |
 | The annuity is the numeraire that makes the forward swap rate a martingale | `optionpricing.py` | *Forwards, Multi-Curve and Swaptions (Post-LIBOR)*; Mercurio | Secondary |
 | SABR implied lognormal volatility, Hagan et al. (2002) eq. (2.17a) | `volatility/sabr.py` | Hagan, Kumar, Lesniewski and Woodward, via *Stochastic, Local and Rough Volatility Models* | **Not read in Hagan** |
 | SABR at-the-money expansion, eq. (2.18) | `volatility/sabr.py` | Same | **Not read in Hagan** |
@@ -43,6 +46,21 @@ of claim, and a reader deserves to know which one they are getting.
 | Concentrated least squares: betas linear given tau | `curves/parametric.py` | Standard result; the reason is argued in the module rather than cited | Derived here |
 | Piecewise-constant policy path fitted to the futures strip | `curves/parametric.py` | Heitfield and Park, via *SOFR Futures — Pricing, Convexity and Hedging Swaps* | Secondary |
 | Monotone convex interpolation, the four regions and the step-2 collar | `curves/interpolation.py` | Hagan and West 2006, *Interpolation Methods for Curve Construction* | **Not read in Hagan-West** |
+
+## Formulas added in v3
+
+| What | Where it lives | Source | Read? |
+| --- | --- | --- | --- |
+| Garman-Kohlhagen: Black-Scholes with the foreign rate as a yield | `fx/garman_kohlhagen.py` | Garman and Kohlhagen 1983; standard, and derivable from Black-Scholes in a line | Secondary |
+| Covered interest parity, `F = S P_f / P_d` | `fx/forward.py` | *CFA Economics — Currency Exchange Rates*; an arbitrage relation rather than a model | Read |
+| CIP has not held since 2007; the residual is the cross-currency basis | `fx/forward.py` | *Forwards, Multi-Curve and Swaptions (Post-LIBOR)* | Secondary |
+| The four FX delta conventions and the premium adjustment | `fx/delta.py` | *Volatility, Greeks and Option Strategy Practice (2026)*, on the units-and-conventions traps | Secondary |
+| Delta-neutral straddle strike, `F exp(±σ²T/2)` | `fx/vannavolga.py` | Standard; the sign follows from the premium adjustment and is derived in the module | Derived here |
+| Vanna-volga: price at ATM plus the vega, vanna and volga the flat price fails to hedge | `fx/vannavolga.py` | Castagna and Mercurio, via *Forwards, Multi-Curve and Swaptions (Post-LIBOR)* | **Not read in Castagna-Mercurio** |
+| Hedge structures and the cost-versus-protection trade-off | `hedging_structures.py` | CFA Level III Reading 19; *CFA L3 Derivatives — Forwards, Futures, and Options* | Read |
+| `σ²(RDC) = σ²(RFC) + σ²(RFX) + 2ρσσ` | `hedging_structures.py` | *CFA L3 Asset Allocation — Constraints, Currency, and Benchmarks* | Read |
+| The Mexican holiday calendar, thirteen rules | `conventions/calendar.py` | QuantLib `ql/time/calendars/mexico.cpp`, **read directly** | Read — but it is the **BMV** calendar, not Banxico's |
+| TIIE day count, coupon period, benchmark distinction | `curves/mxn.py` | **Nothing reachable.** Recorded in `UNRESOLVED_MXN` | **Not established** |
 
 ## What "not read" costs, concretely
 
@@ -92,6 +110,36 @@ switched off. That the *uncollared* version fails is what shows the test has
 something to catch. Reproducing every node's discount factor to 1e-13 across
 all four regions bounds the transcription of the integrals.
 
+**Vanna-volga.** Transcribed from a secondary source, and the protection is
+the property the construction is defined by: it must reproduce the three
+quoted pillars exactly. `tests/test_fx_smile.py` asserts that on the
+*price* rather than on the volatility reader, because the reader
+short-circuits at a pillar and testing it there would test the short
+circuit. Put-call parity surviving the correction is the second check: the
+correction is the same for a call and a put, so a formula error that
+treated them differently would break parity.
+
+**The Mexican calendar.** Read directly, which is the strongest row in this
+table — and it still does not answer the question asked. QuantLib's
+implementation is named `BmvImpl` and reports "Mexican stock exchange";
+PRD-003 AC-1.2 asks for Banxico's banking calendar, which is a different
+list. The calendar is therefore named `BMV`, the difference is one of the
+entries in `UNRESOLVED_MXN`, and `tests/fixtures/bmv_holidays.csv` exists
+to be diffed by a human. The two lines to confirm first: whether Banxico
+observes Holy Thursday, and whether it applies any weekend-observance roll,
+which this calendar does not.
+
+**Every MXN convention.** Not "read in a secondary source" — *not
+established at all*. banxico.org.mx, isda.org, cmegroup.com and bis.org all
+return 403 at this environment's egress proxy, and a code search across
+QuantLib for TIIE returns zero hits. The TIIE day count, the 28-day coupon
+period, which conventions attach to TIIE 28 as against TIIE de Fondeo, and
+the SIE series identifiers are all assumptions. They are stored as data —
+`rates_engine.curves.mxn.UNRESOLVED_MXN` — so that every peso result names
+them, carries a degradation that reaches `ASSUMED`, and can be made to
+refuse outright. Resolving them shortens a tuple; no code changes. See
+`docs/forge/research/003-mxn-conventions.md` for what was tried.
+
 ## What is validated against nothing external
 
 The dual-curve solver. There is no free source of Term SOFR par rates or
@@ -125,6 +173,9 @@ something it cannot reach by construction.
 | Treasury par yields are usable as a stand-in for OIS par | `curves/bootstrap.py` | Opt-in only; marks every node; a `Degradation` names the swap spread as an unquantified bias |
 | SABR's backbone exponent β is 0.5 unless the caller says otherwise | `volatility/sabr.py` | Carried in every `SABRParameters` and every calibration payload; the module says why it is fixed rather than fitted |
 | A term rate read off a futures-fitted curve carries no convexity adjustment | `curves/parametric.py` | `TERM_RATE_CAVEAT` plus a `Degradation` marking the result `assumed`; the evidence sets `convexity_adjustment_applied: false` |
+| Every MXN convention: TIIE day count, coupon period, benchmark distinction, SIE identifiers, and that the calendar is the BMV's | `curves/mxn.py` | `UNRESOLVED_MXN`, one `Degradation` each on every peso result; `strict_conventions=True` refuses |
+| The USD/MXN pip is 1e-4 | `fx/quote.py` | Declared on `CurrencyPair` with no default, and serialised into every payload that reports forward points |
+| A cross-currency basis beyond ±500 bp is not a quote | `fx/forward.py` | `MAX_PLAUSIBLE_BASIS_BP`, a named constant; the refusal says the band is a plausibility check rather than a measurement |
 
 ## Vault notes behind this package
 
@@ -140,4 +191,7 @@ something it cannot reach by construction.
 *CFA L3 Derivatives — Swap Strategies* ·
 *Stochastic, Local and Rough Volatility Models* ·
 *Volatility, Greeks and Option Strategy Practice (2026)* ·
-*CFA L2 Derivatives — Pricing and Valuation*
+*CFA L2 Derivatives — Pricing and Valuation* ·
+*CFA Economics — Currency Exchange Rates* ·
+*CFA L3 Derivatives — Forwards, Futures, and Options* ·
+*CFA L3 Asset Allocation — Constraints, Currency, and Benchmarks*

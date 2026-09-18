@@ -10,6 +10,7 @@ one place to read it.
 """
 
 from rates_engine.volatility import bachelier, black
+from rates_engine.volatility._gaussian import standard_normal_cdf, standard_normal_pdf
 from rates_engine.volatility.cube import (
     CubePoint,
     CubeQuote,
@@ -43,4 +44,6 @@ __all__ = [
     "calibrate",
     "density_diagnostics",
     "expansion_is_valid",
+    "standard_normal_cdf",
+    "standard_normal_pdf",
 ]

@@ -5,14 +5,14 @@ helps if the refusal is legible, so this is the contract: every exception the
 library raises on purpose, what causes it, whether it is recoverable, and what
 to catch.
 
-There are twenty-five exception classes plus the base. You almost never want to
+There are thirty-one exception classes plus the base. You almost never want to
 catch all of them, because they mean two different things — and the exit code
 says which.
 
 | It means | Recoverable | Do this | Exit code | Examples |
 | --- | --- | --- | --- | --- |
-| **Your inputs cannot support the calculation** | Yes, by changing the input | Supply the missing data, name a convention that exists, or declare the proxy you meant to use. Retrying unchanged is pointless. | `1` | `MissingFixingError`, `UnsupportedConventionError`, `InsufficientDataError`, `ProxySourceNotDeclaredError`, `MissingDependencyError`, `IncompatibleDependencyError`, `ConfigurationError` |
-| **The calculation is impossible or undefined on inputs that are fine** | No | Ask a different question, or relax the thing the message names. | `2` | `CurveArbitrageError`, `BootstrapResidualError`, `UnderdeterminedCurveError`, `NoTenorQuoteSourceError`, `IncompleteStripError`, `UndefinedDurationError`, `KeyTenorOutOfRangeError`, `ShiftRequiredError`, `ExpansionBreakdownError`, `MissingForwardError`, `SliceNotQuotedError`, `CalibrationError` |
+| **Your inputs cannot support the calculation** | Yes, by changing the input | Supply the missing data, name a convention that exists, or declare the proxy you meant to use. Retrying unchanged is pointless. | `1` | `MissingFixingError`, `UnsupportedConventionError`, `InsufficientDataError`, `ProxySourceNotDeclaredError`, `ImplausibleInputError`, `MissingDependencyError`, `IncompatibleDependencyError`, `ConfigurationError`, `DeltaConventionError` |
+| **The calculation is impossible or undefined on inputs that are fine** | No | Ask a different question, or relax the thing the message names. | `2` | `CurveArbitrageError`, `CurveMismatchError`, `BootstrapResidualError`, `UnderdeterminedCurveError`, `NoTenorQuoteSourceError`, `IncompleteStripError`, `PolicyBreachError`, `UnresolvedConventionError`, `UndefinedDurationError`, `KeyTenorOutOfRangeError`, `CurrencyMismatchError`, `ShiftRequiredError`, `ExpansionBreakdownError`, `MissingForwardError`, `SliceNotQuotedError`, `CalibrationError` |
 
 Everything derives from `RatesEngineError`, so one `except` catches the lot:
 
@@ -103,6 +103,28 @@ evidence chain into whatever consumes the curve.
 Also raised for an unrecognised `long_end_source`: the only accepted value is
 `"treasury_proxy"`.
 
+### `ImplausibleInputError`
+
+**Exit code 1. Recoverable: check the input, or widen the band on purpose.**
+
+A well-formed number so far from anything a market produces that using it
+would be worse than refusing. The case it exists for is a cross-currency
+basis beyond ±500 bp, which is a currency crisis rather than a quote — and
+which, coming out of `implied_basis`, usually means a curve or the quoted
+forward is wrong rather than that the market moved that far.
+
+The bands are plausibility checks, not measurements: the data that would
+calibrate them was not reachable. Each is therefore a named, documented
+constant — `MAX_PLAUSIBLE_BASIS_BP` — that a caller can widen deliberately,
+rather than a magic number inside a comparison.
+
+The second condition is not a band at all. `solve_zero_cost_strike` raises
+it when the protection asked for costs more than the entire opposite wing
+is worth, so no strike funds it and no zero-cost collar exists at that
+protective level. The refusal names the strike to widen. It is here rather
+than under a solver error because nothing failed to converge: the bracket
+is exhausted and the answer is that there isn't one.
+
 ### `MissingDependencyError`
 
 **Exit code 1. Recoverable: install the extra the message names.**
@@ -134,9 +156,48 @@ config as an optional argument: without this, calling `bootstrap` with no
 config would surface as whichever `KeyError` the handler hit first. `describe`
 and `list-instruments` are the two tools that answer without a config.
 
+Also raised by `load_program` for a policy file this engine cannot read: an
+unknown key, a missing required one, a rebalance frequency that is not one
+of the four, a value that will not coerce, or an `allowed_instruments` entry
+naming a structure the engine does not build. Every one of those is the same
+mistake — the file says something the engine cannot act on — and every one is
+fixed by editing the file.
+
+A proposal the programme *forbids* is not one of them; that is
+`PolicyBreachError`, below.
+
+### `UnresolvedConventionError`
+
+**Exit code 2. Raised only when you ask for it.**
+
+A convention this build *assumes* rather than *knows* was required to be
+known. The default is the opposite: proceed, and mark. Every affected result
+names the unverified conventions, carries a `Degradation` per one, and so
+reaches `worst_quality == "assumed"` — which anything priced on it inherits,
+because the evidence chain composes.
+
+Set `strict_conventions=True` to turn the marking into a refusal. That is
+for code that must not rest on an assumption, and it fires before any
+calculation rather than after.
+
+The case it exists for is MXN. PRD-003's research gate could not reach
+Banxico, ISDA or CME from the build environment, so the TIIE day count, the
+28-day coupon period, the distinction between TIIE 28 and TIIE de Fondeo,
+and the difference between the BMV and Banxico calendars are all
+assumptions. They are stored as a data gap rather than a code one:
+`rates_engine.curves.mxn.UNRESOLVED_MXN` is a tuple, and resolving them
+shortens it and changes nothing else.
+
 ### `MarketDataError`
 
-The parent of the first three. Catch it to cover any data problem.
+The parent of `MissingFixingError`, `InsufficientDataError`,
+`ProxySourceNotDeclaredError` and `ImplausibleInputError`. Catch it to
+cover any data problem.
+
+The rest of this section is filed here because that is where a caller
+looks for them, not because they descend from it: the two dependency
+errors and `ConfigurationError` come straight off `RatesEngineError`, and
+`UnresolvedConventionError` is a `ConventionError`.
 
 ---
 
@@ -158,6 +219,20 @@ Two things this deliberately does **not** raise on:
   one basis point forward through zero. Use `curve.require_monotone()` when
   you mean to assert it, or read `curve.rising_segments`.
 - A bumped curve. See above.
+
+### `CurveMismatchError`
+
+**Exit code 2. Not recoverable by changing one input.**
+
+Two curves were combined that do not describe the same market state —
+today, two different valuation dates. Each curve discounts from its own
+`as_of`, so combining curves struck on different days gives a number that
+is part forward and part stale. On USD/MXN, six months of drift is around
+four thousand pips, and the evidence would report one year fraction for
+both legs. Roll one curve to the other's date first.
+
+Exit code 2 for the same reason as `CurrencyMismatchError`: each curve is
+fine on its own, and it is the combination that has no meaning.
 
 ### `BootstrapResidualError`
 
@@ -187,7 +262,48 @@ provider arrives in v1.1.
 
 ### `CurveError`
 
-The parent of the four above.
+The parent of the five above.
+
+---
+
+## Currency and FX
+
+### `CurrencyMismatchError`
+
+**Exit code 2. Not recoverable by changing the input.**
+
+Two currencies met where the operation needs one: discounting a peso
+cashflow on a dollar curve, or summing present values in different
+currencies. Exit code 2 rather than 1 because each input is fine on its own
+— it is the combination that has no meaning.
+
+Both halves of that are enforced. `pv` checks every flow against the
+discount curve, and `PriceResult.__add__` checks the two units, which is
+why adding present values is spelled `a + b` rather than
+`a.value + b.value`: the obvious spelling is the one that refuses, and it
+carries both evidence chains into the total instead of dropping them.
+
+There is no implicit conversion and there will not be one. Converting needs
+a spot rate, a date and a quoting convention, all of which are decisions;
+`rates_engine.fx` is where they are made explicitly. Until v3 the engine had
+one currency and never said so, which is why `Currency` defaults to `USD`:
+every v1 and v2 call means what it always meant.
+
+### `DeltaConventionError`
+
+**Exit code 1. Recoverable: state the convention.**
+
+"25 delta" does not name a strike. FX has four conventions in common use —
+spot or forward, premium-adjusted or not — and they give four *different*
+strikes for the same quoted number, hundreds of pips apart at ordinary
+volatilities. There is no default, because PRD-003's research gate could
+not establish which one USD/MXN trades on and a default would let an
+unverified convention set every strike in the smile.
+
+Also raised when the delta is not attainable under the convention given,
+which is a real condition rather than a guard: a spot delta cannot exceed
+`e^{-r_f T}`, and premium-adjusted delta is not monotone in the strike, so
+a delta above its peak names no strike at all.
 
 ---
 
@@ -203,9 +319,28 @@ neighbours, because the hedge would then report as complete when it is not.
 
 Pass `require_full_coverage=False` when a partial hedge is what you want.
 
+### `PolicyBreachError`
+
+**Exit code 2. Not recoverable by changing the input: neither input is wrong.**
+
+`audit_hedge(..., strict=True)` and the proposal departs from the programme —
+outside the discretion band, or an instrument the policy does not permit. The
+message carries every non-informational finding.
+
+It is deliberately not a `ConfigurationError`, which it used to be. The two
+need opposite responses: a `ConfigurationError` from `load_program` means the
+policy file is unreadable and you fix the file, while this means the file was
+read and understood, the hedge is a perfectly good hedge, and the two
+disagree — you change the trade, or you get the mandate changed. Catching one
+must not catch the other.
+
+The default is to report rather than refuse. Whether a breach stops a trade
+is a treasury decision and not this package's to make; `strict=True` is how a
+caller says it has already made that decision.
+
 ### `HedgeError`
 
-The parent.
+The parent of both of the above.
 
 ---
 

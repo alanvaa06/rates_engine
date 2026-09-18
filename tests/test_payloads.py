@@ -45,6 +45,107 @@ def _parametric(as_of, par_swap):
     return fit, price_on_parametric(par_swap, parametric, CurveSet(exact), fit=fit)
 
 
+def _program_audit():
+    """A non-compliant audit, so the violations list is populated."""
+    from rates_engine.hedge_program import HedgeProgram, RebalanceFrequency, audit_hedge
+
+    program = HedgeProgram(0.80, 0.10, RebalanceFrequency.MONTHLY, frozenset({"forward"}))
+    return audit_hedge(program, 0.30, proposed_instrument="seagull")
+
+
+def _hedge_structures():
+    """A structure comparison and one of its rows."""
+    from rates_engine.fx.quote import USDMXN
+    from rates_engine.hedging_structures import (
+        Exposure,
+        ExposureDirection,
+        StructureQuote,
+        compare_structures,
+    )
+
+    quote = StructureQuote(18.50, 0.25, 0.0950, 0.0420, 0.115)
+    exposure = Exposure(1_000_000.0, ExposureDirection.PAYABLE, date(2026, 12, 15), USDMXN)
+    comparison = compare_structures(
+        exposure, quote, correlation=-0.30, foreign_asset_volatility=0.10
+    )
+    return [comparison, comparison.by_name("collar_zero_cost")]
+
+
+def _mxn():
+    """A peso curve and a benchmark comparison, as test_mxn_curve.py builds them."""
+    from rates_engine.conventions.daycount import year_fraction
+    from rates_engine.curves.bootstrap import ParSwapNode, RealizedStubNode
+    from rates_engine.curves.mxn import (
+        TIIE_DAY_COUNT,
+        TIIEBenchmark,
+        bootstrap_mxn_curve,
+        compare_benchmarks,
+        tiie_schedule,
+    )
+
+    as_of = date(2026, 9, 16)
+
+    def built(rate, benchmark):
+        dates = tiie_schedule(as_of, 13)
+        starts = (as_of, *dates[:-1])
+        stub = RealizedStubNode(
+            end=dates[0],
+            accrual_factor=1.0 + rate * ((dates[0] - as_of).days / 360.0),
+            label="tiie_stub",
+        )
+        swap = ParSwapNode(
+            start=as_of,
+            payment_dates=dates,
+            year_fractions=tuple(
+                year_fraction(s, e, TIIE_DAY_COUNT) for s, e in zip(starts, dates, strict=True)
+            ),
+            quoted_rate=rate,
+            label="tiie_1y",
+        )
+        return bootstrap_mxn_curve(as_of, (stub, swap), benchmark)
+
+    fondeo = built(0.0950, TIIEBenchmark.TIIE_FONDEO)
+    twenty_eight = built(0.0985, TIIEBenchmark.TIIE_28)
+    return [fondeo, compare_benchmarks(fondeo, twenty_eight)]
+
+
+def _fx_forward(as_of):
+    """A forward with a basis, so both halves of the payload are populated."""
+    from datetime import timedelta
+
+    from rates_engine.fx.forward import forward_from_curves
+    from rates_engine.fx.quote import USDMXN
+    from rates_engine.money import Currency
+
+    nodes = tuple(as_of + timedelta(days=365 * k) for k in (1, 2))
+    usd = DiscountCurve(
+        as_of, nodes, tuple(math.exp(-0.042 * k) for k in (1, 2)), currency=Currency.USD
+    )
+    mxn = DiscountCurve(
+        as_of, nodes, tuple(math.exp(-0.095 * k) for k in (1, 2)), currency=Currency.MXN
+    )
+    return forward_from_curves(
+        USDMXN, 18.50, as_of + timedelta(days=365), mxn, usd, basis_bp=-25.0
+    )
+
+
+def _fx_smile():
+    """A vanna-volga reading, as `test_fx_smile.py` builds the smile."""
+    from rates_engine.fx.delta import DeltaBasis, DeltaConvention, PremiumAdjustment
+    from rates_engine.fx.vannavolga import ATMConvention, SmileQuotes, VannaVolgaSmile
+
+    smile = VannaVolgaSmile(
+        spot=18.50,
+        expiry=0.25,
+        r_domestic=0.0950,
+        r_foreign=0.0420,
+        quotes=SmileQuotes(atm=0.1150, risk_reversal_25=0.0180, butterfly_25=0.0035),
+        delta_convention=DeltaConvention(DeltaBasis.SPOT, PremiumAdjustment.UNADJUSTED),
+        atm_convention=ATMConvention.DELTA_NEUTRAL_STRADDLE,
+    )
+    return smile.volatility_at(19.0)
+
+
 def _volatility(option_curve_set, atm_swaption, forward_swap_rate):
     """A cube read, the fit behind it, a swaption price and its greeks."""
     vol = Volatility(90.0, VolUnits.NORMAL_BP)
@@ -149,6 +250,11 @@ def _all_results(par_swap, curve_set, flat_curve, strip, as_of,
         _dual_curve(as_of),
         _fomc_fit(),
         realized_sofr_sigma(snapshot),
+        _fx_smile(),
+        _fx_forward(as_of),
+        *_mxn(),
+        *_hedge_structures(),
+        _program_audit(),
         *_volatility(option_curve_set, atm_swaption, forward_swap_rate),
     ]
 

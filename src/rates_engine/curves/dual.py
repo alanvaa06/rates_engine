@@ -36,6 +36,7 @@ from rates_engine.curves.bootstrap import (
 from rates_engine.curves.discount import DiscountCurve
 from rates_engine.errors import NoTenorQuoteSourceError, UnderdeterminedCurveError
 from rates_engine.evidence import DataQuality, Evidence, Provenance
+from rates_engine.money import Currency
 from rates_engine.results import EngineResult
 
 __all__ = [
@@ -247,6 +248,7 @@ def solve_dual_curve(
     inputs_origin: str = SYNTHETIC,
     compare_modes: bool = True,
     tolerance_bp: float = 0.01,
+    currency: Currency = Currency.USD,
 ) -> DualCurveResult:
     """Solve the OIS and tenor curves from OIS, term and basis quotes.
 
@@ -258,6 +260,9 @@ def solve_dual_curve(
         mode: ``"simultaneous"`` solves both curves at once;
             ``"sequential"`` solves OIS first and holds it fixed.
         inputs_origin: Must be ``"synthetic"``. v1 has no real quote source.
+        currency: What both curves discount. One argument, not two: an OIS
+            curve and a tenor curve in different currencies are not a dual
+            curve, they are two curves.
         compare_modes: Also run the other mode and report the per-node
             difference in the tenor curve's zero rates.
         tolerance_bp: Residual tolerance used for the report, in basis points.
@@ -301,7 +306,7 @@ def solve_dual_curve(
             f"{ {node.isoformat(): labels for node, labels in overloaded.items()} }"
         )
 
-    ois_result = bootstrap_discount_curve(as_of, ois_instruments)
+    ois_result = bootstrap_discount_curve(as_of, ois_instruments, currency=currency)
     ois_curve = ois_result.curve
 
     sequential = _solve_tenor(as_of, ois_curve, dual, node_dates)
@@ -372,7 +377,9 @@ def solve_dual_curve(
 
 def _initial_tenor(as_of: date, ois: DiscountCurve, node_dates: list[date]) -> DiscountCurve:
     """Start the tenor curve on top of the OIS curve: the zero-basis answer."""
-    return DiscountCurve(as_of, tuple(node_dates), tuple(ois.df(d) for d in node_dates))
+    return DiscountCurve(
+        as_of, tuple(node_dates), tuple(ois.df(d) for d in node_dates), currency=ois.currency
+    )
 
 
 def _solve_tenor(
@@ -388,12 +395,20 @@ def _solve_tenor(
     guess = np.array([math.log(df) for df in start.dfs])
 
     def residuals(logs: np.ndarray) -> np.ndarray:
-        curve = DiscountCurve(as_of, tuple(node_dates), tuple(float(math.exp(x)) for x in logs))
+        curve = DiscountCurve(
+            as_of,
+            tuple(node_dates),
+            tuple(float(math.exp(x)) for x in logs),
+            currency=ois.currency,
+        )
         return np.array([i.residual_bp(ois, curve) for i in ordered])
 
     solution = least_squares(residuals, guess, xtol=1e-15, ftol=1e-15, gtol=1e-15)
     return DiscountCurve(
-        as_of, tuple(node_dates), tuple(float(math.exp(x)) for x in solution.x)
+        as_of,
+        tuple(node_dates),
+        tuple(float(math.exp(x)) for x in solution.x),
+        currency=ois.currency,
     )
 
 
@@ -407,6 +422,7 @@ def _solve_simultaneous(
 ) -> tuple[DiscountCurve, DiscountCurve]:
     """Solve every OIS and tenor node together against every residual at once."""
     ois_nodes = ois_start.nodes
+    currency = ois_start.currency
     split = len(ois_nodes)
     by_node = {i.node_date: i for i in dual}
     ordered = [by_node[d] for d in node_dates]
@@ -416,10 +432,13 @@ def _solve_simultaneous(
 
     def residuals(logs: np.ndarray) -> np.ndarray:
         ois = DiscountCurve(
-            as_of, ois_nodes, tuple(float(math.exp(x)) for x in logs[:split])
+            as_of, ois_nodes, tuple(float(math.exp(x)) for x in logs[:split]), currency=currency
         )
         tenor = DiscountCurve(
-            as_of, tuple(node_dates), tuple(float(math.exp(x)) for x in logs[split:])
+            as_of,
+            tuple(node_dates),
+            tuple(float(math.exp(x)) for x in logs[split:]),
+            currency=currency,
         )
         return np.array(
             [i.residual_bp(ois) for i in ois_instruments]
@@ -428,8 +447,16 @@ def _solve_simultaneous(
 
     solution = least_squares(residuals, guess, xtol=1e-15, ftol=1e-15, gtol=1e-15)
     return (
-        DiscountCurve(as_of, ois_nodes, tuple(float(math.exp(x)) for x in solution.x[:split])),
         DiscountCurve(
-            as_of, tuple(node_dates), tuple(float(math.exp(x)) for x in solution.x[split:])
+            as_of,
+            ois_nodes,
+            tuple(float(math.exp(x)) for x in solution.x[:split]),
+            currency=currency,
+        ),
+        DiscountCurve(
+            as_of,
+            tuple(node_dates),
+            tuple(float(math.exp(x)) for x in solution.x[split:]),
+            currency=currency,
         ),
     )

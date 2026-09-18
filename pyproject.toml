@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "finport-ratesengine"
-version = "0.2.0"
+version = "0.3.0"
 description = "Deterministic SOFR rates engine: curves, futures convexity, swaps, swaptions and caps under Black and Bachelier, a SABR volatility cube, parametric curves, risk and futures-strip hedging, each result carrying the evidence it rests on."
 readme = "README.md"
 license = { file = "LICENSE" }

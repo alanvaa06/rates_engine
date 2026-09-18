@@ -21,9 +21,11 @@ from datetime import date
 from typing import Any, Protocol, runtime_checkable
 
 from rates_engine.curves.discount import CurveSet
+from rates_engine.errors import CurrencyMismatchError
 from rates_engine.evidence import Evidence
 from rates_engine.instruments.cashflow import Cashflow
 from rates_engine.instruments.swaps import Side
+from rates_engine.money import require_same_currency
 from rates_engine.results import EngineResult
 
 __all__ = [
@@ -103,10 +105,13 @@ class PriceResult(EngineResult):
     Attributes:
         value: The number.
         measure: ``"pv"``, ``"par_rate"``, ``"annuity"`` or ``"dv01"``.
-        unit: ``"USD"``, ``"decimal_rate"``, ``"years"`` or ``"USD_per_bp"``.
-            Carried rather than implied, because a rate without a unit and a
-            DV01 quoted per percent are the two classic ways to be off by a
-            factor of ten thousand.
+        unit: The currency for a money amount (``"USD"``, ``"MXN"``),
+            ``"<CCY>_per_bp"`` for a sensitivity, or ``"decimal_rate"`` or
+            ``"years"``. Carried rather than implied, because a rate without
+            a unit and a DV01 quoted per percent are the two classic ways to
+            be off by a factor of ten thousand — and a peso amount labelled
+            USD is the third, which is why the currency comes from the curve
+            that discounted it rather than from a literal.
         cashflows: The flows behind a ``"pv"``, or ``None``.
     """
 
@@ -126,6 +131,61 @@ class PriceResult(EngineResult):
             ),
         }
 
+    def __add__(self, other: object) -> PriceResult:
+        """Two results of the same measure and unit, added, with both evidence chains.
+
+        A portfolio present value is a sum of leg present values, and before
+        this existed the natural way to write one was ``a.value + b.value``,
+        which adds pesos to dollars without complaint and throws away both
+        evidence chains on the way. Addition is defined here so that the
+        obvious spelling is the safe one.
+
+        Refuses a unit mismatch rather than converting: a peso present value
+        and a dollar one are not commensurable, and making them so needs a
+        rate, a date and a quoting convention that only
+        :mod:`rates_engine.fx` may supply. A measure mismatch — a par rate
+        plus an annuity — raises ``TypeError`` instead, because that is a
+        mistake in the calling code rather than a problem with the data, and
+        :mod:`rates_engine.errors` is for the latter.
+
+        The result's evidence names this sum as its producer and carries both
+        operands as sources, so ``worst_quality`` degrades to the weaker of
+        the two: adding an ``ASSUMED`` peso leg to an ``OBSERVED`` dollar one
+        cannot launder the assumption.
+
+        Raises:
+            CurrencyMismatchError: The two units differ.
+            TypeError: ``other`` is not a :class:`PriceResult`, or the two
+                measures differ.
+        """
+        if not isinstance(other, PriceResult):
+            return NotImplemented
+        if self.measure != other.measure:
+            raise TypeError(
+                f"cannot add a {self.measure!r} to a {other.measure!r}: "
+                "addition is defined between results of the same measure"
+            )
+        if self.unit != other.unit:
+            raise CurrencyMismatchError(
+                f"cannot add {self.unit} to {other.unit}: converting between them "
+                "needs a rate, a date and a quoting convention, which is "
+                "rates_engine.fx's job and never an implicit one"
+            )
+        flows: tuple[Cashflow, ...] | None = None
+        if self.cashflows is not None and other.cashflows is not None:
+            flows = self.cashflows + other.cashflows
+        return PriceResult(
+            evidence=Evidence(
+                produced_by="pricing.PriceResult.__add__",
+                fields={"measure": self.measure, "unit": self.unit, "terms": 2},
+                sources=(self.evidence, other.evidence),
+            ),
+            value=self.value + other.value,
+            measure=self.measure,
+            unit=self.unit,
+            cashflows=flows,
+        )
+
 
 def _discount_note() -> dict[str, Any]:
     return {
@@ -138,7 +198,21 @@ def _discount_note() -> dict[str, Any]:
 
 
 def _pv_of(flows: tuple[Cashflow, ...], curve_set: CurveSet) -> float:
-    return sum(flow.amount * curve_set.discount.df(flow.payment_date) for flow in flows)
+    """Present value, refusing any flow the curve is not denominated to discount.
+
+    The check is here rather than in ``Cashflow`` because this is the one
+    place a flow and a curve meet. Without it, pricing a peso swap on the
+    dollar curve returns a number and the evidence chain records nothing.
+    """
+    total = 0.0
+    for flow in flows:
+        require_same_currency(
+            flow.currency,
+            curve_set.discount.currency,
+            operation=f"discounting a {flow.leg} cashflow paid {flow.payment_date}",
+        )
+        total += flow.amount * curve_set.discount.df(flow.payment_date)
+    return total
 
 
 def _evidence(
@@ -152,6 +226,7 @@ def _evidence(
         produced_by=produced_by,
         fields={
             "instrument": instrument.describe(),
+            "currency": curve_set.currency.value,
             "curve_interpolation": curve_set.discount.interpolation,
             "dual_curve": curve_set.is_dual,
             "projection_curve": "tenor" if curve_set.is_dual else "discount",
@@ -159,6 +234,11 @@ def _evidence(
             **extra,
         },
         sources=sources,
+        # The curve's own degradations, so a price on a curve whose
+        # conventions are assumed inherits that without the caller having
+        # to remember to pass source_evidence. That forgetting is what made
+        # the marking decorative.
+        warnings=curve_set.provenance,
     )
 
 
@@ -177,7 +257,8 @@ def pv(
             curve stays visibly proxied in the price.
 
     Returns:
-        A :class:`PriceResult` with ``measure="pv"`` and ``unit="USD"``.
+        A :class:`PriceResult` with ``measure="pv"`` and the discount
+        curve's currency as its unit.
     """
     flows = instrument.cashflows(curve_set)
     value = _pv_of(flows, curve_set)
@@ -185,7 +266,7 @@ def pv(
         evidence=_evidence("pricing.pv", instrument, curve_set, {"cashflows": len(flows)}, source_evidence),
         value=value,
         measure="pv",
-        unit="USD",
+        unit=curve_set.discount.currency.value,
         cashflows=flows,
     )
 
@@ -282,7 +363,7 @@ def dv01(
 
     Returns:
         A :class:`PriceResult` with ``measure="dv01"`` and
-        ``unit="USD_per_bp"``.
+        ``unit="<CCY>_per_bp"`` for the discount curve's currency.
 
     Raises:
         ValueError: ``bump_bp`` is not positive.
@@ -308,7 +389,7 @@ def dv01(
         ),
         value=value,
         measure="dv01",
-        unit="USD_per_bp",
+        unit=f"{curve_set.discount.currency.value}_per_bp",
     )
 
 
@@ -331,6 +412,8 @@ class ParametricComparison(EngineResult):
             with no scale is not comparable across trades.
         model: The parametric model's name, taken from the fit rather than
             passed in, so the label cannot drift from what produced the curve.
+        currency: What both prices are in. The two curve sets are checked to
+            agree before either is priced.
     """
 
     parametric_pv: float
@@ -338,6 +421,7 @@ class ParametricComparison(EngineResult):
     difference: float
     difference_bp_of_notional: float | None
     model: str
+    currency: str
 
     def payload_fields(self) -> dict[str, Any]:
         """Both prices, the gap, and the curve kind that explains it."""
@@ -348,7 +432,7 @@ class ParametricComparison(EngineResult):
             "bootstrap_pv": self.bootstrap_pv,
             "difference": self.difference,
             "difference_bp_of_notional": self.difference_bp_of_notional,
-            "unit": "USD",
+            "unit": self.currency,
         }
 
 
@@ -376,6 +460,15 @@ def price_on_parametric(
             the comparison ``curve_kind="parametric"`` would be a claim about
             a curve nothing here has seen.
     """
+    # D7: `_pv_of` checks each curve set against its own flows, and nothing
+    # checked the two sets against each other — so a parametric USD curve
+    # and a bootstrapped MXN one subtracted cleanly into a meaningless
+    # number. `CurveSet` makes exactly this check for its own two curves.
+    currency = require_same_currency(
+        parametric.currency,
+        bootstrapped.currency,
+        operation="comparing a parametric price with a bootstrapped one",
+    )
     fields = fit.payload_fields()
     if fields.get("curve_kind") != "parametric":
         raise ValueError(
@@ -405,6 +498,7 @@ def price_on_parametric(
             "bootstrap_pv": bootstrap_pv,
             "difference": difference,
             "difference_bp_of_notional": per_bp,
+            "currency": currency.value,
             **_discount_note(),
             "note": (
                 "A parametric curve smooths the quotes rather than reproducing them, "
@@ -421,4 +515,5 @@ def price_on_parametric(
         difference=difference,
         difference_bp_of_notional=per_bp,
         model=model,
+        currency=currency.value,
     )

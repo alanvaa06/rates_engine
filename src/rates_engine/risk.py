@@ -86,7 +86,8 @@ class RiskResult(EngineResult):
     Attributes:
         value: The number.
         measure: Which measure, e.g. ``"money_convexity"``.
-        unit: Its unit, e.g. ``"USD_per_bp"`` or ``"USD_per_yield_squared"``.
+        unit: Its unit, e.g. ``"<CCY>_per_bp"``, where the currency is the
+            discount curve's rather than a literal.
         bump_bp: Bump size used, or ``None`` for measures that need none.
     """
 
@@ -112,7 +113,7 @@ class KeyRateResult(EngineResult):
     Attributes:
         values: Key tenor in years to the risk at that tenor.
         measure: ``"key_rate_dv01"`` or ``"key_rate_duration"``.
-        unit: ``"USD_per_bp"`` or ``"per_bp"``.
+        unit: ``"<CCY>_per_bp"`` or ``"per_bp"``.
         key_tenors: The tenors, in the order requested.
         total: Sum across tenors. Equals the parallel measure, which is the
             point of the tent shocks.
@@ -267,7 +268,7 @@ def key_rate_dv01(
         evidence=evidence,
         values=values,
         measure="key_rate_dv01",
-        unit="USD_per_bp",
+        unit=f"{curve_set.discount.currency.value}_per_bp",
         key_tenors=years,
         total=total,
         bump_bp=bump_bp,
@@ -354,7 +355,7 @@ def pvbp(
         source_evidence: Evidence of the curves.
 
     Returns:
-        A :class:`RiskResult` with ``unit="USD_per_bp"``.
+        A :class:`RiskResult` whose unit carries the curve's currency.
     """
     base = dv01(instrument, curve_set, bump_bp=bump_bp, source_evidence=source_evidence)
     return RiskResult(
@@ -365,7 +366,7 @@ def pvbp(
         ),
         value=base.value,
         measure="pvbp",
-        unit="USD_per_bp",
+        unit=f"{curve_set.discount.currency.value}_per_bp",
         bump_bp=bump_bp,
     )
 
@@ -391,7 +392,7 @@ def money_duration(
         source_evidence: Evidence of the curves.
 
     Returns:
-        A :class:`RiskResult` with ``unit="USD_per_unit_yield"``.
+        A :class:`RiskResult` whose unit carries the curve's currency.
     """
     base = dv01(instrument, curve_set, bump_bp=bump_bp, source_evidence=source_evidence)
     return RiskResult(
@@ -402,7 +403,7 @@ def money_duration(
         ),
         value=base.value * 1e4,
         measure="money_duration",
-        unit="USD_per_unit_yield",
+        unit=f"{curve_set.discount.currency.value}_per_unit_yield",
         bump_bp=bump_bp,
     )
 
@@ -429,7 +430,7 @@ def money_convexity(
         source_evidence: Evidence of the curves.
 
     Returns:
-        A :class:`RiskResult` with ``unit="USD_per_yield_squared"``.
+        A :class:`RiskResult` whose unit carries the curve's currency.
 
     Raises:
         ValueError: ``bump_bp`` is not positive.
@@ -456,7 +457,7 @@ def money_convexity(
         ),
         value=value,
         measure="money_convexity",
-        unit="USD_per_yield_squared",
+        unit=f"{curve_set.discount.currency.value}_per_yield_squared",
         bump_bp=bump_bp,
     )
 
@@ -604,21 +605,21 @@ class GreeksResult(EngineResult):
     """An option's sensitivities, every one of them a bumped reprice.
 
     Attributes:
-        delta: Change in value for a one basis point fall in the curve, in
-            USD per basis point — the option's DV01, on the same sign
-            convention as :func:`~rates_engine.pricing.dv01`.
-        gamma: Change in :attr:`delta` per basis point, in USD per basis
-            point squared.
-        vega: Change in value per basis point of *normal* volatility, in USD
-            per basis point. Reported on the normal basis whatever model
+        delta: Change in value for a one basis point fall in the curve, per
+            basis point — the option's DV01, on the same sign convention as
+            :func:`~rates_engine.pricing.dv01`.
+        gamma: Change in :attr:`delta` per basis point squared.
+        vega: Change in value per basis point of *normal* volatility. Reported on the normal basis whatever model
             priced the option, because that is what the market quotes and
             what two desks can compare.
-        theta: Change in value for one calendar day passing, in USD per day.
+        theta: Change in value for one calendar day passing, per day.
             Negative for a long option, which is the whole of what a long
             option costs to hold.
-        value: The unbumped price, in USD.
+        value: The unbumped price.
         rate_bump_bp: Curve bump used, in basis points.
         vol_bump_bp: Volatility bump used, in basis points of normal vol.
+        currency: What every money figure above is in, taken from the
+            discount curve rather than assumed.
     """
 
     delta: float
@@ -628,19 +629,20 @@ class GreeksResult(EngineResult):
     value: float
     rate_bump_bp: float
     vol_bump_bp: float
+    currency: str
 
     def payload_fields(self) -> dict[str, Any]:
         """Every greek with its unit, and the bumps that produced them."""
         return {
             "value": self.value,
             "delta": self.delta,
-            "delta_unit": "USD_per_bp",
+            "delta_unit": f"{self.currency}_per_bp",
             "gamma": self.gamma,
-            "gamma_unit": "USD_per_bp_squared",
+            "gamma_unit": f"{self.currency}_per_bp_squared",
             "vega": self.vega,
-            "vega_unit": "USD_per_bp_normal_vol",
+            "vega_unit": f"{self.currency}_per_bp_normal_vol",
             "theta": self.theta,
-            "theta_unit": "USD_per_day",
+            "theta_unit": f"{self.currency}_per_day",
             "rate_bump_bp": self.rate_bump_bp,
             "vol_bump_bp": self.vol_bump_bp,
             "method": "bump_and_reprice",
@@ -768,4 +770,5 @@ def option_greeks(
         value=base,
         rate_bump_bp=rate_bump_bp,
         vol_bump_bp=vol_bump_bp,
+        currency=curve_set.discount.currency.value,
     )
