@@ -251,7 +251,12 @@ jobs:
           print("registered:", sorted(names))
           PY
       - name: The MCP tests run
-        run: pytest -q tests/test_mcp_server.py -rs --no-header | tee out.txt
+        # pipefail because the runner's shell is `bash -e`, not `bash -eo
+        # pipefail`: without it the pipeline exits with tee's status and a
+        # failing test would report this job green.
+        run: |
+          set -o pipefail
+          pytest -q tests/test_mcp_server.py -rs --no-header | tee out.txt
       # A skip here means the SDK did not install, and the job would
       # otherwise report green having exercised no transport at all.
       - name: Nothing skipped where the SDK is installed
