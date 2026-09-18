@@ -16,6 +16,7 @@ from rates_engine.fx.delta import (
     PremiumAdjustment,
     strike_from_delta,
 )
+from rates_engine.fx.forward import FXForwardResult, forward_from_curves, implied_basis
 from rates_engine.fx.quote import USDMXN, CurrencyPair
 from rates_engine.fx.vannavolga import (
     ATMConvention,
@@ -27,6 +28,7 @@ from rates_engine.fx.vannavolga import (
 __all__ = [
     "ATMConvention",
     "CurrencyPair",
+    "FXForwardResult",
     "DeltaBasis",
     "DeltaConvention",
     "PremiumAdjustment",
@@ -35,6 +37,8 @@ __all__ = [
     "USDMXN",
     "VannaVolgaSmile",
     "delta_conventions",
+    "forward_from_curves",
+    "implied_basis",
     "garman_kohlhagen",
     "strike_from_delta",
 ]

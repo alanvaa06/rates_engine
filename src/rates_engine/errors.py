@@ -36,6 +36,7 @@ __all__ = [
     "ConfigurationError",
     "CurrencyMismatchError",
     "DeltaConventionError",
+    "ImplausibleInputError",
     "CurveError",
     "CurveArbitrageError",
     "BootstrapResidualError",
@@ -166,6 +167,23 @@ class DeltaConventionError(RatesEngineError):
     delta is not attainable under the convention given, which happens for
     real: premium-adjusted delta is not monotone in the strike, so a delta
     above its peak names no strike at all.
+    """
+
+    exit_code = 1
+
+
+class ImplausibleInputError(MarketDataError):
+    """A number arrived that is outside the band this build will accept.
+
+    Not a type error and not an arbitrage: a well-formed quantity so far
+    from anything a market produces that using it would be worse than
+    refusing. A five-hundred-basis-point cross-currency basis is the case
+    this exists for.
+
+    The bands are plausibility checks, not measurements — the data that
+    would calibrate them was not reachable — so each one is a named,
+    documented constant that a caller can widen deliberately rather than a
+    magic number inside a comparison.
     """
 
     exit_code = 1

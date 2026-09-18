@@ -5,13 +5,13 @@ helps if the refusal is legible, so this is the contract: every exception the
 library raises on purpose, what causes it, whether it is recoverable, and what
 to catch.
 
-There are twenty-seven exception classes plus the base. You almost never want to
+There are twenty-eight exception classes plus the base. You almost never want to
 catch all of them, because they mean two different things — and the exit code
 says which.
 
 | It means | Recoverable | Do this | Exit code | Examples |
 | --- | --- | --- | --- | --- |
-| **Your inputs cannot support the calculation** | Yes, by changing the input | Supply the missing data, name a convention that exists, or declare the proxy you meant to use. Retrying unchanged is pointless. | `1` | `MissingFixingError`, `UnsupportedConventionError`, `InsufficientDataError`, `ProxySourceNotDeclaredError`, `MissingDependencyError`, `IncompatibleDependencyError`, `ConfigurationError`, `DeltaConventionError` |
+| **Your inputs cannot support the calculation** | Yes, by changing the input | Supply the missing data, name a convention that exists, or declare the proxy you meant to use. Retrying unchanged is pointless. | `1` | `MissingFixingError`, `UnsupportedConventionError`, `InsufficientDataError`, `ProxySourceNotDeclaredError`, `ImplausibleInputError`, `MissingDependencyError`, `IncompatibleDependencyError`, `ConfigurationError`, `DeltaConventionError` |
 | **The calculation is impossible or undefined on inputs that are fine** | No | Ask a different question, or relax the thing the message names. | `2` | `CurveArbitrageError`, `BootstrapResidualError`, `UnderdeterminedCurveError`, `NoTenorQuoteSourceError`, `IncompleteStripError`, `UndefinedDurationError`, `KeyTenorOutOfRangeError`, `CurrencyMismatchError`, `ShiftRequiredError`, `ExpansionBreakdownError`, `MissingForwardError`, `SliceNotQuotedError`, `CalibrationError` |
 
 Everything derives from `RatesEngineError`, so one `except` catches the lot:
@@ -102,6 +102,21 @@ evidence chain into whatever consumes the curve.
 
 Also raised for an unrecognised `long_end_source`: the only accepted value is
 `"treasury_proxy"`.
+
+### `ImplausibleInputError`
+
+**Exit code 1. Recoverable: check the input, or widen the band on purpose.**
+
+A well-formed number so far from anything a market produces that using it
+would be worse than refusing. The case it exists for is a cross-currency
+basis beyond ±500 bp, which is a currency crisis rather than a quote — and
+which, coming out of `implied_basis`, usually means a curve or the quoted
+forward is wrong rather than that the market moved that far.
+
+The bands are plausibility checks, not measurements: the data that would
+calibrate them was not reachable. Each is therefore a named, documented
+constant — `MAX_PLAUSIBLE_BASIS_BP` — that a caller can widen deliberately,
+rather than a magic number inside a comparison.
 
 ### `MissingDependencyError`
 

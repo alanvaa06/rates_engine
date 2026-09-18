@@ -45,6 +45,26 @@ def _parametric(as_of, par_swap):
     return fit, price_on_parametric(par_swap, parametric, CurveSet(exact), fit=fit)
 
 
+def _fx_forward(as_of):
+    """A forward with a basis, so both halves of the payload are populated."""
+    from datetime import timedelta
+
+    from rates_engine.fx.forward import forward_from_curves
+    from rates_engine.fx.quote import USDMXN
+    from rates_engine.money import Currency
+
+    nodes = tuple(as_of + timedelta(days=365 * k) for k in (1, 2))
+    usd = DiscountCurve(
+        as_of, nodes, tuple(math.exp(-0.042 * k) for k in (1, 2)), currency=Currency.USD
+    )
+    mxn = DiscountCurve(
+        as_of, nodes, tuple(math.exp(-0.095 * k) for k in (1, 2)), currency=Currency.MXN
+    )
+    return forward_from_curves(
+        USDMXN, 18.50, as_of + timedelta(days=365), mxn, usd, basis_bp=-25.0
+    )
+
+
 def _fx_smile():
     """A vanna-volga reading, as `test_fx_smile.py` builds the smile."""
     from rates_engine.fx.delta import DeltaBasis, DeltaConvention, PremiumAdjustment
@@ -167,6 +187,7 @@ def _all_results(par_swap, curve_set, flat_curve, strip, as_of,
         _fomc_fit(),
         realized_sofr_sigma(snapshot),
         _fx_smile(),
+        _fx_forward(as_of),
         *_volatility(option_curve_set, atm_swaption, forward_swap_rate),
     ]
 
