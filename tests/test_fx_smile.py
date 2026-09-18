@@ -135,6 +135,127 @@ class TestExactReproductionOfThePillars:
         assert [k for k, _ in pillars] == sorted(k for k, _ in pillars)
 
 
+def _reference_volatility(strike: float, kind: OptionKind) -> float:
+    """Vanna-volga computed here, from the definition, calling no package code.
+
+    The package's smile is checked against this. Written out rather than
+    imported because a check that calls the same helpers as the thing it
+    checks is a check that they agree with themselves — the same reason v1
+    reimplements SR1 and SR3 settlement from the contract definition rather
+    than reusing the engine's own accrual.
+    """
+    cdf = lambda x: 0.5 * math.erfc(-x / math.sqrt(2.0))  # noqa: E731
+    pdf = lambda x: math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)  # noqa: E731
+
+    def black(k: float, vol: float) -> float:
+        d1 = (math.log(SPOT / k) + (R_MXN - R_USD + 0.5 * vol * vol) * EXPIRY) / (
+            vol * math.sqrt(EXPIRY)
+        )
+        d2 = d1 - vol * math.sqrt(EXPIRY)
+        if kind is OptionKind.CALL:
+            return SPOT * math.exp(-R_USD * EXPIRY) * cdf(d1) - k * math.exp(
+                -R_MXN * EXPIRY
+            ) * cdf(d2)
+        return k * math.exp(-R_MXN * EXPIRY) * cdf(-d2) - SPOT * math.exp(
+            -R_USD * EXPIRY
+        ) * cdf(-d1)
+
+    def greeks(k: float) -> tuple[float, float, float]:
+        vol = QUOTES.atm
+        d1 = (math.log(SPOT / k) + (R_MXN - R_USD + 0.5 * vol * vol) * EXPIRY) / (
+            vol * math.sqrt(EXPIRY)
+        )
+        d2 = d1 - vol * math.sqrt(EXPIRY)
+        vega = SPOT * math.exp(-R_USD * EXPIRY) * pdf(d1) * math.sqrt(EXPIRY)
+        return vega, -math.exp(-R_USD * EXPIRY) * pdf(d1) * d2 / vol, vega * d1 * d2 / vol
+
+    pillars = list(_smile().pillars())
+    columns = [greeks(k) for k, _ in pillars]
+    rows = [[columns[j][i] for j in range(3)] for i in range(3)]
+    target = list(greeks(strike))
+    augmented = [row[:] + [target[i]] for i, row in enumerate(rows)]
+    for i in range(3):
+        pivot = max(range(i, 3), key=lambda r: abs(augmented[r][i]))
+        augmented[i], augmented[pivot] = augmented[pivot], augmented[i]
+        for r in range(3):
+            if r == i:
+                continue
+            factor = augmented[r][i] / augmented[i][i]
+            for c in range(i, 4):
+                augmented[r][c] -= factor * augmented[i][c]
+    weights = [augmented[i][3] / augmented[i][i] for i in range(3)]
+
+    premium = black(strike, QUOTES.atm) + sum(
+        weights[i] * (black(k, v) - black(k, QUOTES.atm))
+        for i, (k, v) in enumerate(pillars)
+    )
+    low, high = 1e-6, 5.0
+    for _ in range(200):
+        mid = 0.5 * (low + high)
+        if black(strike, mid) < premium:
+            low = mid
+        else:
+            high = mid
+    return 0.5 * (low + high)
+
+
+class TestAgainstAnIndependentImplementation:
+    """The test the pillar check is not.
+
+    Reproducing the three pillars exactly is arithmetically forced: at a
+    pillar the target's greek row *is* that pillar's row, so the solve
+    returns the indicator vector whatever the rows contain. Replacing the
+    vega/vanna/volga basis with `[K, K², K³]` leaves every other test in
+    this file passing while moving the interpolated volatility by four to
+    eleven basis points. These are the tests that catch that.
+    """
+
+    @pytest.mark.parametrize("strike", [18.2, 18.4, 18.6, 18.8, 19.0, 19.2, 19.4])
+    def test_the_interpolated_volatility_matches_the_reference(self, smile, strike):
+        kind = OptionKind.CALL if strike >= smile.atm_strike else OptionKind.PUT
+        assert smile.volatility_at(strike).volatility == pytest.approx(
+            _reference_volatility(strike, kind), abs=1e-9
+        )
+
+    def test_the_weights_hedge_vega_vanna_and_volga(self, smile):
+        """The defining equation. This is what makes the construction
+        vanna-volga rather than any interpolation through three points."""
+        strike = 19.0
+        weights = smile._weights(strike)
+        base = QUOTES.atm
+        args = (EXPIRY, R_MXN, R_USD, base)
+        for greek in (gk.vega, gk.vanna, gk.volga):
+            hedged = sum(
+                w * greek(SPOT, k, *args)
+                for w, (k, _) in zip(weights, smile.pillars(), strict=True)
+            )
+            assert hedged == pytest.approx(greek(SPOT, strike, *args), rel=1e-10)
+
+    def test_a_polynomial_basis_would_be_caught(self, smile):
+        """Proof the tests above have teeth: the same construction on a
+        `[K, K², K³]` basis reproduces the pillars just as exactly and gives
+        a visibly different smile between them."""
+        pillars = list(smile.pillars())
+        strike = 19.0
+        rows = [[k**power for k, _ in pillars] for power in (1, 2, 3)]
+        target = [strike**power for power in (1, 2, 3)]
+        augmented = [row[:] + [target[i]] for i, row in enumerate(rows)]
+        for i in range(3):
+            pivot = max(range(i, 3), key=lambda r: abs(augmented[r][i]))
+            augmented[i], augmented[pivot] = augmented[pivot], augmented[i]
+            for r in range(3):
+                if r == i:
+                    continue
+                factor = augmented[r][i] / augmented[i][i]
+                for c in range(i, 4):
+                    augmented[r][c] -= factor * augmented[i][c]
+        bogus = [augmented[i][3] / augmented[i][i] for i in range(3)]
+
+        real = smile._weights(strike)
+        gap = max(abs(a - b) for a, b in zip(real, bogus, strict=True))
+        assert gap > 1e-3, "the two bases agree, so this file cannot tell them apart"
+
+
 class TestTheShapeBetweenThePillars:
     """Interpolation has to be a smile, not just a number."""
 
