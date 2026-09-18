@@ -130,6 +130,14 @@ from rates_engine.hedging import (
     shock_table,
     strip_hedge,
 )
+from rates_engine.hedging_structures import (
+    Exposure,
+    ExposureDirection,
+    StructureComparison,
+    StructureQuote,
+    StructureResult,
+    compare_structures,
+)
 from rates_engine.instruments import (
     FRA,
     CapFloor,
@@ -222,6 +230,7 @@ __all__ = [
     "caplet_pv",
     "Cashflow",
     "compare_interpolations",
+    "compare_structures",
     "CompoundedRate",
     "ConfigurationError",
     "ConventionError",
@@ -251,6 +260,8 @@ __all__ = [
     "EngineResult",
     "Evidence",
     "ExpansionBreakdownError",
+    "Exposure",
+    "ExposureDirection",
     "fit_fomc_step_curve",
     "fit_nelson_siegel",
     "FOMCStepCurve",
@@ -331,6 +342,9 @@ __all__ = [
     "SR3_DV01",
     "StrikeConvention",
     "strip_hedge",
+    "StructureComparison",
+    "StructureQuote",
+    "StructureResult",
     "Swaption",
     "swaption_pv",
     "TenorParSwapNode",

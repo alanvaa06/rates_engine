@@ -45,6 +45,24 @@ def _parametric(as_of, par_swap):
     return fit, price_on_parametric(par_swap, parametric, CurveSet(exact), fit=fit)
 
 
+def _hedge_structures():
+    """A structure comparison and one of its rows."""
+    from rates_engine.fx.quote import USDMXN
+    from rates_engine.hedging_structures import (
+        Exposure,
+        ExposureDirection,
+        StructureQuote,
+        compare_structures,
+    )
+
+    quote = StructureQuote(18.50, 0.25, 0.0950, 0.0420, 0.115)
+    exposure = Exposure(1_000_000.0, ExposureDirection.PAYABLE, date(2026, 12, 15), USDMXN)
+    comparison = compare_structures(
+        exposure, quote, correlation=-0.30, foreign_asset_volatility=0.10
+    )
+    return [comparison, comparison.by_name("collar_zero_cost")]
+
+
 def _mxn():
     """A peso curve and a benchmark comparison, as test_mxn_curve.py builds them."""
     from rates_engine.conventions.daycount import year_fraction
@@ -227,6 +245,7 @@ def _all_results(par_swap, curve_set, flat_curve, strip, as_of,
         _fx_smile(),
         _fx_forward(as_of),
         *_mxn(),
+        *_hedge_structures(),
         *_volatility(option_curve_set, atm_swaption, forward_swap_rate),
     ]
 

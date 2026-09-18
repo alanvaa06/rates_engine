@@ -40,6 +40,7 @@ LAYERS: tuple[str, ...] = (
     "optionpricing",
     "risk",
     "hedging",
+    "hedging_structures",
     "diagnostics",
     "reporting",
     "cli",
