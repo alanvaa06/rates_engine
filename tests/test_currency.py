@@ -95,6 +95,45 @@ class TestTheDefaultKeepsEverythingWorking:
         assert result.value == pytest.approx(1_000_000.0 * math.exp(-0.04))
 
 
+def _futures_strip():
+    """A quarterly SR3 strip on a curve that is not flat, so the two
+    interpolations actually disagree and the comparison has work to do."""
+    from rates_engine.curves import FuturesNode, RealizedStubNode
+
+    start = AS_OF + timedelta(days=14)
+    nodes: list[object] = [
+        RealizedStubNode(end=start, accrual_factor=1.0 + 0.043 * (14 / 360.0))
+    ]
+    period = start
+    for index, forward in enumerate((0.0430, 0.0405, 0.0380, 0.0360, 0.0355, 0.0365)):
+        following = period + timedelta(days=91)
+        nodes.append(
+            FuturesNode(
+                start=period, end=following, forward_rate=forward, label=f"SR3-{index + 1}"
+            )
+        )
+        period = following
+    return tuple(nodes)
+
+
+def _futures_hedge():
+    """A real sized strip hedge, which is what `shock_table` consumes."""
+    from rates_engine.curves import FuturesNode
+    from rates_engine.hedging import strip_hedge
+    from rates_engine.instruments.swaps import OISSwap, Side
+
+    instruments = _futures_strip()
+    futures = [i for i in instruments if isinstance(i, FuturesNode)]
+    swap = OISSwap(
+        effective=futures[0].start,
+        maturity=futures[-1].end,
+        fixed_rate=0.039,
+        notional=100_000_000.0,
+        side=Side.PAYER,
+    )
+    return strip_hedge(swap, instruments, as_of=AS_OF)
+
+
 class TestMixingRefuses:
     """The whole point: the mistake cannot be made quietly."""
 
@@ -363,3 +402,95 @@ class TestTheEnumeration:
 
     def test_same_currency_returns_it(self):
         assert require_same_currency(Currency.MXN, Currency.MXN, operation="x") is Currency.MXN
+
+
+class TestTheCurrencySurvivesTheDerivedCalculations:
+    """Deep review, D4-D8. Four places built a new curve, or a new export,
+    from one that had a currency and did not carry it. None of them was
+    reachable with a peso curve on the day they were written, which is
+    exactly why they were wrong: a default that is correct only because
+    nothing exercises it is a latent bug, and the currency would have been
+    silently reset the first time a peso path reached them.
+    """
+
+    def test_the_dual_solver_gives_both_curves_the_currency_it_was_given(self):
+        """`solve_dual_curve` built its OIS curve with no currency and then
+        constructed the tenor curve seven more times without one."""
+        import tests.test_dual_curve as dual_tests
+        from rates_engine.curves.dual import solve_dual_curve
+
+        tenor, basis = dual_tests._dual_instruments(0.0005)
+        result = solve_dual_curve(
+            dual_tests.AS_OF,
+            dual_tests._ois_instruments(),
+            tenor,
+            basis,
+            currency=Currency.MXN,
+        )
+        assert result.ois.currency is Currency.MXN
+        assert result.tenor.currency is Currency.MXN
+
+    def test_both_dual_modes_carry_it(self):
+        """Simultaneous and sequential build the curves through different
+        helpers, and only one of them was fixed by fixing the other."""
+        import tests.test_dual_curve as dual_tests
+        from rates_engine.curves.dual import solve_dual_curve
+
+        tenor, basis = dual_tests._dual_instruments(0.0005)
+        for mode in ("simultaneous", "sequential"):
+            result = solve_dual_curve(
+                dual_tests.AS_OF,
+                dual_tests._ois_instruments(),
+                tenor,
+                basis,
+                mode=mode,
+                currency=Currency.MXN,
+            )
+            assert (result.ois.currency, result.tenor.currency) == (
+                Currency.MXN,
+                Currency.MXN,
+            ), mode
+
+    def test_the_interpolation_comparison_compares_two_curves_in_one_currency(self):
+        from rates_engine.curves.comparison import compare_interpolations
+
+        comparison = compare_interpolations(
+            AS_OF, _futures_strip(), step_days=7, currency=Currency.MXN
+        )
+        assert comparison.log_linear.currency is Currency.MXN
+        assert comparison.monotone_convex.currency is Currency.MXN
+
+    def test_the_exported_views_say_which_currency_the_rates_are(self):
+        """A zero rate is dimensionless. Nine percent on a peso curve and
+        nine percent on a dollar curve are the same float, so the export is
+        the one place the currency can be lost on the way out."""
+        from rates_engine.curves.views import all_views
+
+        views = all_views(_curve(Currency.MXN, 0.09))
+        for kind in ("discount", "zero", "par", "forward"):
+            view = getattr(views, kind)
+            assert view.currency is Currency.MXN, kind
+            assert view.to_dict()["currency"] == "MXN", kind
+
+    def test_a_dollar_curve_still_exports_as_usd(self):
+        from rates_engine.curves.views import all_views
+
+        assert all_views(_curve()).zero.to_dict()["currency"] == "USD"
+
+    def test_the_shock_table_refuses_a_curve_set_it_cannot_net(self):
+        """`shock_table` subtracts a strip P&L built from SR3_DV01 — a dollar
+        constant — from the swap's P&L. On a peso curve set that sum is two
+        currencies reported as one number, so it refuses instead."""
+        from rates_engine.hedging import shock_table
+
+        hedge = _futures_hedge()
+        assert not shock_table(hedge, (-100.0,)).table.empty
+
+        pesos = replace(hedge, curve_set=CurveSet(_curve(Currency.MXN, 0.09)))
+        with pytest.raises(CurrencyMismatchError, match="futures strip"):
+            shock_table(pesos, (-100.0,))
+
+    def test_the_shock_table_says_what_currency_its_columns_are(self):
+        from rates_engine.hedging import shock_table
+
+        assert shock_table(_futures_hedge(), (-100.0,)).to_dict()["currency"] == "USD"

@@ -17,6 +17,7 @@ from typing import Any
 from rates_engine.curves.bootstrap import CalibrationInstrument, bootstrap_discount_curve
 from rates_engine.curves.discount import DiscountCurve
 from rates_engine.evidence import Evidence
+from rates_engine.money import Currency
 from rates_engine.results import EngineResult
 
 __all__ = ["InterpolationComparison", "compare_interpolations"]
@@ -67,6 +68,7 @@ def compare_interpolations(
     *,
     step_days: int = 7,
     long_end_source: str | None = None,
+    currency: Currency = Currency.USD,
 ) -> InterpolationComparison:
     """Bootstrap one instrument set under both interpolations and measure the gap.
 
@@ -75,6 +77,9 @@ def compare_interpolations(
         instruments: The calibration set, used unchanged for both.
         step_days: Spacing of the scan across the curve's span.
         long_end_source: Passed through to both bootstraps.
+        currency: Passed through to both bootstraps. Both curves must be the
+            same one for the comparison to mean anything, which is why it is
+            one argument rather than two.
 
     Returns:
         The :class:`InterpolationComparison`.
@@ -84,10 +89,18 @@ def compare_interpolations(
         BootstrapResidualError: Either bootstrap missed its tolerance.
     """
     linear = bootstrap_discount_curve(
-        as_of, instruments, interpolation="log_linear_df", long_end_source=long_end_source
+        as_of,
+        instruments,
+        interpolation="log_linear_df",
+        long_end_source=long_end_source,
+        currency=currency,
     )
     convex = bootstrap_discount_curve(
-        as_of, instruments, interpolation="monotone_convex", long_end_source=long_end_source
+        as_of,
+        instruments,
+        interpolation="monotone_convex",
+        long_end_source=long_end_source,
+        currency=currency,
     )
     residual = max(
         max((abs(r) for r in linear.residuals_bp.values()), default=0.0),

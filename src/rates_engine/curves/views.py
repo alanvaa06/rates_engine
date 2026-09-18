@@ -22,6 +22,7 @@ from rates_engine.conventions.daycount import DayCount, year_fraction
 from rates_engine.conventions.schedule import Schedule, add_months
 from rates_engine.curves.discount import CURVE_TIME_BASIS, DiscountCurve
 from rates_engine.evidence import Evidence
+from rates_engine.money import Currency
 from rates_engine.results import EngineResult
 
 __all__ = ["CurveView", "CurveViews", "zero_curve", "par_curve", "forward_curve", "all_views"]
@@ -40,6 +41,12 @@ class CurveView:
         day_count: Basis the rates are quoted on, ``None`` for discount factors.
         frequency_months: Coupon frequency for a par curve, else ``None``.
         tenor_months: Forward period length for a forward curve, else ``None``.
+        currency: The currency of the curve these rates came off. A zero rate
+            is dimensionless and a discount factor more so, which is exactly
+            why this is carried: nothing in the numbers distinguishes a nine
+            percent peso curve from a nine percent dollar one, and an export
+            that omitted it would be the one place a currency could be lost
+            on the way out.
     """
 
     kind: str
@@ -49,6 +56,7 @@ class CurveView:
     day_count: DayCount | None
     frequency_months: int | None = None
     tenor_months: int | None = None
+    currency: Currency = Currency.USD
 
     def to_dict(self) -> dict[str, Any]:
         """Serialise, with every convention present and ``None`` where not applicable."""
@@ -60,6 +68,7 @@ class CurveView:
             "day_count": self.day_count.value if self.day_count else None,
             "frequency_months": self.frequency_months,
             "tenor_months": self.tenor_months,
+            "currency": self.currency.value,
         }
 
 
@@ -119,6 +128,7 @@ def zero_curve(
         ),
         compounding=compounding,
         day_count=day_count,
+        currency=curve.currency,
     )
 
 
@@ -192,6 +202,7 @@ def par_curve(
         compounding="simple",
         day_count=day_count,
         frequency_months=frequency_months,
+        currency=curve.currency,
     )
 
 
@@ -236,6 +247,7 @@ def forward_curve(
         compounding=compounding,
         day_count=day_count,
         tenor_months=tenor_months,
+        currency=curve.currency,
     )
 
 
@@ -288,6 +300,7 @@ def all_views(
             values=tuple(curve.df(d) for d in points),
             compounding=None,
             day_count=None,
+            currency=curve.currency,
         ),
         zero=zero_curve(curve, points, compounding=compounding, day_count=zero_day_count),
         par=par_curve(

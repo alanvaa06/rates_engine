@@ -34,6 +34,7 @@ from rates_engine.curves.discount import CurveSet
 from rates_engine.errors import IncompleteStripError
 from rates_engine.evidence import Evidence
 from rates_engine.instruments.futures import BASIS_POINT, SR3_CONTRACT_TENOR, SR3_NOTIONAL
+from rates_engine.money import Currency, require_same_currency
 from rates_engine.pricing import Priceable, dv01, pv
 from rates_engine.results import EngineResult
 
@@ -334,11 +335,18 @@ class ShockTableResult(EngineResult):
     shocks_bp: tuple[float, ...]
 
     def payload_fields(self) -> dict[str, Any]:
-        """The table as records, and the grid it was computed on."""
+        """The table as records, the grid, and the currency the P&L is in."""
         return {
             "shocks_bp": list(self.shocks_bp),
             "rows": self.table.to_dict(orient="records"),
             "columns": list(self.table.columns),
+            "currency": Currency.USD.value,
+            "currency_note": (
+                "Every money column is USD. The strip's leg is priced off "
+                f"SR3_DV01, which is a dollar constant ({SR3_DV01:.2f} USD/bp), "
+                "so shock_table refuses a curve set in any other currency "
+                "rather than netting the two legs across currencies."
+            ),
         }
 
 
@@ -355,7 +363,18 @@ def shock_table(
         The :class:`ShockTableResult`. ``net_pnl`` is the swap's convexity in
         dollars; ``net_per_dv01_bp`` is the same thing per basis point of
         position risk.
+
+    Raises:
+        CurrencyMismatchError: The hedge's curve set is not in USD. The
+            strip's P&L comes from ``contract_dv01``, a dollar constant, so
+            netting it against a peso swap P&L would add two currencies in
+            the ``net_pnl`` column and report the sum as one number.
     """
+    require_same_currency(
+        hedge.curve_set.currency,
+        Currency.USD,
+        operation="netting a futures strip P&L against a swap P&L",
+    )
     base_pv = pv(hedge.swap, hedge.curve_set).value
     rows: list[dict[str, float]] = []
     for shock in shocks_bp:
