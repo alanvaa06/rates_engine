@@ -272,6 +272,7 @@ def bootstrap_mxn_curve(
             that does not say is a curve nobody can compare.
         interpolation: Curve interpolation.
         strict: Refuse when an instrument misses ``tolerance_bp``.
+        tolerance_bp: Residual tolerance in basis points, per instrument.
         strict_conventions: Refuse outright while any MXN convention is
             unverified. AC-1.4. Off by default so the machinery is usable
             and visibly marked; on for anything that must not rest on an

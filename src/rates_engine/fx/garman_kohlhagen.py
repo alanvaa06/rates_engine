@@ -150,6 +150,24 @@ def delta_spot(
     The plainest of the four conventions, here because the greeks below are
     written against it. :mod:`rates_engine.fx.delta` has the other three and
     the refusal that stops one being assumed.
+
+    Args:
+        spot: Spot rate.
+        strike: Strike, in the same units.
+        expiry: Time to expiry in years. Zero or less gives the intrinsic
+            delta, 0 or the sign of the option, which is the limit rather
+            than a guard.
+        r_domestic: Quote currency rate.
+        r_foreign: Base currency rate.
+        volatility: Lognormal volatility as a decimal. Zero behaves as a
+            zero expiry does, for the same reason.
+        kind: Call or put on the base currency.
+
+    Returns:
+        Delta as a decimal, signed by ``kind``: in ``[0, e^{-r_f T}]`` for a
+        call and ``[-e^{-r_f T}, 0]`` for a put. The discount factor, not
+        one, is the bound — which is why a "90 delta" spot option can be
+        unattainable.
     """
     if expiry <= 0.0 or volatility <= 0.0:
         intrinsic = 1.0 if kind.sign * (spot - strike) > 0.0 else 0.0
@@ -166,7 +184,22 @@ def vega(
     r_foreign: float,
     volatility: float,
 ) -> float:
-    """Sensitivity to volatility, per unit of volatility. Same for call and put."""
+    """Sensitivity to volatility, per unit of volatility. Same for call and put.
+
+    Args:
+        spot: Spot rate.
+        strike: Strike, in the same units.
+        expiry: Time to expiry in years. Zero or less gives zero: an expired
+            option has no volatility exposure left.
+        r_domestic: Quote currency rate.
+        r_foreign: Base currency rate.
+        volatility: Lognormal volatility as a decimal. Zero gives zero.
+
+    Returns:
+        Quote currency per unit of base per **one unit** of volatility, not
+        per volatility point. Divide by 100 for the per-point figure a
+        trader quotes.
+    """
     if expiry <= 0.0 or volatility <= 0.0:
         return 0.0
     first, _ = d1_d2(spot, strike, expiry, r_domestic, r_foreign, volatility)
@@ -181,7 +214,21 @@ def gamma(
     r_foreign: float,
     volatility: float,
 ) -> float:
-    """Second derivative in spot. Same for call and put."""
+    """Second derivative in spot. Same for call and put.
+
+    Args:
+        spot: Spot rate.
+        strike: Strike, in the same units.
+        expiry: Time to expiry in years. Zero or less gives zero rather than
+            the divergent limit at the strike.
+        r_domestic: Quote currency rate.
+        r_foreign: Base currency rate.
+        volatility: Lognormal volatility as a decimal. Zero gives zero, for
+            the same reason.
+
+    Returns:
+        Change in delta per unit change in spot, per unit of base.
+    """
     if expiry <= 0.0 or volatility <= 0.0:
         return 0.0
     first, _ = d1_d2(spot, strike, expiry, r_domestic, r_foreign, volatility)
@@ -204,6 +251,19 @@ def vanna(
 
     One of the two greeks the vanna-volga construction hedges. Same for call
     and put, which is what makes a risk reversal a pure vanna trade.
+
+    Args:
+        spot: Spot rate.
+        strike: Strike, in the same units.
+        expiry: Time to expiry in years. Zero or less gives zero.
+        r_domestic: Quote currency rate.
+        r_foreign: Base currency rate.
+        volatility: Lognormal volatility as a decimal. Zero gives zero.
+
+    Returns:
+        Change in delta per **one unit** of volatility, equivalently change
+        in vega per unit of spot. Zero at the strike where ``d2`` is, which
+        is near but not at the at-the-money.
     """
     if expiry <= 0.0 or volatility <= 0.0:
         return 0.0
@@ -222,6 +282,19 @@ def volga(
     """Second derivative in volatility, ``vega d1 d2 / sigma``.
 
     The other greek vanna-volga hedges, and what a butterfly is a trade in.
+
+    Args:
+        spot: Spot rate.
+        strike: Strike, in the same units.
+        expiry: Time to expiry in years. Zero or less gives zero.
+        r_domestic: Quote currency rate.
+        r_foreign: Base currency rate.
+        volatility: Lognormal volatility as a decimal. Zero gives zero.
+
+    Returns:
+        Change in vega per **one unit** of volatility. Zero at the two
+        strikes where ``d1`` or ``d2`` is, and positive in both wings, which
+        is why a butterfly is long it.
     """
     if expiry <= 0.0 or volatility <= 0.0:
         return 0.0
@@ -243,6 +316,20 @@ def theta(
     Negative for a long option in the ordinary case, and not always so: a
     deep in-the-money put on a high-rate quote currency can decay upwards,
     which is why this is not asserted to have a sign.
+
+    Args:
+        spot: Spot rate.
+        strike: Strike, in the same units.
+        expiry: Time to expiry in years. Zero or less gives zero: there is
+            no time left to decay.
+        r_domestic: Quote currency rate.
+        r_foreign: Base currency rate.
+        volatility: Lognormal volatility as a decimal. Zero gives zero.
+        kind: Call or put on the base currency.
+
+    Returns:
+        Quote currency per unit of base **per year**. Divide by 365 for the
+        per-day figure, which is how it is usually read.
     """
     if expiry <= 0.0 or volatility <= 0.0:
         return 0.0
