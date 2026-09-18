@@ -95,6 +95,69 @@ class TestTheDefaultKeepsEverythingWorking:
         assert result.value == pytest.approx(1_000_000.0 * math.exp(-0.04))
 
 
+
+def _dual_inputs(basis: float = 0.0005, rate: float = 0.04):
+    """OIS, term and basis quotes consistent with a flat curve and a flat basis.
+
+    Built here rather than imported from `test_dual_curve`: `tests` is not
+    an installed package, so a cross-module import passes locally and
+    raises `ModuleNotFoundError` under CI's installed-package run.
+    """
+    from rates_engine.conventions import DayCount, year_fraction
+    from rates_engine.curves import ParSwapNode, RealizedStubNode
+    from rates_engine.curves.dual import BasisSwapNode, TenorParSwapNode
+
+    maturities = tuple(date(AS_OF.year + k, AS_OF.month, AS_OF.day) for k in range(1, 5))
+
+    def fractions(payments):
+        return tuple(
+            year_fraction(AS_OF if k == 0 else payments[k - 1], payments[k], DayCount.ACT_360)
+            for k in range(len(payments))
+        )
+
+    def periods(upto):
+        return tuple(
+            (AS_OF if k == 0 else maturities[k - 1], maturities[k]) for k in range(upto + 1)
+        )
+
+    ois: list[object] = [
+        RealizedStubNode(
+            end=maturities[0],
+            accrual_factor=1.0 + rate * ((maturities[0] - AS_OF).days / 360.0),
+        )
+    ]
+    for index in range(1, len(maturities)):
+        payments = maturities[: index + 1]
+        ois.append(
+            ParSwapNode(
+                start=AS_OF,
+                payment_dates=payments,
+                year_fractions=fractions(payments),
+                quoted_rate=rate,
+                label=f"ois_{index + 1}y",
+            )
+        )
+
+    tenor = tuple(
+        TenorParSwapNode(
+            start=AS_OF,
+            payment_dates=maturities[: index + 1],
+            year_fractions=fractions(maturities[: index + 1]),
+            float_periods=periods(index),
+            quoted_rate=rate + basis,
+            label=f"term_{index + 1}y",
+        )
+        for index in (0, 1)
+    )
+    swaps = tuple(
+        BasisSwapNode(
+            float_periods=periods(index), quoted_spread=basis, label=f"basis_{index + 1}y"
+        )
+        for index in (2, 3)
+    )
+    return tuple(ois), tenor, swaps
+
+
 def _futures_strip():
     """A quarterly SR3 strip on a curve that is not flat, so the two
     interpolations actually disagree and the comparison has work to do."""
@@ -416,35 +479,22 @@ class TestTheCurrencySurvivesTheDerivedCalculations:
     def test_the_dual_solver_gives_both_curves_the_currency_it_was_given(self):
         """`solve_dual_curve` built its OIS curve with no currency and then
         constructed the tenor curve seven more times without one."""
-        import tests.test_dual_curve as dual_tests
         from rates_engine.curves.dual import solve_dual_curve
 
-        tenor, basis = dual_tests._dual_instruments(0.0005)
-        result = solve_dual_curve(
-            dual_tests.AS_OF,
-            dual_tests._ois_instruments(),
-            tenor,
-            basis,
-            currency=Currency.MXN,
-        )
+        ois, tenor, basis = _dual_inputs()
+        result = solve_dual_curve(AS_OF, ois, tenor, basis, currency=Currency.MXN)
         assert result.ois.currency is Currency.MXN
         assert result.tenor.currency is Currency.MXN
 
     def test_both_dual_modes_carry_it(self):
         """Simultaneous and sequential build the curves through different
         helpers, and only one of them was fixed by fixing the other."""
-        import tests.test_dual_curve as dual_tests
         from rates_engine.curves.dual import solve_dual_curve
 
-        tenor, basis = dual_tests._dual_instruments(0.0005)
+        ois, tenor, basis = _dual_inputs()
         for mode in ("simultaneous", "sequential"):
             result = solve_dual_curve(
-                dual_tests.AS_OF,
-                dual_tests._ois_instruments(),
-                tenor,
-                basis,
-                mode=mode,
-                currency=Currency.MXN,
+                AS_OF, ois, tenor, basis, mode=mode, currency=Currency.MXN
             )
             assert (result.ois.currency, result.tenor.currency) == (
                 Currency.MXN,

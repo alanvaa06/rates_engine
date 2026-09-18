@@ -220,6 +220,7 @@ installs no warning filter; `tests/test_import_side_effects.py` enforces both.
 | `money` | `Currency`, and the refusal when two of them meet |
 | `conventions` | Day counts, the SIFMA and BMV calendars, rolls, IMM dates, schedules |
 | `evidence` | `Evidence`, `Provenance`, `Degradation`, `DataQuality` |
+| `results` | `EngineResult`, the base every result serialises through |
 | `market` | Snapshots, the SOFR compounding rules, `file`, `fred` and `banxico` providers |
 | `instruments` | `OISSwap`, `IRSwap`, `FRA`, `SOFRFuture1M`, `SOFRFuture3M` |
 | `volatility` | `Volatility` and its units, Bachelier, Black, SABR, the cube |

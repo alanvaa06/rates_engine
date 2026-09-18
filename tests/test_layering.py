@@ -135,3 +135,45 @@ def test_the_graph_is_acyclic():
 
     for start in sorted(edges):
         visit(start, [])
+
+
+def test_the_module_map_in_agents_md_lists_every_module():
+    """The map is what an agent reads instead of the tree, so a module
+    missing from it is a module that does not exist as far as the next
+    contributor is concerned.
+
+    Deep review found `results` had been missing since it was extracted.
+    The map is deliberately package-level — `curves` covers
+    `curves/bootstrap.py` and the ten beside it — so this checks the top
+    level only, which is the granularity the map claims.
+    """
+    import re
+
+    text = (ROOT.parent.parent / "AGENTS.md").read_text(encoding="utf-8")
+    rows = set(re.findall(r"^\| `([\w_]+)` \|", text, re.M))
+    present = {
+        _top_level(p)
+        for p in ROOT.rglob("*.py")
+        if "__pycache__" not in p.parts
+    } - {"__init__"}
+    assert sorted(present - rows) == [], "in the package, missing from AGENTS.md"
+    assert sorted(rows - present) == [], "in AGENTS.md, not in the package"
+
+
+def test_no_test_imports_another_test_module():
+    """`tests` is not a package and is not installed, so `import
+    tests.test_x` resolves only when the working directory happens to be on
+    `sys.path` — true under `python -m pytest`, false under CI's bare
+    `pytest`. It therefore passes locally and fails in CI, which is the
+    worst failure mode a test can have.
+
+    Shared fixtures belong in `conftest.py`. This caught a real CI break.
+    """
+    import re
+
+    offenders = []
+    for path in sorted((ROOT.parent.parent / "tests").rglob("test_*.py")):
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if re.match(r"\s*(import tests\b|from tests\b)", line):
+                offenders.append(f"{path.name}:{number}: {line.strip()}")
+    assert offenders == [], offenders
