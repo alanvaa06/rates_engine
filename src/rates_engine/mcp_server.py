@@ -16,6 +16,12 @@ missing-extra message is a sentence rather than a traceback.
 **What it will not do** (AC-6.4): write a file, open a socket, or invoke a
 model. ``tests/test_mcp_server.py`` asserts all three, the first two by
 running the handlers under guards that make either fatal.
+
+**The SDK is pinned to 2.x** (``mcp>=2.0,<3``, as PRD-002 specifies), where
+the server class is ``MCPServer`` — it was ``FastMCP`` in 1.x. A refusal here
+distinguishes the SDK being absent from the SDK being present at a version
+this code does not speak, because telling someone to install what they have
+already installed sends them the wrong way.
 """
 
 from __future__ import annotations
@@ -24,7 +30,11 @@ from collections.abc import Callable
 from typing import Any
 
 from rates_engine.cli import _COMMANDS
-from rates_engine.errors import MissingDependencyError, RatesEngineError
+from rates_engine.errors import (
+    IncompatibleDependencyError,
+    MissingDependencyError,
+    RatesEngineError,
+)
 from rates_engine.reporting.payloads import dumps, error_payload
 
 __all__ = ["TOOLS", "TOOL_DESCRIPTIONS", "call_tool", "build_server", "main"]
@@ -85,9 +95,11 @@ def build_server() -> Any:
         MissingDependencyError: The MCP SDK is not installed. The message
             names the extra that installs it (AC-6.3) rather than letting a
             ``ModuleNotFoundError`` reach the caller.
+        IncompatibleDependencyError: The SDK is installed at a version whose
+            server class this code does not know.
     """
     try:
-        from mcp.server.fastmcp import FastMCP
+        import mcp  # noqa: F401
     except ImportError as exc:
         raise MissingDependencyError(
             "the MCP server needs the SDK: "
@@ -95,7 +107,22 @@ def build_server() -> Any:
             "also available from the rateng CLI with --json, which needs no extra."
         ) from exc
 
-    server = FastMCP("finport-ratesengine")
+    try:
+        from mcp.server.mcpserver import MCPServer
+        from mcp.server.mcpserver.exceptions import ToolError
+    except ImportError as exc:
+        # The SDK is there; its server class is not where this code looks.
+        # 1.x called it mcp.server.fastmcp.FastMCP. Saying "not installed"
+        # here would send the caller to reinstall what they already have.
+        raise IncompatibleDependencyError(
+            "the MCP SDK is installed but does not expose mcp.server.mcpserver.MCPServer, "
+            "which this build is written against. That class was FastMCP in mcp 1.x. "
+            'Install the range this package pins: pip install "finport-ratesengine[mcp]" '
+            '(mcp>=2.0,<3). Everything the server exposes is also available from the '
+            "rateng CLI with --json, which needs no extra."
+        ) from exc
+
+    server = MCPServer("finport-ratesengine")
 
     def register(name: str) -> None:
         @server.tool(name=name, description=TOOL_DESCRIPTIONS[name])
@@ -104,9 +131,11 @@ def build_server() -> Any:
                 return call_tool(name, config)
             except RatesEngineError as exc:
                 # AC-6.2: the named exception reaches the caller with its own
-                # message and exit code. A generic wrapper here would turn a
-                # refusal the caller can act on into one they cannot.
-                raise RuntimeError(f"{type(exc).__name__}: {exc}") from exc
+                # message. It has to be the SDK's ToolError specifically —
+                # any other exception is flattened into "Error executing tool
+                # <name>" with the message dropped, which is the mute wrapper
+                # the criterion exists to forbid.
+                raise ToolError(f"{type(exc).__name__}: {exc}") from exc
 
     for name in TOOLS:
         register(name)

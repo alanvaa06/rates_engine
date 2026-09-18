@@ -87,15 +87,50 @@ As an agent-facing pipeline, I want `rateng-mcp` con herramientas `bootstrap`, `
 
 ## Estado de implementación (2026-09-18)
 
-v0.2.0 construido. `pytest -q`: **964 pasan, 8 saltan**. `ruff check .` limpio.
+v0.2.0 construido. `pytest -q`: **971 pasan, 5 saltan** con el SDK de MCP
+instalado; 968/8 sin él. `ruff check .` limpio.
 `mypy src/rates_engine` limpio en 48 archivos, allowlist vacía.
 `python scripts/audit_acceptance.py 002`: **22 AC, 0 sin cubrir, 0 parciales**.
 
-Los 8 tests que saltan son 5 de PRD-001 (los goldens CME, sin cambio) y 3
-nuevos: el cableado del transporte MCP, que necesita el SDK. Se saltan por
-`importorskip` nombrando el extra, y corren en el job `mcp` de CI, que falla
-si algo salta allí — un job que instala el SDK y reporta verde sin haber
-probado nada sería peor que no tenerlo.
+Los 5 que saltan son los goldens CME de PRD-001, sin cambio. Los 3 del
+cableado del transporte MCP saltan solo donde el SDK falta; el índice de
+PyPI se recuperó a mitad de sesión y ahora corren, igual que en el job `mcp`
+de CI, que falla si algo salta allí — un job que instala el SDK y reporta
+verde sin haber probado nada sería peor que no tenerlo.
+
+### Lo que CI encontró y la sesión no
+
+El job `mcp` falló en el primer PR. `mcp` 2.x renombró `FastMCP` a
+`MCPServer` (`mcp.server.mcpserver`), y el código estaba escrito contra la
+API 1.x. El PRD ya especificaba `mcp>=2.0,<3` en Constraints: el desajuste
+era del código, no del PRD. Imposible de ver en la sesión mientras PyPI
+estuvo caído, y visible en el primer job que instaló el extra — que es
+exactamente para lo que se añadió ese job.
+
+Dos consecuencias, ambas peores que el rename:
+
+**El mensaje mentía.** El `except ImportError` envolvía el fallo en
+`MissingDependencyError`: "the MCP server needs the SDK", sobre un SDK que
+*sí* estaba instalado. Mandar a alguien a reinstalar lo que ya tiene es la
+clase de negativa que este paquete existe para no dar. Ahora
+`build_server()` separa los dos casos: `import mcp` falla → ausente;
+`import mcp.server.mcpserver` falla → `IncompatibleDependencyError`, que
+nombra el rango y qué se movió. Subclase de `MissingDependencyError`, así
+que un solo `except` sigue cubriendo "el extra no sirve".
+
+**AC-6.2 estaba roto en el transporte.** El wrapper levantaba `RuntimeError`,
+y el SDK 2.x aplana cualquier excepción que no sea su propio `ToolError` a
+"Error executing tool <name>" — el mensaje se pierde. Es literalmente el
+wrapper mudo que el AC prohíbe, y ningún test sin SDK podía verlo porque el
+aplanamiento ocurre dentro del SDK. Ahora se levanta `ToolError` (que es lo
+que el AC dice, palabra por palabra) y hay dos tests que verifican que
+`CurveArbitrageError` y su instrumento `SR3-4` llegan al llamador.
+
+La lección no es sobre MCP. Es que los cuatro AC de US-6 se probaban sin el
+SDK por diseño, y esa cobertura es real para tres de ellos y **no** para
+AC-6.2, cuyo contenido entero es lo que el transporte hace con la excepción.
+Probar todo lo que no depende del tercero ausente sigue siendo correcto;
+creer que eso cubre un AC cuyo sujeto *es* el tercero, no.
 
 ### Lo que cambió respecto al PRD durante la construcción
 

@@ -56,7 +56,7 @@ approximated by effective duration under their own names. A lognormal model is n
 non-positive forward. A volatility is never converted between normal and
 lognormal, because there is no such conversion. A volatility cube never
 interpolates across expiry or tenor. An asymptotic expansion never returns a
-negative volatility. Twenty-four named exceptions, each with an exit code and
+negative volatility. Twenty-five named exceptions, each with an exit code and
 an entry in `docs/ERRORS.md` saying whether it is recoverable and what to do.
 
 ## What it is not

@@ -29,6 +29,7 @@ from rates_engine.conventions import imm_date, next_imm_on_or_after
 from rates_engine.errors import (
     ConfigurationError,
     CurveArbitrageError,
+    IncompatibleDependencyError,
     MissingDependencyError,
     RatesEngineError,
 )
@@ -274,24 +275,54 @@ class TestTheMissingSDKIsASentence:
 
     def test_building_without_the_sdk_names_the_extra(self, monkeypatch):
         monkeypatch.setitem(sys.modules, "mcp", None)
-        monkeypatch.setitem(sys.modules, "mcp.server", None)
-        monkeypatch.setitem(sys.modules, "mcp.server.fastmcp", None)
         with pytest.raises(MissingDependencyError) as excinfo:
             mcp_server.build_server()
-        assert 'finport-ratesengine[mcp]' in str(excinfo.value)
+        assert "finport-ratesengine[mcp]" in str(excinfo.value)
+        assert not isinstance(excinfo.value, IncompatibleDependencyError)
 
     def test_it_points_at_the_cli_as_the_way_round(self, monkeypatch):
-        monkeypatch.setitem(sys.modules, "mcp.server.fastmcp", None)
+        monkeypatch.setitem(sys.modules, "mcp", None)
         with pytest.raises(MissingDependencyError) as excinfo:
             mcp_server.build_server()
         assert "rateng CLI with --json" in str(excinfo.value)
 
     def test_it_is_not_a_bare_import_error(self, monkeypatch):
-        monkeypatch.setitem(sys.modules, "mcp.server.fastmcp", None)
+        monkeypatch.setitem(sys.modules, "mcp", None)
         with pytest.raises(MissingDependencyError) as excinfo:
             mcp_server.build_server()
         assert isinstance(excinfo.value.__cause__, ImportError)
         assert not isinstance(excinfo.value, ImportError)
+
+    @staticmethod
+    def _sdk_present_but_moved(monkeypatch):
+        """An importable ``mcp`` whose server class is not where we look.
+
+        Built rather than skipped, so the case is exercised with or without
+        the real SDK installed — a stand-in package satisfies ``import mcp``
+        and the submodule set to ``None`` makes the class import fail, which
+        is exactly the shape of a version mismatch.
+        """
+        import types
+
+        monkeypatch.setitem(sys.modules, "mcp", types.ModuleType("mcp"))
+        monkeypatch.setitem(sys.modules, "mcp.server.mcpserver", None)
+
+    def test_an_sdk_at_the_wrong_version_is_not_reported_as_absent(self, monkeypatch):
+        """The failure that shipped: mcp 2.x renamed FastMCP to MCPServer, and
+        the refusal said "not installed" about an SDK that was installed. The
+        two conditions have different fixes, so they are different sentences."""
+        self._sdk_present_but_moved(monkeypatch)
+        with pytest.raises(IncompatibleDependencyError) as excinfo:
+            mcp_server.build_server()
+        message = str(excinfo.value)
+        assert "installed but does not expose" in message
+        assert "mcp>=2.0,<3" in message
+        assert "FastMCP in mcp 1.x" in message
+
+    def test_the_incompatible_case_is_still_catchable_as_a_missing_extra(self, monkeypatch):
+        self._sdk_present_but_moved(monkeypatch)
+        with pytest.raises(MissingDependencyError):
+            mcp_server.build_server()
 
     def test_the_module_imports_without_the_sdk(self):
         """The import must not need the extra, or the error above would never
@@ -316,7 +347,7 @@ class TestTransportWiring:
     @pytest.fixture
     def server(self):
         pytest.importorskip(
-            "mcp.server.fastmcp",
+            "mcp.server.mcpserver",
             reason="the MCP SDK is not installed; install the [mcp] extra to run this",
         )
         return mcp_server.build_server()
@@ -331,11 +362,38 @@ class TestTransportWiring:
         import anyio
 
         result = anyio.run(lambda: server.call_tool("bootstrap", {"config": config}))
-        text = result[0][0].text if isinstance(result, tuple) else result[0].text
+        assert result.is_error is False
+        text = result.content[0].text
         assert json.loads(text) == json.loads(dumps(cli._COMMANDS["bootstrap"](config)))
+
+    def test_a_refusal_reaches_the_caller_named(self, server, config):
+        """PRD-002 AC-6.2 through the transport, which is where it can be lost.
+
+        Anything but the SDK's own ToolError is flattened into "Error
+        executing tool <name>" with the message dropped — the mute wrapper
+        the criterion forbids. This asserts the message survives.
+        """
+        import anyio
+        from mcp.server.mcpserver.exceptions import ToolError
+
+        broken = json.loads(json.dumps(config))
+        broken["curve"]["futures"][3]["price"] = 130.0
+        with pytest.raises(ToolError) as excinfo:
+            anyio.run(lambda: server.call_tool("bootstrap", {"config": broken}))
+        message = str(excinfo.value)
+        assert "CurveArbitrageError" in message
+        assert "SR3-4" in message
+
+    def test_a_missing_config_also_reaches_the_caller_named(self, server):
+        import anyio
+        from mcp.server.mcpserver.exceptions import ToolError
+
+        with pytest.raises(ToolError) as excinfo:
+            anyio.run(lambda: server.call_tool("price", {"config": None}))
+        assert "ConfigurationError" in str(excinfo.value)
 
     def test_the_console_script_is_installed(self):
         import shutil
 
-        pytest.importorskip("mcp.server.fastmcp", reason="the MCP SDK is not installed")
+        pytest.importorskip("mcp.server.mcpserver", reason="the MCP SDK is not installed")
         assert shutil.which("rateng-mcp"), "the [mcp] extra should put rateng-mcp on PATH"

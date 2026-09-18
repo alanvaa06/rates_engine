@@ -59,10 +59,14 @@ interpolation, and the same payloads over MCP. No v1 number moves.
   and on the curve it was fitted to, and reports the gap. The payload is
   marked `curve_kind="parametric"` and takes the model's name from the fit.
 - **`rateng-mcp`.** The five CLI handlers over stdio, behind the `mcp`
-  extra. A tool's answer is byte-identical to the corresponding `--json`
-  command because it is the same callable; the server writes no file, opens
-  no socket and invokes no model. Without the SDK the module still imports
-  and names the extra that installs it.
+  extra (`mcp>=2.0,<3`, whose server class is `MCPServer`). A tool's answer
+  is byte-identical to the corresponding `--json` command because it is the
+  same callable; the server writes no file, opens no socket and invokes no
+  model. A refusal from the engine is re-raised as the SDK's own `ToolError`
+  carrying the named exception and its message — anything else is flattened
+  by the SDK into `Error executing tool <name>` with the message dropped.
+  Without the SDK the module still imports and names the extra that installs
+  it; with the wrong version of it, the message says so instead.
 - **`rateng list-instruments`.** What this build prices and what each
   instrument needs.
 - **Fixtures.** `swaption_vol_cube.csv`, `zero_curve.csv`,
@@ -96,8 +100,9 @@ interpolation, and the same payloads over MCP. No v1 number moves.
 
 - `VolatilityError` and its five children: `VolUnitsError`,
   `ShiftRequiredError`, `MissingForwardError`, `ExpansionBreakdownError`,
-  `SliceNotQuotedError`. Plus `CalibrationError` and `ConfigurationError`.
-  Twenty-four classes plus the base; `docs/ERRORS.md` covers all of them.
+  `SliceNotQuotedError`. Plus `CalibrationError`, `ConfigurationError` and
+  `IncompatibleDependencyError`. Twenty-five classes plus the base;
+  `docs/ERRORS.md` covers all of them.
 
 ## [0.1.0] - 2026-09-16
 

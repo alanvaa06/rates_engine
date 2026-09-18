@@ -32,6 +32,7 @@ __all__ = [
     "InsufficientDataError",
     "ProxySourceNotDeclaredError",
     "MissingDependencyError",
+    "IncompatibleDependencyError",
     "ConfigurationError",
     "CurveError",
     "CurveArbitrageError",
@@ -110,6 +111,19 @@ class MissingDependencyError(RatesEngineError):
     """An optional extra is needed for this path and is not installed.
 
     The message names the install command that fixes it.
+    """
+
+    exit_code = 1
+
+
+class IncompatibleDependencyError(MissingDependencyError):
+    """An optional extra is installed, but not at a version this code speaks.
+
+    Subclasses :class:`MissingDependencyError` so that one ``except`` still
+    covers "the extra is not usable", and exists separately because the two
+    have different fixes and telling a caller to install something they have
+    already installed wastes their afternoon. The message names the version
+    range and what moved.
     """
 
     exit_code = 1

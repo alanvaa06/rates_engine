@@ -140,6 +140,14 @@ forward *between* nodes, which no instrument constrains.
 `curves.compare_interpolations` measures that gap rather than declaring a
 winner.
 
+**An extra that is installed at the wrong version says so.** The MCP server
+is written against `mcp>=2.0,<3`, where the server class is `MCPServer`; it
+was `FastMCP` in 1.x. `IncompatibleDependencyError` names the range and what
+moved, and subclasses `MissingDependencyError` so one `except` still covers
+both. Reporting a version mismatch as an absent package sends you to
+reinstall what you already have — which this codebase did once, until CI
+caught it.
+
 **A Treasury par yield will not enter a bootstrap by accident.** Anything
 whose provenance says `data_quality="proxy"` raises
 `ProxySourceNotDeclaredError` unless you pass

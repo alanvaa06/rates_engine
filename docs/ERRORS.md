@@ -5,13 +5,13 @@ helps if the refusal is legible, so this is the contract: every exception the
 library raises on purpose, what causes it, whether it is recoverable, and what
 to catch.
 
-There are twenty-four exception classes plus the base. You almost never want to
+There are twenty-five exception classes plus the base. You almost never want to
 catch all of them, because they mean two different things — and the exit code
 says which.
 
 | It means | Recoverable | Do this | Exit code | Examples |
 | --- | --- | --- | --- | --- |
-| **Your inputs cannot support the calculation** | Yes, by changing the input | Supply the missing data, name a convention that exists, or declare the proxy you meant to use. Retrying unchanged is pointless. | `1` | `MissingFixingError`, `UnsupportedConventionError`, `InsufficientDataError`, `ProxySourceNotDeclaredError`, `MissingDependencyError`, `ConfigurationError` |
+| **Your inputs cannot support the calculation** | Yes, by changing the input | Supply the missing data, name a convention that exists, or declare the proxy you meant to use. Retrying unchanged is pointless. | `1` | `MissingFixingError`, `UnsupportedConventionError`, `InsufficientDataError`, `ProxySourceNotDeclaredError`, `MissingDependencyError`, `IncompatibleDependencyError`, `ConfigurationError` |
 | **The calculation is impossible or undefined on inputs that are fine** | No | Ask a different question, or relax the thing the message names. | `2` | `CurveArbitrageError`, `BootstrapResidualError`, `UnderdeterminedCurveError`, `NoTenorQuoteSourceError`, `IncompleteStripError`, `UndefinedDurationError`, `KeyTenorOutOfRangeError`, `ShiftRequiredError`, `ExpansionBreakdownError`, `MissingForwardError`, `SliceNotQuotedError`, `CalibrationError` |
 
 Everything derives from `RatesEngineError`, so one `except` catches the lot:
@@ -110,6 +110,18 @@ Also raised for an unrecognised `long_end_source`: the only accepted value is
 An optional extra is needed for this path. Today that means YAML configs:
 `pip install "finport-ratesengine[config]"`. JSON configs need no extra, which
 is why they are the native format.
+
+### `IncompatibleDependencyError`
+
+**Exit code 1. Recoverable: install the version range the package pins.**
+
+An optional extra *is* installed, at a version this code does not speak. It
+subclasses `MissingDependencyError`, so one `except` still covers "the extra
+is not usable", and it exists separately because the two have different fixes.
+Telling someone to install what they already have sends them the wrong way —
+which is exactly what happened before this class existed: `rateng-mcp` reported
+"the MCP server needs the SDK" at an SDK that was installed, because mcp 2.x
+renamed `FastMCP` to `MCPServer` and the import looked in the 1.x place.
 
 ### `ConfigurationError`
 
