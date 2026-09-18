@@ -80,12 +80,16 @@ def parse_sie_payload(payload: str, series_id: str, *, percent: bool = True) -> 
         payload: The response body.
         series_id: The identifier requested, used when the response carries
             several and to label the provenance.
-        percent: Divide by 100. SIE quotes rates in percent, as FRED does,
-            and this package holds decimals throughout.
+        percent: Divide by 100. **Assumed, not verified**: this build has
+            never reached SIE, so that it quotes rates in percent as FRED
+            does is an inference from convention. A wrong guess is a
+            hundredfold error in every fixing, so when it is applied the
+            series comes back marked ``ASSUMED`` rather than ``OBSERVED``.
 
     Returns:
-        The series, with ``source="banxico"`` provenance marked
-        ``OBSERVED``.
+        The series. Marked ``OBSERVED`` when the caller states the units,
+        and ``ASSUMED`` when the percent convention was applied on this
+        module's unverified say-so.
 
     Raises:
         InsufficientDataError: The payload has no observations for the
@@ -99,11 +103,22 @@ def parse_sie_payload(payload: str, series_id: str, *, percent: bool = True) -> 
             f"the response is not a SIE series document: {payload[:200]!r}"
         ) from exc
 
-    chosen = next(
-        (b for b in blocks if str(b.get("idSerie", "")) == series_id),
-        blocks[0] if blocks else None,
-    )
-    if chosen is None or not chosen.get("datos"):
+    chosen = next((b for b in blocks if str(b.get("idSerie", "")) == series_id), None)
+    if chosen is None:
+        # No falling back to the first block. That fallback returned a
+        # different series under the requested identifier, marked OBSERVED,
+        # with nothing recorded — an FX rate labelled as the TIIE series
+        # someone asked for. Since this module deliberately does not know
+        # which identifier is which benchmark, a caller passing a guessed
+        # one is the expected case, which is exactly when a silent
+        # substitution does the most damage.
+        raise InsufficientDataError(
+            f"SIE returned no block for {series_id}; it returned "
+            f"{[str(b.get('idSerie', '?')) for b in blocks]}. Returning one of those "
+            "under the identifier you asked for would be a different series wearing "
+            "your label."
+        )
+    if not chosen.get("datos"):
         raise InsufficientDataError(
             f"SIE returned no observations for {series_id}. A series that exists but "
             "has no data in the window is not an empty series to interpolate over."
@@ -131,12 +146,19 @@ def parse_sie_payload(payload: str, series_id: str, *, percent: bool = True) -> 
             series_id=series_id,
             retrieved_at=datetime.now(UTC),
             instrument_kind="mxn_rate",
-            data_quality=DataQuality.OBSERVED,
+            data_quality=DataQuality.ASSUMED if percent else DataQuality.OBSERVED,
             notes=(
                 "Banxico SIE. Which benchmark this identifier corresponds to is the "
                 "caller's knowledge, not this package's: the SIE identifiers for TIIE "
                 "28 and TIIE de Fondeo are recorded as unresolved in "
                 "rates_engine.curves.mxn.UNRESOLVED_MXN."
+                + (
+                    " Values were divided by 100 on the assumption that SIE quotes in "
+                    "percent, which this build has never confirmed against the live "
+                    "endpoint; that is why this is ASSUMED rather than OBSERVED."
+                    if percent
+                    else ""
+                )
             ),
         ),
     )

@@ -33,7 +33,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 from enum import StrEnum
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from rates_engine.errors import ImplausibleInputError
 from rates_engine.evidence import Evidence
@@ -54,20 +54,28 @@ __all__ = [
 ]
 
 TRADE_OFF_FRAME: dict[str, str] = {
-    "upfront_cost": "higher",
-    "protection": "better",
-    "upside_participation": "worse",
+    "axes": "upfront_cost, worst_case_rate, best_case_rate, upside_participation",
+    "monotone": "no",
     "statement": (
-        "Across these structures, paying more upfront buys a better worst case "
-        "and gives up more of a favourable move. Which point on that line is "
-        "right depends on the treasury policy, not on the numbers."
+        "Full at-the-money protection is the most expensive and the seagull the "
+        "cheapest. Between those two the ordering is not monotone: a spread caps "
+        "the protection it buys, so it can cost more than a collar and still have "
+        "a worse worst case. Read the four columns; they do not collapse onto one "
+        "axis, and which point matters depends on the treasury policy rather than "
+        "on the numbers."
     ),
 }
 """The trade-off, as labelled fields rather than as advice.
 
-AC-4.4. The direction of each axis is named so a caller can sort on it; the
-sentence explains the axes and stops short of choosing between them, which
-is the line this module does not cross.
+AC-4.4. An earlier version of this asserted ``upfront_cost: higher`` implies
+``protection: better`` and ``upside_participation: worse`` — a monotonicity
+this module's own default structure set does not have. On the PRD's own
+market the option spread costs 0.16 and has a *worse* worst case than the
+zero-cost collar, because its sold far wing reopens the tail by
+construction; participation is not monotone in cost either. Shipping that
+claim as a labelled field in every payload was the exact thing AC-4.4
+exists to prevent, so the frame now states what the table supports and says
+plainly that it does not collapse onto one axis.
 """
 
 
@@ -136,6 +144,20 @@ class Exposure:
         }
 
 
+@runtime_checkable
+class ReadableSmile(Protocol):
+    """A volatility source that reports where its number came from.
+
+    Structural rather than nominal so that this module does not depend on
+    :mod:`rates_engine.fx.vannavolga`'s concrete class — and so a test can
+    supply a two-line stand-in.
+    """
+
+    def volatility_at(self, strike: float) -> Any:
+        """The reading at a strike: ``.volatility`` and ``.evidence``."""
+        ...
+
+
 @dataclass(frozen=True)
 class StructureQuote:
     """The market a comparison is struck on.
@@ -145,24 +167,57 @@ class StructureQuote:
         expiry: Time to settlement in years.
         r_domestic: Quote currency rate.
         r_foreign: Base currency rate.
-        volatility: A single lognormal volatility, or a callable taking a
-            strike and returning one — pass a
-            :class:`~rates_engine.fx.vannavolga.VannaVolgaSmile`'s reader to
-            price every leg on its own point of the smile, which is the
-            honest way to price a collar.
+        volatility: One of three things. A ``float`` is a single lognormal
+            volatility for every leg. A :class:`ReadableSmile` — anything
+            with ``volatility_at(strike)`` returning a reading, which is
+            what :class:`~rates_engine.fx.vannavolga.VannaVolgaSmile` is —
+            prices each leg on its own point of the smile *and* carries
+            that reading's evidence, which is the honest way to price a
+            collar. A bare callable returning a float also works and is the
+            escape hatch, but its evidence cannot be collected because it
+            has none to give; the payload says which of the three was used.
+        evidence: Evidence of where the rates and the spot came from — the
+            curves, typically. Without it a structure priced on an MXN curve
+            does not inherit that curve's ASSUMED quality, which two places
+            in this package promise it does.
     """
 
     spot: float
     expiry: float
     r_domestic: float
     r_foreign: float
-    volatility: float | Callable[[float], float]
+    volatility: float | ReadableSmile | Callable[[float], float]
+    evidence: tuple[Evidence, ...] = ()
+
+    @property
+    def _smile(self) -> ReadableSmile | None:
+        return self.volatility if isinstance(self.volatility, ReadableSmile) else None
 
     def vol_at(self, strike: float) -> float:
         """The volatility for a leg struck at ``strike``."""
-        if callable(self.volatility):
-            return float(self.volatility(strike))
-        return float(self.volatility)
+        source = self.volatility
+        if isinstance(source, ReadableSmile):
+            return float(source.volatility_at(strike).volatility)
+        if callable(source):
+            return float(source(strike))
+        return float(source)
+
+    def sources(self, strikes: tuple[float, ...]) -> tuple[Evidence, ...]:
+        """Every piece of evidence behind a pricing at these strikes.
+
+        The rates' own, plus one reading per distinct strike when the
+        volatility came from a smile. A smile that held its volatility flat
+        past its quoted pillars carries a ``Degradation``, and collecting it
+        here is what stops :meth:`vol_at`'s ``float()`` from throwing that
+        away — which it did, silently, until the review caught it.
+        """
+        collected = list(self.evidence)
+        smile = self._smile
+        if smile is not None:
+            collected.extend(
+                smile.volatility_at(strike).evidence for strike in dict.fromkeys(strikes)
+            )
+        return tuple(collected)
 
     @property
     def forward(self) -> float:
@@ -184,7 +239,11 @@ class StructureQuote:
             "expiry": self.expiry,
             "r_domestic": self.r_domestic,
             "r_foreign": self.r_foreign,
-            "volatility_source": "smile" if callable(self.volatility) else "single",
+            "volatility_source": (
+                "smile"
+                if self._smile is not None
+                else "callable" if callable(self.volatility) else "single"
+            ),
             "volatility": None if callable(self.volatility) else self.volatility,
         }
 
@@ -404,6 +463,7 @@ def _structure(
 ) -> StructureResult:
     """Cost one structure and evaluate it across the grid."""
     upfront = sum(leg.quantity * quote.price(leg.strike, leg.kind) for leg in legs)
+    sources = quote.sources(tuple(leg.strike for leg in legs))
     outright = quote.forward if forward_rate is None else forward_rate
     rates = tuple(
         _effective_rate(exposure, quote, legs, forward_amount, outright, upfront, spot)
@@ -427,6 +487,7 @@ def _structure(
             **quote.to_dict(),
             **exposure.to_dict(),
         },
+        sources=sources,
     )
     return StructureResult(
         evidence=evidence,

@@ -25,6 +25,7 @@ from datetime import date
 from rates_engine.conventions.daycount import DayCount, year_fraction
 from rates_engine.curves.interpolation import MonotoneConvex
 from rates_engine.errors import CurveArbitrageError, UnsupportedConventionError
+from rates_engine.evidence import Degradation
 from rates_engine.money import Currency, require_same_currency
 
 __all__ = ["DiscountCurve", "CurveSet", "CURVE_TIME_BASIS"]
@@ -64,6 +65,12 @@ class DiscountCurve:
             every curve in v1 and v2 was without saying so. Discounting a
             cashflow in another currency on it raises rather than returning
             a number nobody can interpret.
+        provenance: Degradations the curve itself carries, which anything
+            priced on it inherits. This is what makes "anything priced on
+            this curve inherits ASSUMED quality" true rather than a
+            sentence in a docstring: before it existed, the marking lived on
+            the *bootstrap result* and was dropped the moment a caller wrote
+            ``CurveSet(result.curve)``, which is what every caller writes.
     """
 
     as_of: date
@@ -71,6 +78,7 @@ class DiscountCurve:
     dfs: tuple[float, ...]
     interpolation: str = "log_linear_df"
     currency: Currency = Currency.USD
+    provenance: tuple[Degradation, ...] = ()
 
     def __post_init__(self) -> None:
         if len(self.nodes) != len(self.dfs):
@@ -322,6 +330,7 @@ class DiscountCurve:
             ),
             interpolation=self.interpolation,
             currency=self.currency,
+            provenance=self.provenance,
         )
 
     def with_node(self, node: date, df: float) -> DiscountCurve:
@@ -351,6 +360,7 @@ class DiscountCurve:
                 self.dfs[:-1] + (df,),
                 self.interpolation,
                 currency=self.currency,
+                provenance=self.provenance,
             )
         return DiscountCurve(
             self.as_of,
@@ -358,6 +368,7 @@ class DiscountCurve:
             self.dfs + (df,),
             self.interpolation,
             currency=self.currency,
+            provenance=self.provenance,
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -366,6 +377,7 @@ class DiscountCurve:
             "as_of": self.as_of.isoformat(),
             "interpolation": self.interpolation,
             "currency": self.currency.value,
+            "provenance": [d.to_dict() for d in self.provenance],
             "time_basis": CURVE_TIME_BASIS.value,
             "nodes": [n.isoformat() for n in self.nodes],
             "discount_factors": list(self.dfs),
@@ -400,6 +412,16 @@ class CurveSet:
     def currency(self) -> Currency:
         """What this set values in. Its two curves are checked to agree."""
         return self.discount.currency
+
+    @property
+    def provenance(self) -> tuple[Degradation, ...]:
+        """Degradations both curves carry, deduplicated by code."""
+        seen: dict[str, Degradation] = {}
+        for curve in (self.discount, self.tenor):
+            if curve is not None:
+                for item in curve.provenance:
+                    seen.setdefault(item.code, item)
+        return tuple(seen.values())
 
     @property
     def projection(self) -> DiscountCurve:

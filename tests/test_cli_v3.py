@@ -101,7 +101,8 @@ class TestHedgeStructures:
         payload = json.loads(
             _run("hedge-structures", "--config", str(config_path), "--json").stdout
         )
-        assert payload["trade_off"]["upfront_cost"] == "higher"
+        assert "upfront_cost" in payload["trade_off"]["axes"]
+        assert payload["trade_off"]["monotone"] == "no"
 
     def test_it_carries_the_variance_decomposition_when_asked(self, config_path):
         payload = json.loads(

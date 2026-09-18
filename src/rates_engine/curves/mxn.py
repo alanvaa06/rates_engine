@@ -29,7 +29,7 @@ them is a deliberate act rather than an accident.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from enum import StrEnum
 from typing import Any
@@ -89,6 +89,13 @@ UNRESOLVED_MXN: tuple[tuple[str, str], ...] = (
         "banxico_series_ids",
         "The Banxico SIE series identifiers for either benchmark are not known "
         "here, so fixings must be supplied by the caller rather than fetched.",
+    ),
+    (
+        "banxico_quotes_in_percent",
+        "Series from Banxico's SIE are divided by 100 on the assumption that SIE "
+        "quotes rates in percent, as FRED does. Never confirmed against the live "
+        "endpoint, which this build cannot reach. A wrong guess is a hundredfold "
+        "error in every fixing.",
     ),
     (
         "mxn_calendar_is_bmv_not_banxico",
@@ -299,6 +306,12 @@ def bootstrap_mxn_curve(
         tolerance_bp=tolerance_bp,
         currency=Currency.MXN,
     )
+    # On the curve itself, not just on this result. The marking used to
+    # live here alone and was dropped the moment a caller wrote
+    # `CurveSet(result.curve)` — which is what every caller writes — so
+    # "anything priced on this curve inherits ASSUMED" was a sentence with
+    # no mechanism behind it.
+    curve = replace(result.curve, provenance=_degradations())
     evidence = Evidence(
         produced_by="curves.bootstrap_mxn_curve",
         fields={
@@ -325,7 +338,7 @@ def bootstrap_mxn_curve(
     )
     return MXNCurveResult(
         evidence=evidence,
-        curve=result.curve,
+        curve=curve,
         benchmark=benchmark,
         residuals_bp=dict(result.residuals_bp),
         max_residual_bp=max((abs(v) for v in result.residuals_bp.values()), default=0.0),

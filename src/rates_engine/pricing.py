@@ -170,6 +170,7 @@ def _evidence(
         produced_by=produced_by,
         fields={
             "instrument": instrument.describe(),
+            "currency": curve_set.currency.value,
             "curve_interpolation": curve_set.discount.interpolation,
             "dual_curve": curve_set.is_dual,
             "projection_curve": "tenor" if curve_set.is_dual else "discount",
@@ -177,6 +178,11 @@ def _evidence(
             **extra,
         },
         sources=sources,
+        # The curve's own degradations, so a price on a curve whose
+        # conventions are assumed inherits that without the caller having
+        # to remember to pass source_evidence. That forgetting is what made
+        # the marking decorative.
+        warnings=curve_set.provenance,
     )
 
 

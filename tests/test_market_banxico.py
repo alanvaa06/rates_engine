@@ -85,6 +85,20 @@ class TestParsing:
         series = banxico.parse_sie_payload(_payload(shuffled), "SF43783")
         assert list(series.dates) == sorted(series.dates)
 
+    def test_a_response_without_the_requested_series_refuses(self):
+        """No falling back to the first block. That returned a different
+        series under the requested identifier, marked OBSERVED, with nothing
+        recorded — and since this module deliberately does not know which
+        identifier is which benchmark, a guessed ID is the expected case."""
+        other = json.dumps(
+            {"bmx": {"series": [{"idSerie": "SF331451", "datos": ROWS}]}}
+        )
+        with pytest.raises(InsufficientDataError) as excinfo:
+            banxico.parse_sie_payload(other, "SF43783")
+        message = str(excinfo.value)
+        assert "SF331451" in message
+        assert "wearing your label" in message
+
     def test_the_right_series_is_picked_from_a_multi_series_response(self):
         document = json.dumps(
             {
@@ -174,10 +188,26 @@ class TestTheToken:
 class TestProvenance:
     """Where the number came from, and what this package does not know."""
 
-    def test_it_is_marked_observed_and_sourced_to_banxico(self):
+    def test_it_is_sourced_to_banxico(self):
         series = banxico.parse_sie_payload(_payload(ROWS), "SF43783")
         assert series.provenance.source == "banxico"
+
+    def test_applying_the_percent_convention_marks_the_series_assumed(self):
+        """That SIE quotes in percent is an inference from convention — this
+        build has never reached the endpoint. A wrong guess is a
+        hundredfold error in every fixing, so the division is not free."""
+        series = banxico.parse_sie_payload(_payload(ROWS), "SF43783")
+        assert series.provenance.data_quality is DataQuality.ASSUMED
+        assert "never confirmed" in (series.provenance.notes or "")
+
+    def test_stating_the_units_yourself_is_observed(self):
+        series = banxico.parse_sie_payload(_payload(ROWS), "SF43783", percent=False)
         assert series.provenance.data_quality is DataQuality.OBSERVED
+
+    def test_the_percent_assumption_is_recorded_with_the_others(self):
+        from rates_engine.curves.mxn import UNRESOLVED_MXN
+
+        assert "banxico_quotes_in_percent" in {name for name, _ in UNRESOLVED_MXN}
 
     def test_it_records_that_the_benchmark_mapping_is_not_known_here(self):
         """The SIE identifier for each benchmark is exactly what the

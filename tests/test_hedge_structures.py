@@ -421,15 +421,37 @@ class TestItDoesNotRecommend:
             assert strings == [structure.name]
 
     def test_the_trade_off_is_labelled_axes_not_advice(self):
-        assert TRADE_OFF_FRAME["upfront_cost"] == "higher"
-        assert TRADE_OFF_FRAME["protection"] == "better"
-        assert TRADE_OFF_FRAME["upside_participation"] == "worse"
+        assert "upfront_cost" in TRADE_OFF_FRAME["axes"]
+        assert TRADE_OFF_FRAME["monotone"] == "no"
         assert "depends on the treasury policy" in TRADE_OFF_FRAME["statement"]
 
-    def test_the_statement_names_no_structure(self):
+    def test_the_frame_claims_no_monotonicity_the_table_lacks(self, payable):
+        """The frame used to assert that paying more buys a better worst
+        case. On this very market the option spread costs 0.16 and has a
+        worse worst case than the zero-cost collar, because its sold far
+        wing reopens the tail. Shipping that claim as a labelled field in
+        every payload was the thing AC-4.4 exists to prevent, so this test
+        pins the counterexample rather than the claim."""
+        spread = payable.by_name("option_spread")
+        collar = payable.by_name("collar_zero_cost")
+        assert spread.upfront_cost > collar.upfront_cost
+        assert spread.worst_case_rate > collar.worst_case_rate
+        assert TRADE_OFF_FRAME["monotone"] == "no"
+
+    def test_participation_is_not_monotone_in_cost_either(self, payable):
+        ordered = payable.ordered_by_cost()
+        participations = [s.upside_participation for s in ordered]
+        assert participations != sorted(participations)
+        assert participations != sorted(participations, reverse=True)
+
+    def test_the_statement_names_only_the_two_endpoints_it_can_defend(self):
+        """It may name the cheapest and dearest, because those two *are*
+        universal and tested in both directions. It may not rank the rest."""
         sentence = TRADE_OFF_FRAME["statement"].lower()
-        for name in ("collar", "seagull", "forward", "put", "call", "spread"):
-            assert name not in sentence
+        assert "seagull" in sentence and "at-the-money" in sentence
+        for name in ("collar", "forward", "put", "call"):
+            assert f"{name} is best" not in sentence
+        assert "recommend" not in sentence
 
     def test_the_comparison_payload_carries_the_frame(self, payable):
         assert payable.payload_fields()["trade_off"] == TRADE_OFF_FRAME
@@ -456,11 +478,46 @@ class TestPricingOnASmile:
         )
         assert zero_cost_collar_strike(skewed, QUOTE.forward * 1.03, OptionKind.CALL) != flat
 
-    def test_the_payload_says_a_smile_was_used(self):
+    def test_a_bare_callable_is_named_as_such_because_it_has_no_evidence(self):
+        """The three sources are distinguished because only one of them can
+        say where its number came from. A lambda prices fine and carries
+        nothing, and the payload says so rather than calling it a smile."""
         quote = StructureQuote(18.50, 0.25, 0.0950, 0.0420, lambda k: 0.115 + 0.0 * k)
         result = compare_structures(_exposure(), quote)
-        assert result.evidence.fields["volatility_source"] == "smile"
+        assert result.evidence.fields["volatility_source"] == "callable"
         assert result.evidence.fields["volatility"] is None
+
+    def test_a_smile_passed_directly_is_named_and_its_evidence_kept(self):
+        from rates_engine.evidence import DataQuality
+        from rates_engine.fx.delta import DeltaBasis, DeltaConvention, PremiumAdjustment
+        from rates_engine.fx.vannavolga import (
+            ATMConvention,
+            SmileQuotes,
+            VannaVolgaSmile,
+        )
+
+        smile = VannaVolgaSmile(
+            spot=18.50,
+            expiry=0.25,
+            r_domestic=0.0950,
+            r_foreign=0.0420,
+            quotes=SmileQuotes(atm=0.1150, risk_reversal_25=0.0180, butterfly_25=0.0035),
+            delta_convention=DeltaConvention(
+                DeltaBasis.SPOT, PremiumAdjustment.UNADJUSTED
+            ),
+            atm_convention=ATMConvention.DELTA_NEUTRAL_STRADDLE,
+        )
+        result = compare_structures(
+            _exposure(),
+            StructureQuote(18.50, 0.25, 0.0950, 0.0420, smile),
+            otm_offset=0.12,
+            spread_offset=0.25,
+        )
+        assert result.evidence.fields["volatility_source"] == "smile"
+        # Those strikes are outside the quoted pillars, so every reading
+        # carries the smile's flat-wing Degradation — and it survives the
+        # float() in vol_at, which used to throw it away.
+        assert result.evidence.worst_quality is DataQuality.ASSUMED
 
 
 class TestSerialisationAndEvidence:
