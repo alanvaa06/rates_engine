@@ -45,6 +45,14 @@ def _parametric(as_of, par_swap):
     return fit, price_on_parametric(par_swap, parametric, CurveSet(exact), fit=fit)
 
 
+def _program_audit():
+    """A non-compliant audit, so the violations list is populated."""
+    from rates_engine.hedge_program import HedgeProgram, RebalanceFrequency, audit_hedge
+
+    program = HedgeProgram(0.80, 0.10, RebalanceFrequency.MONTHLY, frozenset({"forward"}))
+    return audit_hedge(program, 0.30, proposed_instrument="seagull")
+
+
 def _hedge_structures():
     """A structure comparison and one of its rows."""
     from rates_engine.fx.quote import USDMXN
@@ -246,6 +254,7 @@ def _all_results(par_swap, curve_set, flat_curve, strip, as_of,
         _fx_forward(as_of),
         *_mxn(),
         *_hedge_structures(),
+        _program_audit(),
         *_volatility(option_curve_set, atm_swaption, forward_swap_rate),
     ]
 

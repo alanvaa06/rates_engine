@@ -123,6 +123,14 @@ from rates_engine.errors import (
     VolUnitsError,
 )
 from rates_engine.evidence import DataQuality, Degradation, Evidence, Provenance
+from rates_engine.hedge_program import (
+    HedgeProgram,
+    ProgramAudit,
+    RebalanceFrequency,
+    Severity,
+    audit_hedge,
+    load_program,
+)
 from rates_engine.hedging import (
     SR3_DV01,
     HedgeResult,
@@ -214,6 +222,7 @@ __version__ = "0.2.0"
 __all__ = [
     "all_views",
     "annuity",
+    "audit_hedge",
     "bachelier",
     "BasisSwapNode",
     "black",
@@ -272,6 +281,7 @@ __all__ = [
     "FuturesSettlement",
     "GreeksResult",
     "HedgeError",
+    "HedgeProgram",
     "HedgeResult",
     "imm_date",
     "imm_dates",
@@ -285,6 +295,7 @@ __all__ = [
     "key_rate_dv01",
     "KeyRateResult",
     "KeyTenorOutOfRangeError",
+    "load_program",
     "load_series_csv",
     "load_settlements_csv",
     "load_snapshot_csv",
@@ -313,6 +324,7 @@ __all__ = [
     "ParSwapNode",
     "price_on_parametric",
     "PriceResult",
+    "ProgramAudit",
     "Provenance",
     "ProxySourceNotDeclaredError",
     "pv",
@@ -320,6 +332,7 @@ __all__ = [
     "RatesEngineError",
     "realized_sofr_sigma",
     "RealizedStubNode",
+    "RebalanceFrequency",
     "require_same_currency",
     "RiskError",
     "RiskResult",
@@ -328,6 +341,7 @@ __all__ = [
     "Schedule",
     "SCHEMA_VERSION",
     "Series",
+    "Severity",
     "ShiftRequiredError",
     "shock_table",
     "ShockTableResult",
