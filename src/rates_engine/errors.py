@@ -37,6 +37,7 @@ __all__ = [
     "CurrencyMismatchError",
     "DeltaConventionError",
     "ImplausibleInputError",
+    "UnresolvedConventionError",
     "CurveError",
     "CurveArbitrageError",
     "BootstrapResidualError",
@@ -187,6 +188,25 @@ class ImplausibleInputError(MarketDataError):
     """
 
     exit_code = 1
+
+
+class UnresolvedConventionError(ConventionError):
+    """A convention this build assumes rather than knows was required to be known.
+
+    Raised only when a caller asks for it, by setting ``strict_conventions``.
+    The default is to proceed and mark: every affected result names the
+    unverified conventions and carries a ``Degradation`` per one, so
+    ``worst_quality`` reaches ``ASSUMED`` and anything priced on it inherits
+    the flag.
+
+    The case this exists for is MXN. PRD-003's research gate could not reach
+    Banxico, ISDA or CME from the build environment, so the TIIE day count,
+    the coupon period and the distinction between the two benchmarks are all
+    assumptions. They are stored as a data gap rather than a code one:
+    resolving them shortens a tuple and changes nothing else.
+    """
+
+    exit_code = 2
 
 
 class CurveError(RatesEngineError):

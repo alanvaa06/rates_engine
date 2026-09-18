@@ -5,14 +5,14 @@ helps if the refusal is legible, so this is the contract: every exception the
 library raises on purpose, what causes it, whether it is recoverable, and what
 to catch.
 
-There are twenty-eight exception classes plus the base. You almost never want to
+There are twenty-nine exception classes plus the base. You almost never want to
 catch all of them, because they mean two different things — and the exit code
 says which.
 
 | It means | Recoverable | Do this | Exit code | Examples |
 | --- | --- | --- | --- | --- |
 | **Your inputs cannot support the calculation** | Yes, by changing the input | Supply the missing data, name a convention that exists, or declare the proxy you meant to use. Retrying unchanged is pointless. | `1` | `MissingFixingError`, `UnsupportedConventionError`, `InsufficientDataError`, `ProxySourceNotDeclaredError`, `ImplausibleInputError`, `MissingDependencyError`, `IncompatibleDependencyError`, `ConfigurationError`, `DeltaConventionError` |
-| **The calculation is impossible or undefined on inputs that are fine** | No | Ask a different question, or relax the thing the message names. | `2` | `CurveArbitrageError`, `BootstrapResidualError`, `UnderdeterminedCurveError`, `NoTenorQuoteSourceError`, `IncompleteStripError`, `UndefinedDurationError`, `KeyTenorOutOfRangeError`, `CurrencyMismatchError`, `ShiftRequiredError`, `ExpansionBreakdownError`, `MissingForwardError`, `SliceNotQuotedError`, `CalibrationError` |
+| **The calculation is impossible or undefined on inputs that are fine** | No | Ask a different question, or relax the thing the message names. | `2` | `CurveArbitrageError`, `BootstrapResidualError`, `UnderdeterminedCurveError`, `NoTenorQuoteSourceError`, `IncompleteStripError`, `UnresolvedConventionError`, `UndefinedDurationError`, `KeyTenorOutOfRangeError`, `CurrencyMismatchError`, `ShiftRequiredError`, `ExpansionBreakdownError`, `MissingForwardError`, `SliceNotQuotedError`, `CalibrationError` |
 
 Everything derives from `RatesEngineError`, so one `except` catches the lot:
 
@@ -148,6 +148,28 @@ command that needs it. It exists for the MCP server, whose tools take the
 config as an optional argument: without this, calling `bootstrap` with no
 config would surface as whichever `KeyError` the handler hit first. `describe`
 and `list-instruments` are the two tools that answer without a config.
+
+### `UnresolvedConventionError`
+
+**Exit code 2. Raised only when you ask for it.**
+
+A convention this build *assumes* rather than *knows* was required to be
+known. The default is the opposite: proceed, and mark. Every affected result
+names the unverified conventions, carries a `Degradation` per one, and so
+reaches `worst_quality == "assumed"` — which anything priced on it inherits,
+because the evidence chain composes.
+
+Set `strict_conventions=True` to turn the marking into a refusal. That is
+for code that must not rest on an assumption, and it fires before any
+calculation rather than after.
+
+The case it exists for is MXN. PRD-003's research gate could not reach
+Banxico, ISDA or CME from the build environment, so the TIIE day count, the
+28-day coupon period, the distinction between TIIE 28 and TIIE de Fondeo,
+and the difference between the BMV and Banxico calendars are all
+assumptions. They are stored as a data gap rather than a code one:
+`rates_engine.curves.mxn.UNRESOLVED_MXN` is a tuple, and resolving them
+shortens it and changes nothing else.
 
 ### `MarketDataError`
 

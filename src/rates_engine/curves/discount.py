@@ -321,6 +321,7 @@ class DiscountCurve:
                 df * math.exp(-function(t) * t) for df, t in zip(self.dfs, times, strict=True)
             ),
             interpolation=self.interpolation,
+            currency=self.currency,
         )
 
     def with_node(self, node: date, df: float) -> DiscountCurve:
@@ -344,9 +345,19 @@ class DiscountCurve:
                 "bootstrap instruments must be solved in maturity order"
             )
         if self.nodes and node == self.nodes[-1]:
-            return DiscountCurve(self.as_of, self.nodes, self.dfs[:-1] + (df,), self.interpolation)
+            return DiscountCurve(
+                self.as_of,
+                self.nodes,
+                self.dfs[:-1] + (df,),
+                self.interpolation,
+                currency=self.currency,
+            )
         return DiscountCurve(
-            self.as_of, self.nodes + (node,), self.dfs + (df,), self.interpolation
+            self.as_of,
+            self.nodes + (node,),
+            self.dfs + (df,),
+            self.interpolation,
+            currency=self.currency,
         )
 
     def to_dict(self) -> dict[str, object]:

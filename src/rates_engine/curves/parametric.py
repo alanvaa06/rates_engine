@@ -39,6 +39,7 @@ from rates_engine.conventions.daycount import year_fraction
 from rates_engine.curves.discount import CURVE_TIME_BASIS, DiscountCurve
 from rates_engine.errors import CalibrationError, UnderdeterminedCurveError
 from rates_engine.evidence import DataQuality, Degradation, Evidence
+from rates_engine.money import Currency
 from rates_engine.results import EngineResult
 
 __all__ = [
@@ -128,7 +129,9 @@ class NelsonSiegel:
             "short_rate": self.short_rate,
         }
 
-    def discount_curve(self, as_of: date, nodes: tuple[date, ...]) -> DiscountCurve:
+    def discount_curve(
+        self, as_of: date, nodes: tuple[date, ...], *, currency: Currency = Currency.USD
+    ) -> DiscountCurve:
         """Sample the model onto a discount curve.
 
         Args:
@@ -142,7 +145,10 @@ class NelsonSiegel:
         """
         times = [year_fraction(as_of, n, CURVE_TIME_BASIS) for n in nodes]
         return DiscountCurve(
-            as_of, nodes, tuple(math.exp(-self.zero_rate(t) * t) for t in times)
+            as_of,
+            nodes,
+            tuple(math.exp(-self.zero_rate(t) * t) for t in times),
+            currency=currency,
         )
 
 
@@ -377,7 +383,9 @@ class FOMCStepCurve:
 
         return self.compounded(start, add_months(start, months))
 
-    def discount_curve(self, nodes: tuple[date, ...]) -> DiscountCurve:
+    def discount_curve(
+        self, nodes: tuple[date, ...], *, currency: Currency = Currency.USD
+    ) -> DiscountCurve:
         """Sample the step path onto a discount curve.
 
         Args:
@@ -394,7 +402,7 @@ class FOMCStepCurve:
                 day += timedelta(days=1)
             previous = node
             factors.append(1.0 / running)
-        return DiscountCurve(self.as_of, nodes, tuple(factors))
+        return DiscountCurve(self.as_of, nodes, tuple(factors), currency=currency)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialise the meeting dates and the path between them."""

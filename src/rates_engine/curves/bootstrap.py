@@ -30,6 +30,7 @@ from rates_engine.errors import (
     UnderdeterminedCurveError,
 )
 from rates_engine.evidence import DataQuality, Degradation, Evidence, Provenance
+from rates_engine.money import Currency
 from rates_engine.results import EngineResult
 
 __all__ = [
@@ -271,6 +272,7 @@ def bootstrap_discount_curve(
     long_end_source: str | None = None,
     strict: bool = True,
     tolerance_bp: float = DEFAULT_TOLERANCE_BP,
+    currency: Currency = Currency.USD,
 ) -> BootstrapResult:
     """Solve one curve node per instrument, in maturity order.
 
@@ -286,6 +288,8 @@ def bootstrap_discount_curve(
             When false it is recorded in ``dropped_instruments`` instead, and
             is never simply discarded.
         tolerance_bp: Residual tolerance in basis points.
+        currency: What the resulting curve discounts. Defaults to USD,
+            which every v1 and v2 curve already was.
 
     Returns:
         The :class:`BootstrapResult`.
@@ -329,7 +333,9 @@ def bootstrap_discount_curve(
             f"the only accepted value is {TREASURY_PROXY!r}"
         )
 
-    curve = DiscountCurve(as_of, (ordered[0].node_date,), (1.0,), interpolation)
+    curve = DiscountCurve(
+        as_of, (ordered[0].node_date,), (1.0,), interpolation, currency=currency
+    )
     curve = _solve_node(curve, ordered[0], previous_df=1.0)
     for instrument in ordered[1:]:
         curve = _solve_node(

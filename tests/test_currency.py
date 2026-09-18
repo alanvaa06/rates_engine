@@ -147,6 +147,70 @@ class TestMixingRefuses:
             pv(_Two(flows[0]), CurveSet(_curve()))
 
 
+class TestItSurvivesEveryTransformation:
+    """The bug that made the whole check ornamental.
+
+    A currency that a bump or a bootstrap step silently reverts to USD is
+    worse than no currency at all: the refusal stops firing exactly where
+    the curve has been through the most machinery. Every method that
+    reconstructs a `DiscountCurve` is pinned here.
+    """
+
+    def test_a_shift_keeps_it(self):
+        assert _curve(Currency.MXN).shifted(1e-4).currency is Currency.MXN
+
+    def test_appending_a_node_keeps_it(self):
+        curve = _curve(Currency.MXN)
+        extended = curve.with_node(AS_OF + timedelta(days=365 * 4), 0.70)
+        assert extended.currency is Currency.MXN
+
+    def test_replacing_the_last_node_keeps_it(self):
+        curve = _curve(Currency.MXN)
+        replaced = curve.with_node(curve.nodes[-1], 0.80)
+        assert replaced.currency is Currency.MXN
+
+    def test_the_bootstrap_produces_the_currency_it_was_asked_for(self):
+        from rates_engine.curves.bootstrap import RealizedStubNode, bootstrap_discount_curve
+
+        end = AS_OF + timedelta(days=28)
+        result = bootstrap_discount_curve(
+            AS_OF,
+            (RealizedStubNode(end=end, accrual_factor=1.0 + 0.095 * 28 / 360),),
+            currency=Currency.MXN,
+        )
+        assert result.curve.currency is Currency.MXN
+
+    def test_the_bootstrap_still_defaults_to_dollars(self):
+        from rates_engine.curves.bootstrap import RealizedStubNode, bootstrap_discount_curve
+
+        end = AS_OF + timedelta(days=28)
+        result = bootstrap_discount_curve(
+            AS_OF, (RealizedStubNode(end=end, accrual_factor=1.0 + 0.04 * 28 / 360),)
+        )
+        assert result.curve.currency is Currency.USD
+
+    def test_a_parametric_curve_can_be_sampled_in_a_currency(self):
+        from rates_engine.curves.parametric import NelsonSiegel
+
+        model = NelsonSiegel(0.09, -0.01, 0.005, 2.0)
+        nodes = (AS_OF + timedelta(days=365),)
+        assert model.discount_curve(AS_OF, nodes, currency=Currency.MXN).currency is Currency.MXN
+        assert model.discount_curve(AS_OF, nodes).currency is Currency.USD
+
+    def test_a_shifted_curve_set_keeps_both_currencies(self):
+        curves = CurveSet(_curve(Currency.MXN), _curve(Currency.MXN, 0.10))
+        shifted = curves.shifted(1e-4)
+        assert shifted.currency is Currency.MXN
+        assert shifted.tenor is not None and shifted.tenor.currency is Currency.MXN
+
+    def test_a_bumped_peso_curve_still_refuses_a_dollar_flow(self):
+        """The end-to-end version: the refusal has to survive the machinery,
+        not just the constructor."""
+        curves = CurveSet(_curve(Currency.MXN)).shifted(1e-4)
+        with pytest.raises(CurrencyMismatchError):
+            pv(_OneFlow(_flow(Currency.USD)), curves)
+
+
 class TestItTravelsIntoThePayload:
     """A number whose currency is not in its payload is a number with a unit
     the reader has to guess."""

@@ -45,6 +45,44 @@ def _parametric(as_of, par_swap):
     return fit, price_on_parametric(par_swap, parametric, CurveSet(exact), fit=fit)
 
 
+def _mxn():
+    """A peso curve and a benchmark comparison, as test_mxn_curve.py builds them."""
+    from rates_engine.conventions.daycount import year_fraction
+    from rates_engine.curves.bootstrap import ParSwapNode, RealizedStubNode
+    from rates_engine.curves.mxn import (
+        TIIE_DAY_COUNT,
+        TIIEBenchmark,
+        bootstrap_mxn_curve,
+        compare_benchmarks,
+        tiie_schedule,
+    )
+
+    as_of = date(2026, 9, 16)
+
+    def built(rate, benchmark):
+        dates = tiie_schedule(as_of, 13)
+        starts = (as_of, *dates[:-1])
+        stub = RealizedStubNode(
+            end=dates[0],
+            accrual_factor=1.0 + rate * ((dates[0] - as_of).days / 360.0),
+            label="tiie_stub",
+        )
+        swap = ParSwapNode(
+            start=as_of,
+            payment_dates=dates,
+            year_fractions=tuple(
+                year_fraction(s, e, TIIE_DAY_COUNT) for s, e in zip(starts, dates, strict=True)
+            ),
+            quoted_rate=rate,
+            label="tiie_1y",
+        )
+        return bootstrap_mxn_curve(as_of, (stub, swap), benchmark)
+
+    fondeo = built(0.0950, TIIEBenchmark.TIIE_FONDEO)
+    twenty_eight = built(0.0985, TIIEBenchmark.TIIE_28)
+    return [fondeo, compare_benchmarks(fondeo, twenty_eight)]
+
+
 def _fx_forward(as_of):
     """A forward with a basis, so both halves of the payload are populated."""
     from datetime import timedelta
@@ -188,6 +226,7 @@ def _all_results(par_swap, curve_set, flat_curve, strip, as_of,
         realized_sofr_sigma(snapshot),
         _fx_smile(),
         _fx_forward(as_of),
+        *_mxn(),
         *_volatility(option_curve_set, atm_swaption, forward_swap_rate),
     ]
 
