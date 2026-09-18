@@ -114,7 +114,7 @@ el nombre de cada convención sin verificar, y `strict=True` se rehúsa.
 
 ## Estado de implementación (2026-09-18)
 
-v0.3.0 construido. `pytest -q`: **1442 pasan, 5 saltan** (los goldens CME de
+v0.3.0 construido. `pytest -q`: **1464 pasan, 5 saltan** (los goldens CME de
 v1, sin cambio). `ruff check .` limpio. `mypy src/rates_engine` limpio en 59
 archivos, allowlist vacía. `python scripts/audit_acceptance.py 003`:
 **20 AC, 0 sin cubrir, 0 parciales**.
@@ -129,9 +129,17 @@ cadena de evidencia —que es el argumento entero del paquete— no registra
 ninguna de las dos cosas.
 
 Es la misma clase de error que las unidades de vol en v2 y tiene el mismo
-arreglo: el tipo lleva el hecho. Default USD, así que las 1276 pruebas de v1
-y v2 corren **sin modificarse** — que es la única forma de probar que el
-cambio es aditivo. Si alguna hubiera necesitado cambiar, no lo habría sido.
+arreglo: el tipo lleva el hecho. Default USD, y **ninguna de las 971 pruebas
+de v1 y v2 tuvo que cambiar por causa de la moneda** — que es la única forma
+de probar que ese cambio es aditivo.
+
+Corrección (revisión profunda, 2026-09-18): una versión anterior de este
+párrafo decía "las 1276 pruebas de v1 y v2 corren sin modificarse". Las dos
+mitades estaban mal. La línea base en `be03fed` es **971 pasan, 5 saltan**,
+no 1276. Y tres archivos preexistentes sí cambiaron — `test_cli_json.py`
+dejó de fijar la lista literal de comandos, `test_layering.py` ganó cuatro
+capas y `test_mcp_server.py` renombró un test. Ninguno por la moneda, pero
+"sin modificarse" era falso tal como estaba escrito.
 
 Un bug propio salió de ahí: `DiscountCurve.shifted` y `.with_node`
 reconstruían la curva y **perdían la moneda**. El bootstrap pasa por

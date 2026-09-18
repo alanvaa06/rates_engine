@@ -211,6 +211,51 @@ class TestItSurvivesEveryTransformation:
             pv(_OneFlow(_flow(Currency.USD)), curves)
 
 
+class TestARealInstrumentNotJustAProbe:
+    """Everything above prices a hand-built flow through a shim. The guard
+    has to hold for something with real cashflow-generation logic, and for
+    a long time it did not: no instrument set a currency at all, so the
+    check had no true positives and fired on every peso valuation."""
+
+    @staticmethod
+    def _swap(notional: float = 1_000_000.0) -> object:
+        from rates_engine.instruments.swaps import OISSwap, Side
+
+        return OISSwap(
+            effective=AS_OF + timedelta(days=30),
+            maturity=AS_OF + timedelta(days=365 * 2),
+            fixed_rate=0.05,
+            notional=notional,
+            side=Side.PAYER,
+        )
+
+    def test_a_real_swap_takes_its_currency_from_the_curve(self):
+        curves = CurveSet(_curve(Currency.MXN, 0.09))
+        assert {c.currency for c in self._swap().cashflows(curves)} == {Currency.MXN}
+
+    def test_and_prices_on_it_rather_than_refusing_its_own_output(self):
+        """The bug this closes: `bootstrap_mxn_curve` produced a curve that
+        `pv` then refused, because the flows were hardcoded USD."""
+        curves = CurveSet(_curve(Currency.MXN, 0.09))
+        assert pv(self._swap(), curves).value != 0.0
+
+    def test_the_price_is_labelled_in_the_curves_currency(self):
+        curves = CurveSet(_curve(Currency.MXN, 0.09))
+        assert pv(self._swap(), curves).unit == "MXN"
+        assert pv(self._swap(), curves).to_dict()["unit"] == "MXN"
+
+    def test_a_dollar_swap_on_a_dollar_curve_is_unchanged(self):
+        curves = CurveSet(_curve(Currency.USD))
+        assert pv(self._swap(), curves).unit == "USD"
+
+    def test_hand_assembling_a_mixed_portfolio_still_refuses(self):
+        """Where the guard has real work: flows the caller built, not ones
+        an instrument generated from a curve."""
+        curves = CurveSet(_curve(Currency.USD))
+        with pytest.raises(CurrencyMismatchError):
+            pv(_OneFlow(_flow(Currency.MXN)), curves)
+
+
 class TestItTravelsIntoThePayload:
     """A number whose currency is not in its payload is a number with a unit
     the reader has to guess."""

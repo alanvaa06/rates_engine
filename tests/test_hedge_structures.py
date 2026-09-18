@@ -273,10 +273,32 @@ class TestTheTradeOff:
         assert collar.upfront_cost < otm.upfront_cost
         assert collar.upside_participation < otm.upside_participation
 
-    def test_participation_is_a_fraction(self, payable, receivable):
+    def test_participation_is_the_ratio_it_claims_to_be(self, payable):
+        """Asserting only `0 <= p <= 1` was vacuous: the clamp in
+        `_summarise` guarantees it, and a mutation replacing the whole
+        computation with the constant 0.5 passed. This recomputes the ratio
+        from the reported grids instead, so it tests the quantity."""
+        grid = payable.spot_grid
+        for structure in payable.structures:
+            rates = structure.payoff_grid
+            # For a payable the favourable direction is a lower spot.
+            open_span = max(grid) - min(grid)
+            kept = rates[grid.index(max(grid))] - rates[grid.index(min(grid))]
+            assert structure.upside_participation == pytest.approx(
+                max(0.0, min(1.0, kept / open_span)), abs=1e-12
+            )
+
+    def test_the_clamp_never_binds_on_these_structures(self, payable, receivable):
+        """So the assertion above is testing the ratio and not the guard.
+        If a structure ever needs the clamp, this fails and says so rather
+        than hiding it behind a range check that always passes."""
         for comparison in (payable, receivable):
+            grid = comparison.spot_grid
             for structure in comparison.structures:
-                assert 0.0 <= structure.upside_participation <= 1.0
+                rates = structure.payoff_grid
+                span = max(grid) - min(grid)
+                kept = abs(rates[grid.index(max(grid))] - rates[grid.index(min(grid))])
+                assert -1e-12 <= kept / span <= 1.0 + 1e-12
 
     def test_the_unhedged_and_forward_rows_bracket_participation(self, payable):
         assert payable.by_name("unhedged").upside_participation == pytest.approx(1.0)

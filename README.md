@@ -100,7 +100,7 @@ rateng price --config config.json --json       # pv, par, annuity, every risk me
 rateng hedge --config config.json --json       # contracts per period plus the shock table
 rateng list-instruments --json              # what this build prices, and what each needs
 rateng fx-forward --config fx.json --json      # CIP forward, with the basis kept separate
-rateng hedge-structures --config fx.json --json  # seven structures, costed side by side
+rateng hedge-structures --config fx.json --json  # eight structures, costed side by side
 ```
 
 `python scripts/write_example_config.py config.json` writes a config to start
@@ -115,7 +115,7 @@ pip install "finport-ratesengine[mcp]"
 rateng-mcp
 ```
 
-Five tools, the same five commands. Each one is literally the callable the
+Seven tools, the same seven commands. Each one is literally the callable the
 CLI dispatches to, so a tool's answer is byte-identical to the corresponding
 `--json` document rather than a second serialisation kept in step by hand.
 The server is transport: it writes no file, opens no socket and invokes no

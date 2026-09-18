@@ -17,10 +17,11 @@ for the CLI are the one extra (`config`); JSON configs are native precisely so
 that a core install can run every command.
 
 Three ways in. As a library, importing `rates_engine`. As a CLI, `rateng`,
-where `bootstrap`, `price`, `hedge`, `describe` and `list-instruments` take
-`--json` and put one parseable document on stdout with all narration on
-stderr. As an MCP server, `rateng-mcp` (the `mcp` extra), whose five tools
-are those same five handlers and whose answers are byte-identical to the
+where `bootstrap`, `price`, `hedge`, `describe`, `list-instruments`,
+`fx-forward` and `hedge-structures` take `--json` and put one parseable
+document on stdout with all narration on stderr. As an MCP server,
+`rateng-mcp` (the `mcp` extra), whose seven tools are those same seven
+handlers and whose answers are byte-identical to the
 CLI's — the server is transport and nothing else: it writes no file, opens no
 socket and invokes no model.
 
@@ -44,7 +45,7 @@ separately, because parity has not held since 2007 and the residual is a
 real, signed cost. Prices FX options with Garman-Kohlhagen and builds their
 smile with vanna-volga from the three quotes the market makes, under a delta
 convention that has to be stated because FX has four and they differ by
-hundreds of pips. Compares seven hedge structures against a transaction
+hundreds of pips. Compares eight hedge structures against a transaction
 exposure, and audits a proposed hedge against a policy loaded from data.
 
 Prices European swaptions and caps and floors with Bachelier when the
@@ -83,7 +84,7 @@ FX. No live market data behind any volatility surface: the caller supplies
 the cube and the smile.
 
 **And it does not advise.** The hedge comparator returns cost, worst case,
-best case and upside participation for seven structures and the trade-off
+best case and upside participation for eight structures and the trade-off
 between them as labelled axes. It does not rank them, there is no "best
 structure" function, and no name in the package contains `recommend`.
 

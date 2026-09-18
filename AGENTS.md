@@ -17,7 +17,7 @@ nothing else.
 
 Two places to look when this file does not answer the question.
 [`docs/ERRORS.md`](docs/ERRORS.md) is the refusal contract: which of the
-seventeen exception types to catch, which are recoverable, the CLI's exit
+thirty-one exception types to catch, which are recoverable, the CLI's exit
 codes, and the failures that are *reported* rather than raised.
 [`docs/RESEARCH.md`](docs/RESEARCH.md) maps every formula to the paper it came
 from and says whether that paper was read or taken from a secondary source.
@@ -216,22 +216,26 @@ installs no warning filter; `tests/test_import_side_effects.py` enforces both.
 
 | Module | Responsibility |
 | --- | --- |
-| `conventions` | Day counts, the SIFMA calendar, rolls, IMM dates, schedules |
-| `evidence` | `Evidence`, `Provenance`, `Degradation`, `DataQuality` |
 | `errors` | Every deliberate refusal, each with an exit code |
-| `market` | Snapshots, the SOFR compounding rules, `file` and `fred` providers |
+| `money` | `Currency`, and the refusal when two of them meet |
+| `conventions` | Day counts, the SIFMA and BMV calendars, rolls, IMM dates, schedules |
+| `evidence` | `Evidence`, `Provenance`, `Degradation`, `DataQuality` |
+| `market` | Snapshots, the SOFR compounding rules, `file`, `fred` and `banxico` providers |
 | `instruments` | `OISSwap`, `IRSwap`, `FRA`, `SOFRFuture1M`, `SOFRFuture3M` |
 | `volatility` | `Volatility` and its units, Bachelier, Black, SABR, the cube |
-| `curves` | `DiscountCurve`, the bootstrap, the four views, the dual-curve solver, monotone convex, Nelson-Siegel and the FOMC step curve |
+| `curves` | `DiscountCurve`, the bootstrap, the four views, the dual-curve solver, monotone convex, Nelson-Siegel, the FOMC step curve, and the MXN curve with its unresolved conventions |
+| `fx` | The currency pair, Garman-Kohlhagen, four delta conventions, vanna-volga, the CIP forward and its basis |
 | `convexity` | Ho-Lee and Hull-White adjustments, realised sigma |
 | `pricing` | `pv`, `par_rate`, `annuity`, parallel `dv01`, `price_on_parametric` |
 | `optionpricing` | Forward swap rate, swaption annuity, swaption and cap/floor PV |
 | `risk` | Key rate, duration conventions, convexity, option greeks, and the stubs |
 | `hedging` | `strip_hedge`, `shock_table` |
+| `hedging_structures` | `compare_structures`: eight structures, costed side by side |
+| `hedge_program` | The hedging policy as data, loaded strictly and audited |
 | `diagnostics` | Reading an evidence chain |
 | `reporting` | JSON payloads and error payloads |
-| `cli` | `rateng bootstrap / price / hedge / describe / list-instruments` |
-| `mcp_server` | `rateng-mcp`: the same five payloads over stdio |
+| `cli` | `rateng bootstrap / price / hedge / describe / list-instruments / fx-forward / hedge-structures` |
+| `mcp_server` | `rateng-mcp`: the same seven payloads over stdio |
 
 ## The CLI in one line
 
@@ -241,9 +245,11 @@ rateng bootstrap --config c.json --json         # curve plus its four views
 rateng price --config c.json --json             # pv, par, annuity, every risk measure
 rateng hedge --config c.json --json             # contracts per period plus the shock table
 rateng list-instruments --json                  # what this build prices, and what each needs
+rateng fx-forward --config fx.json --json       # CIP forward, basis reported separately
+rateng hedge-structures --config fx.json --json # eight structures, costed side by side
 ```
 
-The MCP server is the same five handlers over stdio, so a tool's answer is
+The MCP server is the same seven handlers over stdio, so a tool's answer is
 byte-identical to the corresponding `--json` command. It needs the `mcp`
 extra; without it, `rateng-mcp` says which extra installs it rather than
 raising `ModuleNotFoundError`.

@@ -129,8 +129,20 @@ def parse_sie_payload(payload: str, series_id: str, *, percent: bool = True) -> 
         raw = str(point.get("dato", "")).strip().replace(",", "")
         if raw in {"", "N/E", "N/A"}:
             continue
-        day, month, year = (int(part) for part in str(point["fecha"]).split("/"))
-        rows.append((date(year, month, day), float(raw) / (100.0 if percent else 1.0)))
+        # The guard above covers the envelope; this covers the rows. The
+        # parser is the only part of this client that has ever run, so
+        # giving up its contract on an unseen row shape is the last place
+        # it should happen.
+        try:
+            day, month, year = (int(part) for part in str(point["fecha"]).split("/"))
+            value = float(raw) / (100.0 if percent else 1.0)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise InsufficientDataError(
+                f"SIE returned an observation this parser cannot read for "
+                f"{series_id}: {point!r}. Dates are day-first (`16/09/2026`) and "
+                f"values are decimal strings."
+            ) from exc
+        rows.append((date(year, month, day), value))
     if not rows:
         raise InsufficientDataError(
             f"every observation SIE returned for {series_id} was marked unavailable"

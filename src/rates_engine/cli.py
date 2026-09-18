@@ -24,6 +24,7 @@ import math
 import sys
 import traceback
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -510,6 +511,14 @@ def _command_hedge_structures(config: dict[str, Any] | None) -> dict[str, Any]:
             proposed_instrument=exposure_block.get("proposed_instrument"),
         )
         payload["program_audit"] = audit.to_dict()
+        # In the chain, not beside it. As a sibling key, a breach left the
+        # document's own evidence reading "observed" while the audit
+        # nested inside it read "assumed" — a consumer checking the top
+        # was told the document was clean.
+        comparison = replace(
+            comparison,
+            evidence=comparison.evidence.with_sources(audit.evidence),
+        )
     return result_payload(comparison, **payload)
 
 

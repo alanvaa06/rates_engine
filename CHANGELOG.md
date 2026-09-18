@@ -56,7 +56,7 @@ comparator that does not recommend. No v1 or v2 number moves.
   `Degradation` on every peso result so `worst_quality` reaches `assumed`
   and anything priced on it inherits that. `strict_conventions=True` turns
   the marking into a refusal.
-- **Seven hedge structures.** `compare_structures` returns a table —
+- **Eight hedge structures.** `compare_structures` returns a table —
   unhedged, forward at a ratio, protective option at and out of the money,
   collar, zero-cost collar, option spread, seagull — with cost, worst case,
   best case, upside participation and a payoff grid, plus the residual

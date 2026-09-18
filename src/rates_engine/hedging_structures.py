@@ -1,4 +1,4 @@
-"""Seven ways to hedge a transaction exposure, priced and laid side by side.
+"""Eight ways to hedge a transaction exposure, priced and laid side by side.
 
 The CFA Level III framing, implemented as arithmetic. A treasurer with a
 foreign-currency payable or receivable can leave it open, sell it forward,
@@ -43,6 +43,7 @@ from rates_engine.results import EngineResult
 from rates_engine.volatility.kinds import OptionKind
 
 __all__ = [
+    "STRUCTURE_NAMES",
     "ExposureDirection",
     "Exposure",
     "StructureQuote",
@@ -52,6 +53,25 @@ __all__ = [
     "compare_structures",
     "zero_cost_collar_strike",
 ]
+
+STRUCTURE_NAMES: frozenset[str] = frozenset(
+    {
+        "unhedged",
+        "forward",
+        "protective_option_atm",
+        "protective_option_otm",
+        "collar",
+        "collar_zero_cost",
+        "option_spread",
+        "seagull",
+    }
+)
+"""Every structure :func:`compare_structures` builds.
+
+Exported so that :mod:`rates_engine.hedge_program` can validate the names a
+policy permits against the names that exist, rather than the two modules
+agreeing by coincidence across a string literal.
+"""
 
 TRADE_OFF_FRAME: dict[str, str] = {
     "axes": "upfront_cost, worst_case_rate, best_case_rate, upside_participation",
@@ -275,7 +295,11 @@ class StructureResult(EngineResult):
         best_case_rate: The most favourable, or ``None`` when unbounded.
         upside_participation: Fraction of a favourable move retained, in
             ``[0, 1]``, measured over the reported spot grid.
-        hedge_ratio: The fraction of the exposure hedged.
+        hedge_ratio: The fraction of the exposure covered *by a forward*.
+            An option structure covers the whole exposure by a different
+            mechanism, so this is ``None`` there rather than ``0.0`` —
+            which read as "unhedged" and made every option row sort and
+            filter as if it were open.
         legs: ``(kind, strike, quantity)`` per option leg.
         forward_amount: Base currency sold or bought forward, signed.
         payoff_grid: Effective rate at each spot on the grid.
@@ -288,7 +312,7 @@ class StructureResult(EngineResult):
     worst_case_rate: float | None
     best_case_rate: float | None
     upside_participation: float
-    hedge_ratio: float
+    hedge_ratio: float | None
     legs: tuple[tuple[str, float, float], ...]
     forward_amount: float
     payoff_grid: tuple[float, ...]
@@ -459,7 +483,7 @@ def _structure(
     legs: tuple[_Leg, ...] = (),
     forward_amount: float = 0.0,
     forward_rate: float | None = None,
-    hedge_ratio: float = 0.0,
+    hedge_ratio: float | None = None,
 ) -> StructureResult:
     """Cost one structure and evaluate it across the grid."""
     upfront = sum(leg.quantity * quote.price(leg.strike, leg.kind) for leg in legs)
@@ -580,7 +604,7 @@ def compare_structures(
     correlation: float | None = None,
     foreign_asset_volatility: float | None = None,
 ) -> StructureComparison:
-    """Price seven hedge structures against one exposure and tabulate them.
+    """Price eight hedge structures against one exposure and tabulate them.
 
     Args:
         exposure: What is being hedged.
@@ -638,7 +662,7 @@ def compare_structures(
     )
 
     rows: list[StructureResult] = [
-        _structure("unhedged", exposure, quote, grid),
+        _structure("unhedged", exposure, quote, grid, hedge_ratio=0.0),
         _structure(
             "forward",
             exposure,

@@ -58,7 +58,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "reported separately from the covered-interest-parity part."
     ),
     "hedge-structures": (
-        "Compare seven hedge structures against a transaction exposure: cost, worst "
+        "Compare eight hedge structures against a transaction exposure: cost, worst "
         "case, best case, upside participation. Compares; does not recommend."
     ),
 }

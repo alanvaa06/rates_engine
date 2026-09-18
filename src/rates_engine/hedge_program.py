@@ -29,6 +29,7 @@ from typing import Any
 
 from rates_engine.errors import ConfigurationError
 from rates_engine.evidence import DataQuality, Degradation, Evidence
+from rates_engine.hedging_structures import STRUCTURE_NAMES
 from rates_engine.results import EngineResult
 
 __all__ = [
@@ -173,11 +174,36 @@ def load_program(config: dict[str, Any]) -> HedgeProgram:
             f"rebalance_frequency {frequency!r} is not one of "
             f"{', '.join(f.value for f in RebalanceFrequency)}"
         ) from exc
+    # A malformed *value* in a policy file is external input, not a
+    # programmer's wrong argument shape, so it belongs on the
+    # RatesEngineError side like the unknown-key and bad-enum branches
+    # above. Without this the coercions leaked ValueError and TypeError,
+    # against this function's own documented Raises.
+    try:
+        target = float(config["target_hedge_ratio"])
+        band = float(config["discretion_band"])
+        allowed = frozenset(config.get("allowed_instruments") or ())
+    except (TypeError, ValueError) as exc:
+        raise ConfigurationError(
+            f"a value in the hedge programme could not be read: {exc}. "
+            "target_hedge_ratio and discretion_band are numbers; "
+            "allowed_instruments is a list of structure names."
+        ) from exc
+    unknown_instruments = sorted(allowed - STRUCTURE_NAMES)
+    if unknown_instruments:
+        # The mirror of the unknown-key check, and the same failure: a
+        # policy naming structures that do not exist forbids everything
+        # while looking like it permits something.
+        raise ConfigurationError(
+            f"allowed_instruments names structure(s) this engine does not build: "
+            f"{', '.join(unknown_instruments)}. It builds "
+            f"{', '.join(sorted(STRUCTURE_NAMES))}."
+        )
     return HedgeProgram(
-        target_hedge_ratio=float(config["target_hedge_ratio"]),
-        discretion_band=float(config["discretion_band"]),
+        target_hedge_ratio=target,
+        discretion_band=band,
         rebalance_frequency=parsed,
-        allowed_instruments=frozenset(config.get("allowed_instruments") or ()),
+        allowed_instruments=allowed,
         name=str(config.get("name", "unnamed_program")),
     )
 

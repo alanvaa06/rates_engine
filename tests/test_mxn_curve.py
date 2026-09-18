@@ -33,6 +33,7 @@ from rates_engine.curves.mxn import (
     TIIEBenchmark,
     bootstrap_mxn_curve,
     compare_benchmarks,
+    tiie_par_swap_node,
     tiie_schedule,
 )
 from rates_engine.errors import RatesEngineError, UnresolvedConventionError
@@ -99,6 +100,51 @@ class TestTheSchedule:
     def test_the_period_and_basis_are_named_constants(self):
         assert TIIE_PERIOD_DAYS == 28
         assert TIIE_DAY_COUNT is DayCount.ACT_360
+
+
+class TestTheConventionsAreLoadBearing:
+    """The constants must change an answer, or they are decoration.
+
+    `TIIE_DAY_COUNT` and `TIIE_PERIOD_DAYS` were published in two payloads
+    and applied by no calculation — the caller supplied their own year
+    fractions. And the tests built their instruments *from* the constants,
+    so a mutation moved both sides together and every behavioural test
+    passed at a wrong day count. These assert against literals written out
+    here, so the constants have to be right rather than merely consistent.
+    """
+
+    def test_the_helper_applies_the_day_count(self):
+        node = tiie_par_swap_node(AS_OF, 4, FLAT)
+        first_start, first_end = AS_OF, node.payment_dates[0]
+        assert node.year_fractions[0] == pytest.approx(
+            (first_end - first_start).days / 360.0
+        )
+
+    def test_a_different_day_count_would_change_the_accrual(self, monkeypatch):
+        import rates_engine.curves.mxn as mxn
+
+        monkeypatch.setattr(mxn, "TIIE_DAY_COUNT", DayCount.ACT_365F)
+        node = mxn.tiie_par_swap_node(AS_OF, 4, FLAT)
+        assert node.year_fractions[0] == pytest.approx(
+            (node.payment_dates[0] - AS_OF).days / 365.0
+        )
+
+    def test_the_helper_applies_the_period(self):
+        node = tiie_par_swap_node(AS_OF, 4, FLAT, roll=False)
+        starts = (AS_OF, *node.payment_dates[:-1])
+        for start, end in zip(starts, node.payment_dates, strict=True):
+            assert (end - start).days == 28
+
+    def test_a_year_is_thirteen_periods_of_twenty_eight_days(self):
+        """The consequence, as a literal: 13 x 28 = 364."""
+        node = tiie_par_swap_node(AS_OF, 13, FLAT, roll=False)
+        assert len(node.payment_dates) == 13
+        assert (node.payment_dates[-1] - AS_OF).days == 364
+
+    def test_the_payload_says_what_the_conventions_describe(self):
+        payload = _curve().payload_fields()
+        assert "tiie_par_swap_node" in payload["conventions_apply_to"]
+        assert "carries its own year fractions" in payload["conventions_apply_to"]
 
 
 class TestTheBootstrapArithmetic:

@@ -196,7 +196,14 @@ class VannaVolgaSmile:
     quotes: SmileQuotes
     delta_convention: DeltaConvention
     atm_convention: ATMConvention
-    _cache: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
+    _cache: dict[str, Any] = field(
+        default_factory=dict, repr=False, compare=False, init=False
+    )
+    """Memoised pillars. ``init=False`` matters: as an init field,
+    ``dataclasses.replace`` forwarded the *same dict*, so a smile replaced
+    with a new spot kept the old one's pillars and mixed them into every
+    price. ``replace`` is the package's established way to copy a frozen
+    result, so that was a live footgun rather than a theoretical one."""
 
     def __post_init__(self) -> None:
         if self.expiry <= 0.0:

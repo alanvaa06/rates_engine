@@ -17,6 +17,10 @@ default is :data:`Currency.USD`, which is what keeps the change additive —
 every v1 and v2 call means exactly what it meant before, and the existing
 test suite is the regression test for that claim.
 
+**Not a second home for the refusal.** :class:`~rates_engine.errors.
+CurrencyMismatchError` is imported here and raised from here, and is *not*
+in this module's ``__all__``: every refusal has one documented home.
+
 **What this is not.** Not FX conversion. Nothing here turns pesos into
 dollars; that needs a rate, a date and a quoting convention, and it lives
 in :mod:`rates_engine.fx`. This module only lets two amounts say whether
@@ -29,7 +33,9 @@ from enum import StrEnum
 
 from rates_engine.errors import CurrencyMismatchError
 
-__all__ = ["Currency", "CurrencyMismatchError", "require_same_currency"]
+__all__ = ["Currency", "require_same_currency"]
+# CurrencyMismatchError is imported for use, not re-exported: every refusal
+# has exactly one documented home, which is rates_engine.errors.
 
 
 class Currency(StrEnum):
