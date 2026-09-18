@@ -324,13 +324,22 @@ def write_fomc_strip() -> None:
         )
 
 
+WEEKDAY_NAMES = (
+    "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
+)
+"""Spelled out rather than taken from ``strftime("%A")``, which is
+locale-dependent: the same fixture regenerated on a runner with a different
+locale would differ from the one committed, and the test that compares them
+would fail for a reason nobody could act on."""
+
+
 def write_bmv_holidays() -> None:
     """The BMV calendar this package implements, dumped for human review."""
     path = HERE / "bmv_holidays.csv"
     rows = []
     for year in range(2022, 2032):
         for day in sorted(BMV.holidays(year)):
-            rows.append((year, day.isoformat(), day.strftime("%A")))
+            rows.append((year, day.isoformat(), WEEKDAY_NAMES[day.weekday()]))
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         writer.writerow(["year", "date", "weekday"])

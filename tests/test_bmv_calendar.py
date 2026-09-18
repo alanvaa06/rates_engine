@@ -254,8 +254,15 @@ class TestTheFixtureMatchesTheCode:
                 assert (year, day) in dumped
 
     def test_the_weekday_column_is_right(self, rows):
+        """Compared against a spelled-out list rather than `strftime("%A")`,
+        which is locale-dependent: on a runner with a non-English locale the
+        committed fixture and the computed name would differ for a reason
+        nobody could act on. The CI matrix includes Windows."""
+        names = (
+            "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
+        )
         for _, day, weekday in rows:
-            assert day.strftime("%A") == weekday
+            assert names[day.weekday()] == weekday
 
     def test_it_spans_a_decade_including_two_inaugurations(self, rows):
         years = {y for y, _, _ in rows}
