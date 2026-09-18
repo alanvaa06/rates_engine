@@ -29,11 +29,20 @@ DeltaConventionError` when asked to guess. That is AC-3.4, and the gap the
 research left is the reason it earns its place rather than being
 box-ticking.
 
-**Premium-adjusted delta is not monotone in the strike.** For a call it
+**Premium-adjusted delta is not monotone in the strike — for a call.** It
 rises from zero, peaks, and falls back to zero, so most deltas have two
 strikes. The market convention is the out-of-the-money branch, past the
 peak, and that is what :func:`strike_from_delta` returns. A delta above the
 peak has no strike at all and is refused rather than approximated.
+
+**For a put it is monotone**, and this is worth stating because the code
+once searched for a peak on that side too. The premium-adjusted put delta
+is ``-e^{-r_f T}(K/F)N(-d2)``, whose derivative in ``K`` is negative
+everywhere, so ``|delta|`` increases without bound: there is no peak, no
+second branch and no unattainable delta. The search there converged on the
+edge of its own bracket and would have reported a "largest attainable
+delta" of twenty — a number with no meaning, from a refusal that could
+never fire. The two kinds are now handled separately.
 """
 
 from __future__ import annotations
@@ -200,13 +209,18 @@ def _premium_adjusted_strike(
     kind: OptionKind,
     basis: DeltaBasis,
 ) -> float:
-    """Numerical: ``K`` appears on both sides, and the map is not monotone.
+    """Numerical: ``K`` appears on both sides, and for a call it is not monotone.
 
-    The premium-adjusted delta of a call rises from zero as the strike
-    leaves zero, peaks, and falls back to zero. Two strikes give most
-    deltas. The market means the out-of-the-money one, past the peak, where
-    the delta is decreasing — so the peak is located first and the bisection
-    runs on that side only.
+    A call's premium-adjusted delta rises from zero, peaks, and falls back,
+    so most deltas have two strikes; the market means the out-of-the-money
+    one, past the peak, so the peak is located first and the bisection runs
+    on that side only.
+
+    A put's is strictly increasing in the strike and unbounded, so it has
+    one root and needs no peak. Searching for one there found the edge of
+    its own bracket and made the attainability refusal unreachable and its
+    message nonsense, which is why the two kinds are separated here rather
+    than sharing a code path that is only correct for one of them.
     """
     convention = DeltaConvention(basis, PremiumAdjustment.PREMIUM_ADJUSTED)
 
@@ -216,6 +230,19 @@ def _premium_adjusted_strike(
         )
 
     outright = forward(spot, expiry, r_domestic, r_foreign)
+
+    if kind is OptionKind.PUT:
+        low, high = 1e-12, outright * math.exp(6.0 * volatility * math.sqrt(expiry) + 2.0)
+        while at(high) < magnitude:
+            high *= 2.0
+        for _ in range(300):
+            mid = 0.5 * (low + high)
+            if at(mid) < magnitude:
+                low = mid
+            else:
+                high = mid
+        return 0.5 * (low + high)
+
     # Locate the peak by golden-section search over a wide bracket in log
     # strike. Wide because a high-volatility, long-dated smile moves it a
     # long way from the forward.
@@ -244,26 +271,16 @@ def _premium_adjusted_strike(
             "peak names no strike at all rather than an extreme one."
         )
 
-    # Bisect on the decreasing branch: strikes above the peak for a call,
-    # below it for a put.
-    if kind is OptionKind.CALL:
-        low, high = math.exp(peak_log), math.exp(peak_log) + 20.0 * outright
-        while at(high) > magnitude:
-            high *= 2.0
-        for _ in range(300):
-            mid = 0.5 * (low + high)
-            if at(mid) > magnitude:
-                low = mid
-            else:
-                high = mid
-        return 0.5 * (low + high)
-    low, high = 1e-12, math.exp(peak_log)
+    # Bisect on the decreasing branch, which for a call is above the peak.
+    low, high = math.exp(peak_log), math.exp(peak_log) + 20.0 * outright
+    while at(high) > magnitude:
+        high *= 2.0
     for _ in range(300):
         mid = 0.5 * (low + high)
         if at(mid) > magnitude:
-            high = mid
-        else:
             low = mid
+        else:
+            high = mid
     return 0.5 * (low + high)
 
 

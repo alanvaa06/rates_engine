@@ -261,23 +261,34 @@ def zero_cost_collar_strike(
     protective_kind: OptionKind,
     *,
     tolerance: float = 1e-12,
+    net_premium_to_fund: float | None = None,
 ) -> float:
-    """The strike at which the sold wing exactly pays for the bought one.
+    """The strike at which the sold wing exactly pays for what is bought.
 
     Args:
         quote: The market.
         protective_strike: Strike of the option being bought.
         protective_kind: Which kind that is.
         tolerance: Bisection tolerance on the strike.
+        net_premium_to_fund: What the sold wing has to raise. ``None`` means
+            the protective option's own premium, which is the collar. A
+            seagull passes the *net* cost of its two same-kind legs — the
+            bought protection less the far leg it already sold — because
+            funding the bought leg alone would sell a wing twice over and
+            hand the treasurer a credit for hedging.
 
     Returns:
         The strike of the opposite-kind option to sell.
 
     Raises:
-        ImplausibleInputError: No strike pays for it, which happens when the
-            protection bought is worth more than the entire opposite wing.
+        ImplausibleInputError: No strike raises it, which happens when what
+            is being funded is worth more than the entire opposite wing.
     """
-    target = quote.price(protective_strike, protective_kind)
+    target = (
+        quote.price(protective_strike, protective_kind)
+        if net_premium_to_fund is None
+        else net_premium_to_fund
+    )
     sold_kind = protective_kind.opposite
     # A sold put pays more the higher its strike; a sold call pays more the
     # lower its strike. Bracket accordingly and bisect.
@@ -638,8 +649,15 @@ def compare_structures(
             ),
         )
     )
+    # The seagull's sold wing funds what the spread actually costs — the
+    # bought protection less the far leg already sold — not the bought leg
+    # on its own. Sizing it to the bought leg alone sells the same premium
+    # twice and produces a net credit: a table saying a treasurer is paid to
+    # hedge, which is a pricing error rather than a bargain.
     spread_cost = rows[-1].upfront_cost
-    seagull_sold = zero_cost_collar_strike(quote, otm_strike, protective)
+    seagull_sold = zero_cost_collar_strike(
+        quote, otm_strike, protective, net_premium_to_fund=spread_cost
+    )
     rows.append(
         _structure(
             "seagull",
@@ -653,7 +671,6 @@ def compare_structures(
             ),
         )
     )
-    del spread_cost
 
     decomposition: dict[str, float] | None = None
     if correlation is not None and foreign_asset_volatility is not None:

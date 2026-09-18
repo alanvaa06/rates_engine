@@ -35,10 +35,11 @@ from enum import StrEnum
 from typing import Any
 
 from rates_engine.conventions.calendar import BMV, BusinessDayConvention
-from rates_engine.conventions.daycount import DayCount
+from rates_engine.conventions.daycount import DayCount, year_fraction
 from rates_engine.curves.bootstrap import (
     DEFAULT_TOLERANCE_BP,
     CalibrationInstrument,
+    ParSwapNode,
     bootstrap_discount_curve,
 )
 from rates_engine.curves.discount import DiscountCurve
@@ -55,6 +56,7 @@ __all__ = [
     "MXNCurveResult",
     "BenchmarkComparison",
     "tiie_schedule",
+    "tiie_par_swap_node",
     "bootstrap_mxn_curve",
     "compare_benchmarks",
 ]
@@ -148,6 +150,51 @@ def tiie_schedule(start: date, periods: int, *, roll: bool = True) -> tuple[date
     return tuple(out)
 
 
+def tiie_par_swap_node(
+    as_of: date,
+    periods: int,
+    quoted_rate: float,
+    *,
+    label: str = "tiie_par",
+    roll: bool = True,
+) -> ParSwapNode:
+    """A par TIIE swap node with this module's assumed conventions applied.
+
+    This is where :data:`TIIE_PERIOD_DAYS` and :data:`TIIE_DAY_COUNT` are
+    actually *used*. Without it they were two constants that the payload
+    advertised and no calculation ever touched — a field that reads as a
+    statement about the accrual while describing nothing, which is the one
+    thing this package is not allowed to do.
+
+    A caller who builds a :class:`~rates_engine.curves.bootstrap.ParSwapNode`
+    by hand supplies their own year fractions and is not bound by either
+    constant; :meth:`MXNCurveResult.payload_fields` says so rather than
+    claiming the conventions applied to whatever it was given.
+
+    Args:
+        as_of: Start of the first accrual period.
+        periods: Number of coupon periods, positive.
+        quoted_rate: The par rate as a decimal.
+        label: Name for the evidence record.
+        roll: Adjust period ends onto BMV business days.
+
+    Returns:
+        The node, with accruals on :data:`TIIE_DAY_COUNT`.
+    """
+    payments = tiie_schedule(as_of, periods, roll=roll)
+    starts = (as_of, *payments[:-1])
+    return ParSwapNode(
+        start=as_of,
+        payment_dates=payments,
+        year_fractions=tuple(
+            year_fraction(start, end, TIIE_DAY_COUNT)
+            for start, end in zip(starts, payments, strict=True)
+        ),
+        quoted_rate=quoted_rate,
+        label=label,
+    )
+
+
 def _degradations() -> tuple[Degradation, ...]:
     return tuple(
         Degradation(
@@ -189,6 +236,11 @@ class MXNCurveResult(EngineResult):
             "unresolved_conventions": list(self.unresolved_conventions),
             "tiie_period_days": TIIE_PERIOD_DAYS,
             "tiie_day_count": TIIE_DAY_COUNT.value,
+            "conventions_apply_to": (
+                "instruments built by tiie_par_swap_node and tiie_schedule. A "
+                "ParSwapNode supplied directly carries its own year fractions, "
+                "which this module neither sets nor inspects."
+            ),
         }
 
 
@@ -257,6 +309,11 @@ def bootstrap_mxn_curve(
             "unresolved_conventions": list(unresolved),
             "tiie_period_days": TIIE_PERIOD_DAYS,
             "tiie_day_count": TIIE_DAY_COUNT.value,
+            "conventions_apply_to": (
+                "instruments built by tiie_par_swap_node and tiie_schedule. A "
+                "ParSwapNode supplied directly carries its own year fractions, "
+                "which this module neither sets nor inspects."
+            ),
             "calendar": BMV.name,
             "note": (
                 "Every convention named in unresolved_conventions is assumed, not "

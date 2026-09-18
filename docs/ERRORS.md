@@ -5,14 +5,14 @@ helps if the refusal is legible, so this is the contract: every exception the
 library raises on purpose, what causes it, whether it is recoverable, and what
 to catch.
 
-There are twenty-nine exception classes plus the base. You almost never want to
+There are thirty-one exception classes plus the base. You almost never want to
 catch all of them, because they mean two different things — and the exit code
 says which.
 
 | It means | Recoverable | Do this | Exit code | Examples |
 | --- | --- | --- | --- | --- |
 | **Your inputs cannot support the calculation** | Yes, by changing the input | Supply the missing data, name a convention that exists, or declare the proxy you meant to use. Retrying unchanged is pointless. | `1` | `MissingFixingError`, `UnsupportedConventionError`, `InsufficientDataError`, `ProxySourceNotDeclaredError`, `ImplausibleInputError`, `MissingDependencyError`, `IncompatibleDependencyError`, `ConfigurationError`, `DeltaConventionError` |
-| **The calculation is impossible or undefined on inputs that are fine** | No | Ask a different question, or relax the thing the message names. | `2` | `CurveArbitrageError`, `BootstrapResidualError`, `UnderdeterminedCurveError`, `NoTenorQuoteSourceError`, `IncompleteStripError`, `UnresolvedConventionError`, `UndefinedDurationError`, `KeyTenorOutOfRangeError`, `CurrencyMismatchError`, `ShiftRequiredError`, `ExpansionBreakdownError`, `MissingForwardError`, `SliceNotQuotedError`, `CalibrationError` |
+| **The calculation is impossible or undefined on inputs that are fine** | No | Ask a different question, or relax the thing the message names. | `2` | `CurveArbitrageError`, `CurveMismatchError`, `BootstrapResidualError`, `UnderdeterminedCurveError`, `NoTenorQuoteSourceError`, `IncompleteStripError`, `UnresolvedConventionError`, `UndefinedDurationError`, `KeyTenorOutOfRangeError`, `CurrencyMismatchError`, `ShiftRequiredError`, `ExpansionBreakdownError`, `MissingForwardError`, `SliceNotQuotedError`, `CalibrationError` |
 
 Everything derives from `RatesEngineError`, so one `except` catches the lot:
 
@@ -195,6 +195,20 @@ Two things this deliberately does **not** raise on:
   one basis point forward through zero. Use `curve.require_monotone()` when
   you mean to assert it, or read `curve.rising_segments`.
 - A bumped curve. See above.
+
+### `CurveMismatchError`
+
+**Exit code 2. Not recoverable by changing one input.**
+
+Two curves were combined that do not describe the same market state —
+today, two different valuation dates. Each curve discounts from its own
+`as_of`, so combining curves struck on different days gives a number that
+is part forward and part stale. On USD/MXN, six months of drift is around
+four thousand pips, and the evidence would report one year fraction for
+both legs. Roll one curve to the other's date first.
+
+Exit code 2 for the same reason as `CurrencyMismatchError`: each curve is
+fine on its own, and it is the combination that has no meaning.
 
 ### `BootstrapResidualError`
 

@@ -173,11 +173,30 @@ class TestThePremiumOrdering:
                 if s.name != "protective_option_atm"
             )
 
-    def test_the_seagull_is_the_cheapest_and_can_be_a_credit(self, payable, receivable):
+    def test_the_seagull_is_zero_cost_by_construction(self, payable, receivable):
+        """Its sold wing funds the spread's *net* cost — the bought
+        protection less the far leg already sold. Funding the bought leg
+        alone sells the same premium twice and reports a credit: a table
+        saying a treasurer is paid to hedge, which was a pricing error
+        rather than a bargain."""
         for comparison in (payable, receivable):
-            seagull = comparison.by_name("seagull")
-            assert seagull.upfront_cost < 0.0
-            assert seagull.upfront_cost == min(s.upfront_cost for s in comparison.structures)
+            assert comparison.by_name("seagull").upfront_cost == pytest.approx(
+                0.0, abs=1e-6
+            )
+
+    def test_the_seagull_buys_a_better_best_case_by_selling_its_tail(self, payable):
+        """Both are zero cost, and the difference between them is the whole
+        point of the structure. The seagull has already sold its far call,
+        so it has less left to fund and its sold put sits further out of the
+        money — a lower strike, a better best case. It pays for that by
+        capping its own protection: above the sold call the exposure
+        re-opens, so its worst case is *worse* than the collar's. Better
+        best, worse worst, same zero premium."""
+        seagull = payable.by_name("seagull")
+        collar = payable.by_name("collar_zero_cost")
+        assert seagull.legs[-1][1] < collar.legs[-1][1]
+        assert seagull.best_case_rate < collar.best_case_rate
+        assert seagull.worst_case_rate > collar.worst_case_rate
 
     def test_ordering_by_cost_sorts_rather_than_ranks(self, payable):
         ordered = payable.ordered_by_cost()

@@ -122,17 +122,47 @@ class TestTheBasisIsKeptSeparate:
             result.cip_points + result.basis_points_contribution, rel=1e-12
         )
 
-    def test_a_negative_basis_raises_the_forward(self, usd, mxn, delivery):
-        """The basis is a spread on the base currency leg: paying to borrow
-        dollars against pesos makes dollars dearer forward."""
+    def test_a_negative_basis_lowers_the_forward(self, usd, mxn, delivery):
+        """The spread sits on the quote (non-USD) leg, so the effective
+        domestic rate is `r_d + b` and the outright carries `exp(+bT)`. A
+        negative basis — the persistent sign against the dollar — is the
+        premium charged to obtain dollars, paid by accepting less on the
+        peso leg, and it lowers the outright.
+
+        This test asserted the opposite until the review caught that the
+        module's prose described the quote-leg convention while its formula
+        applied the spread to the base leg. 976 pips apart at one year on a
+        25 bp basis, with each documenting the other as wrong."""
         without = forward_from_curves(USDMXN, SPOT, delivery, mxn, usd)
         with_basis = forward_from_curves(USDMXN, SPOT, delivery, mxn, usd, basis_bp=-25.0)
-        assert with_basis.outright > without.outright
+        assert with_basis.outright < without.outright
+
+    def test_it_agrees_with_bumping_the_quote_curve(self, usd, delivery):
+        """The definition, independently: a basis on the quote leg is a
+        parallel shift of the quote curve. The two must give the same
+        forward, which is what pins the sign rather than a docstring."""
+        bumped = _curve(R_MXN - 25e-4, Currency.MXN)
+        plain = _curve(R_MXN, Currency.MXN)
+        via_basis = forward_from_curves(
+            USDMXN, SPOT, delivery, plain, usd, basis_bp=-25.0
+        ).outright
+        via_curve = forward_from_curves(USDMXN, SPOT, delivery, bumped, usd).cip_forward
+        assert via_basis == pytest.approx(via_curve, rel=1e-9)
 
     def test_the_sign_reverses(self, usd, mxn, delivery):
         positive = forward_from_curves(USDMXN, SPOT, delivery, mxn, usd, basis_bp=25.0)
         negative = forward_from_curves(USDMXN, SPOT, delivery, mxn, usd, basis_bp=-25.0)
-        assert positive.outright < negative.outright
+        assert positive.outright > negative.outright
+
+    def test_the_leg_is_named_in_the_payload(self, usd, mxn, delivery):
+        """A sign nobody can check is a sign nobody should trust, so the
+        leg the spread sits on travels with the number."""
+        from rates_engine.fx.forward import BASIS_LEG
+
+        payload = forward_from_curves(
+            USDMXN, SPOT, delivery, mxn, usd, basis_bp=-25.0
+        ).payload_fields()
+        assert payload["basis_leg"] == BASIS_LEG == "quote"
 
     def test_the_basis_effect_grows_with_tenor(self, usd, mxn):
         def contribution(years):
@@ -181,10 +211,10 @@ class TestInvertingAQuotedForward:
         back = implied_basis(USDMXN, SPOT, 19.60, delivery, mxn, usd)
         assert "hide the same number inside the curve" in back.evidence.fields["note"]
 
-    def test_a_forward_below_parity_implies_a_positive_basis(self, usd, mxn, delivery):
+    def test_a_forward_below_parity_implies_a_negative_basis(self, usd, mxn, delivery):
         parity = forward_from_curves(USDMXN, SPOT, delivery, mxn, usd).cip_forward
         back = implied_basis(USDMXN, SPOT, parity * 0.99, delivery, mxn, usd)
-        assert back.basis_bp > 0.0
+        assert back.basis_bp < 0.0
 
 
 class TestPlausibility:
@@ -221,6 +251,43 @@ class TestPlausibility:
     def test_a_non_finite_basis_refuses(self, usd, mxn, delivery):
         with pytest.raises(ImplausibleInputError):
             forward_from_curves(USDMXN, SPOT, delivery, mxn, usd, basis_bp=float("nan"))
+
+
+class TestTheCurvesMustDescribeTheSameMarket:
+    """Two valuation dates make a forward that is part forward, part stale."""
+
+    def test_curves_as_of_different_dates_refuse(self, usd, delivery):
+        from rates_engine.errors import CurveMismatchError
+
+        stale = DiscountCurve(
+            AS_OF - timedelta(days=178),
+            tuple(AS_OF - timedelta(days=178) + timedelta(days=365 * k) for k in (1, 2)),
+            tuple(math.exp(-R_MXN * k) for k in (1, 2)),
+            currency=Currency.MXN,
+        )
+        with pytest.raises(CurveMismatchError) as excinfo:
+            forward_from_curves(USDMXN, SPOT, delivery, stale, usd)
+        assert "part forward and part stale" in str(excinfo.value)
+
+    def test_the_inverse_checks_it_too(self, usd, delivery):
+        from rates_engine.errors import CurveMismatchError
+
+        stale = DiscountCurve(
+            AS_OF - timedelta(days=178),
+            tuple(AS_OF - timedelta(days=178) + timedelta(days=365 * k) for k in (1, 2)),
+            tuple(math.exp(-R_MXN * k) for k in (1, 2)),
+            currency=Currency.MXN,
+        )
+        with pytest.raises(CurveMismatchError):
+            implied_basis(USDMXN, SPOT, 19.5, delivery, stale, usd)
+
+    def test_the_gap_it_prevents_is_thousands_of_pips(self, usd, mxn, delivery):
+        """Six months of drift on this pair, reported with one year fraction
+        for both legs — which is why it is a refusal and not a warning."""
+        honest = forward_from_curves(USDMXN, SPOT, delivery, mxn, usd).cip_forward
+        stale_df = math.exp(-R_USD * ((delivery - (AS_OF - timedelta(days=178))).days / 365.0))
+        misread = SPOT * stale_df / mxn.df(delivery)
+        assert abs(USDMXN.pips(misread - honest)) > 2000
 
 
 class TestTheCurvesMustBeTheRightWayRound:

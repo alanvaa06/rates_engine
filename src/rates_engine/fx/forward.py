@@ -17,10 +17,30 @@ the outright; a caller who wants to know how much of a hedge's cost is
 arbitrage-free carry and how much is funding can read it off rather than
 recompute it.
 
-**Direction.** The basis is applied to the foreign — base currency — leg,
-which is the market convention: a negative USD/MXN basis means paying a
-spread to borrow dollars against pesos. The sign is asserted in the tests
-rather than left to the reader.
+**Which leg, and therefore which sign.** A cross-currency basis is quoted
+as a spread on the **non-USD** leg, which for USD/MXN is the quote
+currency, MXN. So the effective domestic rate is ``r_d + b`` and
+
+``outright = cip_forward * exp(+b T)``
+
+A negative basis — the persistent sign for most currencies against the
+dollar — therefore *lowers* the outright: it is the premium the market
+charges to obtain dollars, paid by accepting less on the peso leg.
+
+This is worth stating at length because it is a sign, and a sign here is
+the difference between a hedge and its opposite. An earlier version of this
+module applied the spread to the base leg, ``exp(-b T)``, while its
+docstring described the quote-leg convention — 976 pips apart at one year
+on a 25 bp basis, with the prose and the formula each documenting the other
+as wrong. The leg is now named in the code, in the evidence and in the
+tests, and :data:`BASIS_LEG` exists so that a reader does not have to infer
+it from an exponent.
+
+The convention itself is **not verified from a primary source**: BIS, ISDA
+and Banxico are all unreachable from this build environment, which is the
+same gap `docs/forge/research/003-mxn-conventions.md` records for TIIE. It
+is the standard one, stated explicitly so that a caller who knows better
+can negate their input rather than discover the disagreement in a P&L.
 """
 
 from __future__ import annotations
@@ -31,18 +51,31 @@ from datetime import date
 from typing import Any
 
 from rates_engine.curves.discount import DiscountCurve
-from rates_engine.errors import CurrencyMismatchError, ImplausibleInputError
+from rates_engine.errors import (
+    CurrencyMismatchError,
+    CurveMismatchError,
+    ImplausibleInputError,
+)
 from rates_engine.evidence import Evidence
 from rates_engine.fx.quote import CurrencyPair
 from rates_engine.results import EngineResult
 
 __all__ = [
+    "BASIS_LEG",
     "FXForwardResult",
     "forward_from_curves",
     "implied_basis",
     "MAX_PLAUSIBLE_BASIS_BP",
     "CIP_BROKEN_NOTE",
 ]
+
+BASIS_LEG = "quote"
+"""Which leg the cross-currency basis is a spread on.
+
+``"quote"`` — the non-USD leg, MXN for USD/MXN — which is the market
+convention. Named rather than implied, because the alternative reading
+flips the sign of every basis-adjusted forward.
+"""
 
 MAX_PLAUSIBLE_BASIS_BP = 500.0
 """Beyond this, in basis points, the input is refused rather than used.
@@ -99,6 +132,7 @@ class FXForwardResult(EngineResult):
             "forward_points": self.forward_points,
             "cip_points": self.cip_points,
             "basis_points_contribution": self.basis_points_contribution,
+            "basis_leg": BASIS_LEG,
             "spot": self.spot,
             "delivery": self.delivery.isoformat(),
             **self.pair.to_dict(),
@@ -117,6 +151,18 @@ def _check(pair: CurrencyPair, domestic: DiscountCurve, foreign: DiscountCurve) 
         raise CurrencyMismatchError(
             f"{pair.name} is quoted in {pair.quote.value}, so the domestic curve must be "
             f"in {pair.quote.value}; got {domestic.currency.value}."
+        )
+    if domestic.as_of != foreign.as_of:
+        # Each curve discounts from its own valuation date, so two curves
+        # struck on different days combine into a forward that is part
+        # forward and part stale — six months apart is four thousand pips
+        # on this pair, with the evidence reporting one year fraction for
+        # both. This is the same class of error the currency check catches.
+        raise CurveMismatchError(
+            f"the {pair.quote.value} curve is as of {domestic.as_of} and the "
+            f"{pair.base.value} curve as of {foreign.as_of}. A forward built from two "
+            "valuation dates is part forward and part stale; roll one curve to the "
+            "other's date first."
         )
 
 
@@ -149,9 +195,11 @@ def forward_from_curves(
         delivery: Delivery date, after both curves' valuation date.
         domestic: Discount curve of the quote currency.
         foreign: Discount curve of the base currency.
-        basis_bp: Cross-currency basis in basis points, applied to the base
-            currency leg. Zero means the parity forward, and the result says
-            so rather than implying parity holds.
+        basis_bp: Cross-currency basis in basis points, a spread on the
+            quote currency leg (see :data:`BASIS_LEG`). Negative — the usual
+            sign against the dollar — lowers the outright. Zero means the
+            parity forward, and the result says so rather than implying
+            parity holds.
         source_evidence: Evidence of the curves, chained in.
 
     Returns:
@@ -177,10 +225,11 @@ def forward_from_curves(
     foreign_df = foreign.df(delivery)
     parity = spot * foreign_df / domestic_df
 
-    # The basis is a spread on the base currency leg: a continuously
-    # compounded adjustment over the same year fraction the curves use.
+    # A spread on the quote (non-USD) leg: the effective domestic rate is
+    # r_d + b, so the forward carries exp(+b T) over the same year fraction
+    # the curves use. See BASIS_LEG.
     years = domestic.time(delivery)
-    outright = parity * math.exp(-basis_bp * 1e-4 * years)
+    outright = parity * math.exp(basis_bp * 1e-4 * years)
 
     evidence = Evidence(
         produced_by="fx.forward_from_curves",
@@ -195,6 +244,7 @@ def forward_from_curves(
             "year_fraction": years,
             "cip_forward": parity,
             "basis_bp": basis_bp,
+            "basis_leg": BASIS_LEG,
             "basis_component": outright - parity,
             "outright": outright,
             "cip_note": CIP_BROKEN_NOTE,
@@ -265,7 +315,7 @@ def implied_basis(
 
     parity = spot * foreign.df(delivery) / domestic.df(delivery)
     years = domestic.time(delivery)
-    basis_bp = -math.log(market_forward / parity) / years * 1e4
+    basis_bp = math.log(market_forward / parity) / years * 1e4
     _plausible(basis_bp)
 
     evidence = Evidence(
@@ -277,6 +327,7 @@ def implied_basis(
             "delivery": delivery.isoformat(),
             "cip_forward": parity,
             "implied_basis_bp": basis_bp,
+            "basis_leg": BASIS_LEG,
             "year_fraction": years,
             "domestic_currency": domestic.currency.value,
             "foreign_currency": foreign.currency.value,

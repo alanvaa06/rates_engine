@@ -91,8 +91,10 @@ class SmileQuotes:
     Attributes:
         atm: At-the-money volatility as a decimal.
         risk_reversal_25: ``sigma(25 call) - sigma(25 put)``, as a decimal.
-            Negative when the market pays up for downside on the base
-            currency, which is the usual sign for USD/MXN.
+            **Positive for USD/MXN**, where the tail risk is peso weakness
+            and the market pays up for dollar calls. Negative would mean it
+            pays up for base-currency downside, which is the usual sign for
+            a pair whose base is the risk currency — not this one.
         butterfly_25: ``(sigma(25 call) + sigma(25 put)) / 2 - sigma(atm)``.
         risk_reversal_10: The ten-delta risk reversal, or ``None``.
         butterfly_10: The ten-delta butterfly, or ``None``.

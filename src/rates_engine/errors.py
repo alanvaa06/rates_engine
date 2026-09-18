@@ -40,6 +40,7 @@ __all__ = [
     "UnresolvedConventionError",
     "CurveError",
     "CurveArbitrageError",
+    "CurveMismatchError",
     "BootstrapResidualError",
     "UnderdeterminedCurveError",
     "NoTenorQuoteSourceError",
@@ -222,6 +223,23 @@ class CurveArbitrageError(CurveError):
     zero-coupon yield over that segment in a currency that does not have one,
     which means the inputs disagree rather than that the curve is interesting.
     """
+
+
+class CurveMismatchError(CurveError):
+    """Two curves were combined that do not describe the same market state.
+
+    Today that means two valuation dates. Each curve discounts from its own
+    ``as_of``, so combining curves struck on different days produces a
+    number that is part forward and part stale — on USD/MXN, six months of
+    drift is around four thousand pips, with the evidence reporting one
+    year fraction for both legs.
+
+    Exit code 2, like :class:`CurrencyMismatchError` and for the same
+    reason: each curve is fine on its own and it is the combination that
+    has no meaning.
+    """
+
+    exit_code = 2
 
 
 class BootstrapResidualError(CurveError):

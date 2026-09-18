@@ -154,7 +154,7 @@ tenor: filling a strike inside a quoted smile is a model fitted to data,
 filling a missing slice is a model fitted to a different slice. An asymptotic
 expansion never returns a negative volatility.
 
-Twenty-nine named exceptions, each with an exit code and an entry in
+Thirty-one named exceptions, each with an exit code and an entry in
 [`docs/ERRORS.md`](docs/ERRORS.md) saying whether it is recoverable and what
 to do about it.
 
