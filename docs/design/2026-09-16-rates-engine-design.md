@@ -41,7 +41,7 @@ Lo que no se puede calcular honestamente **se rehúsa** (raise), nunca se rellen
 
 | Fase | Módulos | Definition of Done |
 |---|---|---|
-| **1 (este doc)** | `conventions`, `market`, `instruments` (OIS, IRS, SR1, SR3, FRA), `curves`, `convexity`, `pricing`, `hedging`, `diagnostics`, `reporting`, `cli` | Reproduce el whitepaper CME 2025 dentro de tolerancia (§5); settlement SR1/SR3 vs CME < 0.1 bp; bootstrap dual-curva secuencial vs simultáneo con diferencia reportada en bp; `rateng bootstrap/price/hedge --json` |
+| **1 (este doc)** | `conventions`, `market`, `instruments` (OIS, IRS, SR1, SR3, FRA), `curves`, `convexity`, `pricing`, `risk`, `hedging`, `diagnostics`, `reporting`, `cli` | Reproduce el whitepaper CME 2025 dentro de tolerancia (§5); settlement SR1/SR3 vs CME < 0.1 bp; bootstrap dual-curva secuencial vs simultáneo con diferencia reportada en bp; `rateng bootstrap/price/hedge --json` |
 | 2 | `swaptions` (Black lognormal y Bachelier normal en bps; SABR después) | Cubo expiry×tenor×strike con vol normal; paridad payer/receiver; test contra [[Term Structure Models for Swaps and Swaptions]] |
 | 3 | `fx` (CIP + basis cross-currency, Garman-Kohlhagen, estructuras CFA L3 Reading 19) | Requiere curva MXN (TIIE) — gap del vault, research previo obligatorio |
 | Opcional | `mcp_server` | Mismos payloads que `--json`; extra `[mcp]`, Python ≥ 3.10 |
@@ -73,14 +73,14 @@ Dataclasses inmutables con `cashflows(curve_set) -> list[Cashflow]`:
 - `SOFRFuture1M(contract_month)`: settlement = 100 − media aritmética del mes calendario (eq. 14 del wiki).
 - `SOFRFuture3M(imm_start, imm_end)`: settlement = 100 − compuesto ACT/360 entre terceros miércoles (eq. 18).
 - `FRA(start, end, rate)`: valuada en multi-curva; **la tasa FRA no es el forward simple de la curva de descuento** (Bianchetti / Mercurio en [[Multi-Curve Framework and Collateral Discounting]]).
-- DV01 por contrato: SR3 = USD 25/bp (confirmado); SR1 = USD 41.67/bp **[asumo — spec CME no leída, marcado en el wiki]**.
+- DV01 por contrato, **derivado del nocional y el plazo, no de una tabla**: SR3 = 1,000,000 × 0.25 × 0.0001 = USD 25.00/bp; SR1 = 5,000,000 × (30/360) × 0.0001 = USD 41.67/bp. Lo **[asumo]** es el nocional SR1 = USD 5,000,000 (spec CME no leída); la evidencia lo marca `notional_source="assumed"` hasta confirmarlo (PRD-001 AC-8.5).
 
 ### 3.4 `curves`
 - `DiscountCurve(nodes, dfs, interpolation)`; interpolaciones: `log_linear_df` (default), `monotone_convex` (v2). Exponer `df(t)`, `forward(t1, t2, day_count)`, `zero(t)`.
 - **Cuatro vistas y conversiones (añadido 2026-09-16 a petición de Alan):** `zero_curve(compounding, day_count)`, `par_curve(tenors, frequency, day_count)`, `forward_curve(tenor)`; relaciones de no-arbitraje del temario ([[CFA Fixed Income — Valuation]], [[CFA L2 Fixed Income — Term Structure and Arbitrage-Free Valuation]]) como tests de roundtrip par→cero→par. Ninguna tasa se exporta sin su convención de composición.
 - **Descuento a la tasa de fondeo/colateral:** los futuros y swaps colateralizados se descuentan en la curva OIS-SOFR porque el colateral se remunera a SOFR (Fujii-Shimada-Takahashi, Piterbarg en [[Multi-Curve Framework and Collateral Discounting]]); la evidencia lo declara. Instrumentos de bootstrap: stub de SOFR realizado → futuros SR1/SR3 ajustados por convexidad → swaps OIS par (PRD-001 US-3, US-5).
 - `bootstrap_ois(snapshot, instruments) -> BootstrapResult` — secuencial, un nodo por instrumento.
-- `solve_dual_curve(ois_instruments, tenor_instruments, basis_instruments, mode="simultaneous"|"sequential") -> DualCurveResult` — `scipy.optimize.least_squares` sobre todos los nodos; residuales por instrumento; `basis_adjustment_bp` (Bianchetti eq. 20) y `sequential_vs_simultaneous_bp` por tenor.
+- `solve_dual_curve(...)` **con inputs sintéticos en fase 1** (decisión C1: no hay fuente gratuita de par Term SOFR ni de basis swaps; se valida el solver, no el mercado — PRD-001 US-7). Firma: `solve_dual_curve(ois_instruments, tenor_instruments, basis_instruments, mode="simultaneous"|"sequential") -> DualCurveResult` — `scipy.optimize.least_squares` sobre todos los nodos; residuales por instrumento; `basis_adjustment_bp` (Bianchetti eq. 20) y `sequential_vs_simultaneous_bp` por tenor.
 - Evidencia obligatoria: residuos, condición del jacobiano, nodos, instrumentos descartados.
 
 ### 3.5 `convexity`
@@ -91,7 +91,16 @@ Dataclasses inmutables con `cashflows(curve_set) -> list[Cashflow]`:
 
 ### 3.6 `pricing`
 - `pv(instrument, curve_set)`, `par_rate(swap, curve_set)`, `annuity(swap, curve_set)`.
-- `dv01(instrument, curve_set, bump_bp=1, mode="parallel"|"key_rate")` por bump-and-reprice; devuelve también qué nodos movió.
+- `dv01(instrument, curve_set, bump_bp=1)`: shift **paralelo** por bump-and-reprice. Las medidas de riesgo de segundo nivel viven en `risk` (§3.6bis), no aquí.
+
+### 3.6bis `risk` (añadido 2026-09-16, decisiones E y F)
+Un módulo aparte porque la atribución de riesgo tiene sus propias trampas de convención.
+
+- `key_rate_dv01(instrument, curve_set, key_tenors)`: bumps **tent** sobre nodos de la curva cero, construidos como partición de la unidad para que la suma de shocks sea exactamente un paralelo de 1 bp (por eso la suma de KR DV01 iguala el DV01 paralelo). Evidencia: `bump_basis="zero_curve_node"`, `bump_shape="tent"`, nodos tocados, interpolación, y la advertencia de que **el perfil key rate depende de la colocación de nodos** — dos curvas que precian idéntico dan perfiles distintos.
+- Dos bases, nombradas distinto y reconciliadas: `key_rate_dv01` (por nodo de curva, riesgo de curva) vs `bucketed_delta_by_instrument` del `HedgeResult` (por cotización de instrumento, riesgo de cobertura). Ambas suman el mismo paralelo; el payload reporta la diferencia por tramo sin declarar ganadora.
+- Convenciones de duración: `pvbp` (≡ `dv01`, con test de equivalencia), `money_duration` = DV01 × 10,000, `money_convexity` (definida aun con PV = 0), `effective_duration` y `effective_convexity` (normalizadas por PV, shift de curva, re-precio completo).
+- **Refusals:** `UndefinedDurationError` cuando |PV| ≈ 0 hace indefinida cualquier medida normalizada — el caso del swap a par, donde lo válido es DV01, `money_convexity` y el `shock_table`. `KeyTenorOutOfRangeError` en vez de extrapolar. `macaulay_duration`/`modified_duration` son stubs que lanzan `NotImplementedError` explicando que necesitan un rendimiento único y por tanto un `FixedRateBond` (v1.1); **nunca se sirve `effective_duration` bajo esos nombres**.
+- Reconciliación con §3.7: ½·`money_convexity`·Δy² debe predecir el P&L neto del `shock_table` dentro de 1% a ±10 bp y 10% a ±100 bp.
 
 ### 3.7 `hedging`
 - `strip_hedge(swap, futures_strip, curve_set) -> HedgeResult`: contratos por periodo IMM, DV01 del swap vs de la tira, ratio.
@@ -110,7 +119,7 @@ Dataclasses inmutables con `cashflows(curve_set) -> list[Cashflow]`:
 |---|---|---|
 | Fixings SOFR, promedios, índice | FRED | Diario, sin API key |
 | Settlements SR1/SR3 | CME público (retraso) / Nasdaq Data Link `CHRIS/CME_SR3` si sigue | Histórico limitado; el wiki lo flaggea |
-| Par OIS SOFR | ICE Swap Rate | Acceso a confirmar; si no, **proxy Treasury `DGS*` con warning** — el wiki advierte que el swap spread domina |
+| Par OIS SOFR (largo plazo) | **Proxy Treasury `DGS*`** (decisión B2) | ICE Swap Rate y CME Term SOFR comercial quedan fuera por licencia. El proxy es **opt-in explícito** (`long_end_source="treasury_proxy"`), marca los nodos `data_quality="proxy"` y está prohibido en golden tests — el swap spread domina |
 | Fechas FOMC | federalreserve.gov | Para experimento Heitfield-Park (§7) |
 | Calendario SIFMA | Codificado | Mantener como dato, no como código |
 
@@ -136,6 +145,8 @@ Filosofía de optengine: `test_analytical_rigor`, `test_no_silent_swallow`, `tes
 - DFs decrecientes y positivos; forwards positivos salvo que los inputs los impliquen (entonces refusal).
 - Swap creado a `par_rate` tiene `pv == 0` ± 1e-8.
 - `dv01` de receiver > 0 y de payer < 0, misma magnitud.
+- Los shocks tent suman exactamente un paralelo de 1 bp; por tanto Σ KR DV01 = DV01 paralelo.
+- Toda medida de duración normalizada se rehúsa cuando |PV| ≈ 0; la monetaria equivalente sí responde.
 - Roundtrip: bootstrap → re-precio de los instrumentos de entrada → residuo 0.
 - Idempotencia: `price()` dos veces = mismo resultado (optengine tuvo el bug de Black-Litterman no idempotente; se prueba desde el día 1).
 
@@ -152,10 +163,10 @@ Filosofía de optengine: `test_analytical_rigor`, `test_no_silent_swallow`, `tes
 
 ## 6. Repo, empaquetado, CI (espejo de optengine)
 
-- `src/` layout, `pyproject.toml` con `dependencies = [numpy, pandas>=2.2, scipy]` **solo**; extras `data` (yfinance no aplica; `pyarrow`), `mcp`, `dev` (pytest, hypothesis, ruff, mypy con allowlist que solo puede encogerse), `docs` (pdoc).
+- `src/` layout, `pyproject.toml` con `requires-python = ">=3.11"` y `dependencies = [numpy>=2.0, pandas>=2.2, scipy]` **solo**; extras `data` (yfinance no aplica; `pyarrow`), `mcp`, `dev` (pytest, hypothesis, ruff, mypy con allowlist que solo puede encogerse), `docs` (pdoc).
 - `AGENTS.md` + `llms.txt` desde el commit 1: "las cosas que muerden" (e.g., "`SOFRFuture3M` toma fechas IMM, no mes de contrato"; "DV01 es por bp, no por %").
 - `docs/ERRORS.md` (contrato de refusals), `docs/RESEARCH.md` (mapa a los artículos del wiki con las fórmulas y su estado leído/abstract), `CHANGELOG.md` Keep-a-Changelog, `docs/RELEASING.md` Trusted Publishing.
-- CI: ruff, matriz 3.9–3.12, core-install job (ninguna extra se cuela), CLI smoke, docs `--strict`.
+- CI: ruff, matriz **3.11–3.13** (decisión D1; 3.9 está EOL desde oct-2025 y ata a numpy 1.x), core-install job (ninguna extra se cuela), CLI smoke, docs `--strict`.
 - **Build con forge-master en el repo del producto, nunca en el vault** (CLAUDE.md del vault lo prohíbe).
 
 ---
@@ -177,15 +188,23 @@ Filosofía de optengine: `test_analytical_rigor`, `test_no_silent_swallow`, `tes
 | 2 | Repo | Repo nuevo **`alanvaa06/rates_engine`**; comparte convenciones con optengine, no código |
 | 3 | Interpolación default | **Log-lineal en DF**; monotone-convex como opción |
 | 4 | MCP | **Fase 2**, extra `[mcp]`; fase 1 solo `--json` |
+| 5 | Curva de entrada de los goldens CME | **Reconstruir desde los precios SR3 del whitepaper**; si no entra en tolerancia se marca `xfail` documentado, nunca se afloja la tolerancia |
+| 6 | Par OIS largo plazo | **Proxy Treasury con warning**, opt-in explícito y prohibido en goldens |
+| 7 | Dual-curva en fase 1 | **Sí, con inputs sintéticos**; proveedor real en v1.1 |
+| 8 | Baseline de Python | **≥ 3.11** |
+| 9 | Key rate | **US propia** (PRD-001 US-10): bumps tent sobre nodos de curva cero, evidencia con base/forma/dependencia de interpolación, reconciliado con el delta por instrumento del hedge |
+| 10 | Convenciones de duración | **Solo las que el bump sostiene** (pvbp, money duration/convexity, effective duration/convexity, con refusals). Macaulay/modified y `FixedRateBond` → v1.1 |
 
 ---
 
 ## 9. Riesgos y gaps conocidos
 
 - **Inputs del whitepaper CME:** el wiki reporta outputs (779, +22,292, DV01) pero la curva exacta de entrada del documento se reconstruye; por eso la tolerancia de 3%, no exactitud.
-- **OIS par gratis:** incierto. Proxy Treasury contamina con swap spread — [[Swap Spreads — Credit, Duration Demand and Limits to Arbitrage]] explica por qué hoy es negativo y variable.
+- **OIS par gratis:** resuelto por decisión, no por dato. El proxy Treasury contamina con swap spread — [[Swap Spreads — Credit, Duration Demand and Limits to Arbitrage]] explica por qué hoy es negativo y variable. **Riesgo aceptado**; contenido con opt-in, marca `data_quality="proxy"` propagada al resultado compuesto, y exclusión de los goldens.
+- **Composición de la evidencia:** `Evidence` debe ser un tipo único y componible (`evidence.sources: list[Evidence]`) desde el primer commit; encadenar bootstrap → price → hedge retrofiteando es caro (PRD-001 AC-9.7/9.8).
+- **Determinismo entre versiones:** bit-exactitud solo dentro de un mismo intérprete; entre versiones de la matriz se exige 1e-14 relativo (PRD-001 AC-3.3).
 - **Fórmula Hull-White de convexidad:** transcrita vía Skov-Skovmand, no leída en Henrard 2018.
-- **SR1 tick:** asumido.
+- **SR1 nocional:** asumido USD 5,000,000; el DV01 de 41.67/bp se deriva de ahí.
 - **Calendarios:** SIFMA codificado a mano en fase 1; riesgo de holiday mal cargado → test contra settlements reales lo detecta.
 - **MX/TIIE:** nada en el vault; fase 3 requiere research (transición TIIE 28 → TIIE de Fondeo, convenciones MXN).
 

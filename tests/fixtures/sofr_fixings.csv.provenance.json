@@ -1,0 +1,11 @@
+{
+  "file": "sofr_fixings.csv",
+  "generated_by": "tests/fixtures/generate.py",
+  "generated_at": "2026-09-16T23:27:11.809327+00:00",
+  "seed": 20260916,
+  "series_id": "SOFR",
+  "data_quality": "synthetic",
+  "units": "decimal rate, e.g. 0.0431 for 4.31%",
+  "rows": 1173,
+  "note": "Constructed, NOT the published SOFR series. This environment's egress policy blocks fred.stlouisfed.org, so no observed fixings could be frozen. Every test that reads this file asserts a property of the engine's arithmetic, never a published number."
+}

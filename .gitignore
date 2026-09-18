@@ -1,25 +1,14 @@
-# Python
 __pycache__/
 *.py[cod]
 *.egg-info/
 build/
 dist/
-.venv/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.hypothesis/
 .coverage
 htmlcov/
-
-# AI tooling (local)
-.agents/
-.claude/
-apm_modules/
-.mcp.json
-apm.lock.yaml
-
-# OS / editors
-.DS_Store
-Thumbs.db
-.vscode/
-.idea/
+.venv/
+venv/
+config.json

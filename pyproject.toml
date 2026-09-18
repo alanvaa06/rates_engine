@@ -1,0 +1,95 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "finport-ratesengine"
+version = "0.1.0"
+description = "Deterministic SOFR rates engine: curves, futures convexity, swap pricing, risk and futures-strip hedging, each result carrying the evidence it rests on."
+readme = "README.md"
+license = { file = "LICENSE" }
+# 3.11 rather than optengine's 3.9 (PRD-001 decision D1): 3.9 reached
+# end of life in October 2025 and pins the stack to numpy 1.x, which
+# costs modern typing syntax for nothing this package gains.
+requires-python = ">=3.11"
+authors = [{ name = "Alan Vazquez" }]
+keywords = ["sofr", "rates", "curve", "swap", "futures", "convexity", "dv01", "quant"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Office/Business :: Financial :: Investment",
+]
+# Three, and no more. Everything the library computes is arithmetic over
+# dates and discount factors: numpy carries the vectors, scipy supplies the
+# one root solver the bootstrap needs, and pandas is the shock table's
+# return type. A fourth entry here would have to earn a line explaining
+# what a caller gains that they cannot already reach.
+dependencies = [
+    "numpy>=2.0",
+    "pandas>=2.2",
+    "scipy>=1.11",
+]
+
+[project.urls]
+Homepage = "https://github.com/alanvaa06/rates_engine"
+Repository = "https://github.com/alanvaa06/rates_engine"
+Issues = "https://github.com/alanvaa06/rates_engine/issues"
+Changelog = "https://github.com/alanvaa06/rates_engine/blob/main/CHANGELOG.md"
+
+[project.optional-dependencies]
+# Parquet snapshots. The file provider reads and writes CSV without it;
+# only a .parquet path reaches pyarrow.
+data = ["pyarrow>=14.0"]
+# YAML configs for the CLI. JSON is the native format precisely so that
+# the core install can run every command; --config c.yaml needs this.
+config = ["pyyaml>=6.0"]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "hypothesis>=6.100",
+    "ruff>=0.5",
+    "mypy>=1.11",
+    "pandas-stubs>=2.2",
+    # Not optional for the typecheck job: stubs for PyYAML exist on PyPI, so
+    # mypy reports import-untyped and names the package rather than silently
+    # treating it as Any. Dropping this does not make the error go away, it
+    # makes the job fail.
+    "types-PyYAML>=6.0",
+]
+docs = ["pdoc>=14.0"]
+
+[project.scripts]
+rateng = "rates_engine.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+rates_engine = ["py.typed"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "W"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*.py" = ["E402"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_unused_ignores = true
+no_implicit_optional = true
+ignore_missing_imports = true
+
+# There is no ``ignore_errors`` override, and tests/test_typecheck_allowlist.py
+# holds that to a ceiling of zero. optengine carries 45 deferred modules
+# because they are inherited debt; this package is new and has no such
+# excuse. Adding an override here costs a red test, which is the point.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["error"]
