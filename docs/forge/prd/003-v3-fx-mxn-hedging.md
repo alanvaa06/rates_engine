@@ -1,6 +1,6 @@
 # PRD-003: v3 — curva MXN, FX forwards USD/MXN y pricer de coberturas
 
-> Escrito 2026-09-16. Depende de PRD-001 y PRD-002. Formato forge-master. **Estado: borrador; requiere aprobación de Alan y un research previo obligatorio (ver Constraints) porque el vault no cubre TIIE ni convenciones MXN.** Supuestos marcados **[asumo]**.
+> Escrito 2026-09-16. Depende de PRD-001 y PRD-002 (v0.2.0 merged a main 2026-09-18). Formato forge-master. **Estado: research previo ejecutado 2026-09-18 (`docs/forge/research/003-mxn-conventions.md`); preguntas abiertas cerradas; en construcción.** Supuestos marcados **[asumo]**.
 
 ## Goal
 Publicar `finport-ratesengine` v0.3: segunda moneda (MXN) con curva TIIE, FX forwards USD/MXN vía paridad cubierta más basis cross-currency, opciones FX vanilla (Garman-Kohlhagen) con smile vanna-volga desde ATM/RR/BF y convenciones de delta explícitas, y un comparador determinista de estructuras de cobertura (forward, over/under-hedge, put, put OTM, collar, put spread, seagull) para una exposición de transacción — el marco de CFA L3 Reading 19 y Derivatives. Sin agentes: el "memo" es una tabla determinista, no texto generado.
@@ -51,8 +51,55 @@ As a user, I want declarar un programa (hedge ratio objetivo, banda de discreci�
 - AC-5.1: Given un YAML con `target_hedge_ratio`, `discretion_band`, `rebalance_frequency`, `allowed_instruments`, When se carga, Then una key desconocida lanza `ConfigurationError` nombrándola (patrón optengine).
 - AC-5.2: Given una cobertura propuesta fuera de la banda, When se audita, Then el payload reporta la violación con `severity` y `suggestion`; con `strict=True` se rehúsa.
 
+## Decisiones cerradas (2026-09-18)
+
+| # | Pregunta | Elegido | Razón |
+|---|---|---|---|
+| 1 | TIIE 28 histórica además de TIIE de Fondeo | **Ambas, con marca explícita** (1a) | AC-1.3 ya exige que el payload las distinga; soportar una sola volvería ese AC vacío |
+| 2 | Vanna-volga o SABR para el smile FX | **Vanna-volga** (2a) | Reproduce los tres puntos cotizados exactamente — medido a `0.00e+00` en el prototipo del research. SABR no tiene esa propiedad por construcción: ajusta una sonrisa, no interpola pilares |
+| 3 | Moneda en el tipo, o implícita | **Explícita, aditiva, default USD** | Hallazgo del research: el motor no tiene concepto de moneda en ninguna parte. Con una segunda moneda, nada impide descontar flujos MXN en la curva USD ni sumar un PV en dólares con uno en pesos; ambas cosas devuelven un número y la cadena de evidencia no registra nada. Es la misma clase de error que las unidades de vol en v2 y tiene el mismo arreglo: el tipo lleva el hecho. Default USD mantiene funcionando toda llamada de v1 y v2, así que el cambio es aditivo y no viola la Constraint de que ninguna curva USD cambia |
+
+La decisión 3 no estaba en el PRD. Sale del research y se registra aquí
+porque cambia firmas públicas, aunque de forma compatible, y porque va
+primero: reajustarla después de cuatro user stories de código MXN es
+estrictamente más caro.
+
+## Resultado del research previo (2026-09-18)
+
+Ejecutado. `docs/forge/research/003-mxn-conventions.md` tiene el detalle;
+el resumen es que **la maquinaria de v3 es construible y las convenciones
+mexicanas no son verificables desde aquí**.
+
+Banxico, ISDA, CME, BIS y Wikipedia devuelven 403 en el proxy de egress por
+política de la organización — el mismo límite que dejó saltados los goldens
+CME de v1. Lo único sustantivo alcanzable es QuantLib en GitHub, que es
+mejor fuente de lo que suena porque su código se puede **leer**, no sólo
+citar.
+
+Lo que eso deja:
+
+- **Calendario:** QuantLib tiene las trece reglas del calendario mexicano,
+  pero su implementación se llama `BmvImpl` y se identifica como "Mexican
+  stock exchange". Es el calendario de la **BMV, no el bancario de
+  Banxico** que pide AC-1.2. Son listas distintas y no tienen por qué
+  coincidir. Se implementa con su nombre real y el diff contra Banxico
+  queda `[manual-check]`, igual que la regla del sábado de SIFMA en v1.
+- **TIIE: nada.** Cero resultados en todo QuantLib. Day count, periodo de
+  28 días, la distinción Fondeo/28 y los IDs de serie de SIE no quedan
+  establecidos por nada alcanzable.
+- **Todo lo demás de US-2, US-3, US-4 y US-5** es forma cerrada o
+  aritmética sobre inputs que da el usuario, y se construye sin convención
+  mexicana alguna. El prototipo de vanna-volga del research no necesitó
+  ninguna: **declaró** una convención de delta, que es justo lo que AC-3.3
+  y AC-3.4 exigen. El hueco está en el *default*, no en la maquinaria — así
+  que no habrá default y `DeltaConventionError` es la respuesta.
+
+AC-1.4 es la costura que el propio PRD construyó para esto, y la fase se
+arma a lo largo de ella: la evidencia arrastra `unresolved_conventions` con
+el nombre de cada convención sin verificar, y `strict=True` se rehúsa.
+
 ## Constraints
-- **Research previo obligatorio antes de plan-design:** convenciones TIIE 28 / TIIE de Fondeo (day count, periodo, fuente Banxico SIE), calendario MX, convención de delta y premium USD/MXN, fuente de ATM/RR/BF y del basis. El vault no lo cubre (gap declarado 2026-09-16); el resultado va a `raw/` y se compila antes de este PRD.
+- **Research previo obligatorio antes de plan-design:** ejecutado 2026-09-18, ver arriba. convenciones TIIE 28 / TIIE de Fondeo (day count, periodo, fuente Banxico SIE), calendario MX, convención de delta y premium USD/MXN, fuente de ATM/RR/BF y del basis. El vault no lo cubre (gap declarado 2026-09-16); el resultado va a `raw/` y se compila antes de este PRD.
 - Todo lo de PRD-001 y PRD-002 vigente; ninguna curva USD cambia.
 - Sin dependencias nuevas en core; Banxico SIE como proveedor en extra `data` (requiere token gratuito del usuario, nunca en el repo).
 - Salida de consola ASCII (Windows).
@@ -66,9 +113,13 @@ As a user, I want declarar un programa (hedge ratio objetivo, banda de discreci�
 - [ ] Tag `v0.3.0`.
 
 ## Preguntas abiertas
-1) ¿TIIE 28 histórica además de TIIE de Fondeo?
+
+Cerradas 2026-09-18; ver "Decisiones cerradas" arriba. Se conservan aquí las
+opciones tal como se plantearon.
+
+1) ¿TIIE 28 histórica además de TIIE de Fondeo? → **(a)**
    a) Ambas, con marca explícita — **Recommended**, permite backtests previos a la transición
    b) Solo TIIE de Fondeo
-2) ¿Vanna-volga o SABR para el smile FX?
+2) ¿Vanna-volga o SABR para el smile FX? → **(a)**
    a) Vanna-volga — **Recommended**, estándar FX y reproduce los 3 puntos exactamente ([[Forwards, Multi-Curve and Swaptions (Post-LIBOR)]])
    b) Reusar SABR de v2 — menos código, dinámica de smile distinta a la del mercado FX
