@@ -26,7 +26,18 @@ from rates_engine.instruments.cashflow import Cashflow
 from rates_engine.instruments.swaps import Side
 from rates_engine.results import EngineResult
 
-__all__ = ["Priceable", "Swappable", "PriceResult", "pv", "par_rate", "annuity", "dv01", "BUMP_BP"]
+__all__ = [
+    "Priceable",
+    "Swappable",
+    "PriceResult",
+    "ParametricComparison",
+    "pv",
+    "par_rate",
+    "annuity",
+    "dv01",
+    "price_on_parametric",
+    "BUMP_BP",
+]
 
 BUMP_BP = 1.0
 """Default bump size in basis points for :func:`dv01` and the risk measures."""
@@ -298,4 +309,116 @@ def dv01(
         value=value,
         measure="dv01",
         unit="USD_per_bp",
+    )
+
+
+@dataclass(frozen=True)
+class ParametricComparison(EngineResult):
+    """One instrument priced on a fitted curve and on the bootstrapped one.
+
+    PRD-002 AC-4.3. A parametric curve is a smoothing of the market, not the
+    market: it does not reprice the calibration instruments exactly, and the
+    size of that miss is the whole content of the choice. Returning the
+    parametric price alone would hide it, so this returns both and the gap.
+
+    Attributes:
+        parametric_pv: PV on the fitted curve, in USD.
+        bootstrap_pv: PV on the bootstrapped curve, in USD.
+        difference: ``parametric_pv - bootstrap_pv``, in USD. Signed, because
+            which way the smoothing pushes the price is information.
+        difference_bp_of_notional: The same gap per basis point of notional
+            where the instrument declares one, else ``None``. A USD number
+            with no scale is not comparable across trades.
+        model: The parametric model's name, taken from the fit rather than
+            passed in, so the label cannot drift from what produced the curve.
+    """
+
+    parametric_pv: float
+    bootstrap_pv: float
+    difference: float
+    difference_bp_of_notional: float | None
+    model: str
+
+    def payload_fields(self) -> dict[str, Any]:
+        """Both prices, the gap, and the curve kind that explains it."""
+        return {
+            "curve_kind": "parametric",
+            "model": self.model,
+            "parametric_pv": self.parametric_pv,
+            "bootstrap_pv": self.bootstrap_pv,
+            "difference": self.difference,
+            "difference_bp_of_notional": self.difference_bp_of_notional,
+            "unit": "USD",
+        }
+
+
+def price_on_parametric(
+    instrument: Priceable,
+    parametric: CurveSet,
+    bootstrapped: CurveSet,
+    *,
+    fit: EngineResult,
+) -> ParametricComparison:
+    """Price on a fitted curve and report the gap against the bootstrapped one.
+
+    Args:
+        instrument: Anything with :meth:`cashflows`.
+        parametric: Curves sampled from the fitted model.
+        bootstrapped: The curves the model was fitted to.
+        fit: The fit that produced ``parametric``. Its payload must declare
+            ``curve_kind="parametric"``; the model name is read from it.
+
+    Returns:
+        The :class:`ParametricComparison`.
+
+    Raises:
+        ValueError: ``fit`` does not declare itself parametric, so labelling
+            the comparison ``curve_kind="parametric"`` would be a claim about
+            a curve nothing here has seen.
+    """
+    fields = fit.payload_fields()
+    if fields.get("curve_kind") != "parametric":
+        raise ValueError(
+            f"{type(fit).__name__} declares curve_kind={fields.get('curve_kind')!r}; "
+            "price_on_parametric labels its payload parametric and takes the model "
+            "name from the fit, so it will not take a fit that is not one."
+        )
+    model = str(fields.get("model", type(fit).__name__))
+
+    parametric_pv = _pv_of(instrument.cashflows(parametric), parametric)
+    bootstrap_pv = _pv_of(instrument.cashflows(bootstrapped), bootstrapped)
+    difference = parametric_pv - bootstrap_pv
+    notional = instrument.describe().get("notional")
+    per_bp = (
+        difference / (abs(float(notional)) * 1e-4)
+        if isinstance(notional, (int, float)) and notional
+        else None
+    )
+
+    evidence = Evidence(
+        produced_by="pricing.price_on_parametric",
+        fields={
+            "instrument": instrument.describe(),
+            "curve_kind": "parametric",
+            "model": model,
+            "parametric_pv": parametric_pv,
+            "bootstrap_pv": bootstrap_pv,
+            "difference": difference,
+            "difference_bp_of_notional": per_bp,
+            **_discount_note(),
+            "note": (
+                "A parametric curve smooths the quotes rather than reproducing them, "
+                "so this difference is the cost of the smoothing, not an error in "
+                "either price."
+            ),
+        },
+        sources=(fit.evidence,),
+    )
+    return ParametricComparison(
+        evidence=evidence,
+        parametric_pv=parametric_pv,
+        bootstrap_pv=bootstrap_pv,
+        difference=difference,
+        difference_bp_of_notional=per_bp,
+        model=model,
     )

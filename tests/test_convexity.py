@@ -1,4 +1,4 @@
-"""AC-5.3 to AC-5.7: the two models, their limit, and where sigma is allowed to come from."""
+"""PRD-001 AC-5.3 to PRD-001 AC-5.7: the two models, their limit, and where sigma is allowed to come from."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from rates_engine.market.snapshot import MarketSnapshot
 
 
 class TestHoLee:
-    """AC-5.3: half sigma squared T1 T2, against the published table."""
+    """PRD-001 AC-5.3: half sigma squared T1 T2, against the published table."""
 
     def test_matches_the_published_table(self, fixtures_dir):
         with (fixtures_dir / "hull_convexity_table.csv").open(encoding="utf-8") as handle:
@@ -56,7 +56,7 @@ class TestHoLee:
 
 
 class TestHullWhite:
-    """AC-5.4: mean reversion, and the Ho-Lee limit it has to reach."""
+    """PRD-001 AC-5.4: mean reversion, and the Ho-Lee limit it has to reach."""
 
     @pytest.mark.parametrize("kappa", [1e-6, 1e-7, 1e-8])
     def test_converges_to_ho_lee_as_kappa_vanishes(self, kappa):
@@ -93,7 +93,7 @@ class TestHullWhite:
 
 
 class TestShape:
-    """AC-5.6: small at the front, growing with maturity."""
+    """PRD-001 AC-5.6: small at the front, growing with maturity."""
 
     def test_under_a_basis_point_inside_a_year(self):
         assert (
@@ -120,7 +120,7 @@ class TestShape:
 
 
 class TestSigmaSource:
-    """AC-5.5: realised sigma, its window, and the refusal when there is too little."""
+    """PRD-001 AC-5.5: realised sigma, its window, and the refusal when there is too little."""
 
     def test_realised_sigma_records_its_window(self, snapshot):
         estimate = realized_sofr_sigma(snapshot, window=252)
@@ -170,7 +170,7 @@ class TestSigmaSource:
 
 
 class TestDiscountingDeclared:
-    """AC-5.7: the evidence says the discounting is at the collateral rate."""
+    """PRD-001 AC-5.7: the evidence says the discounting is at the collateral rate."""
 
     def test_collateral_discounting_is_declared(self):
         fields = convexity_adjustment(

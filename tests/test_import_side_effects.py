@@ -1,4 +1,4 @@
-"""AC-2.5: importing the package touches nothing outside it.
+"""PRD-001 AC-2.5: importing the package touches nothing outside it.
 
 A library that opens a socket or installs a warning filter at import time has
 changed the host process before anyone asked it to do anything, and the caller
@@ -24,9 +24,11 @@ def test_import_opens_no_socket():
         "import rates_engine\n"
         "print(rates_engine.__version__)\n"
     )
+    import rates_engine
+
     done = subprocess.run([sys.executable, "-c", program], capture_output=True, text=True)
     assert done.returncode == 0, done.stderr
-    assert done.stdout.strip() == "0.1.0"
+    assert done.stdout.strip() == rates_engine.__version__
 
 
 def test_import_installs_no_warning_filter():

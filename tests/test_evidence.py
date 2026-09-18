@@ -1,4 +1,4 @@
-"""AC-9.7 and AC-9.8: evidence composes, and degradation travels upward.
+"""PRD-001 AC-9.7 and PRD-001 AC-9.8: evidence composes, and degradation travels upward.
 
 The failure this file exists to catch is the cheap one: a result that
 flattens its inputs' evidence into a dictionary, so that a proxy recorded at
@@ -39,7 +39,7 @@ def _chain() -> tuple[Evidence, Evidence, Evidence]:
 
 
 class TestComposition:
-    """AC-9.7: the chain is nested, not flattened, and serialises whole."""
+    """PRD-001 AC-9.7: the chain is nested, not flattened, and serialises whole."""
 
     def test_sources_are_evidence_not_dictionaries(self):
         _, price, hedge = _chain()
@@ -74,7 +74,7 @@ class TestComposition:
 
 
 class TestPropagation:
-    """AC-9.8: a degradation at the bottom is visible at the top."""
+    """PRD-001 AC-9.8: a degradation at the bottom is visible at the top."""
 
     def test_worst_quality_climbs_the_chain(self):
         bootstrap, price, hedge = _chain()

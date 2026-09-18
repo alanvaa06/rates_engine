@@ -155,9 +155,66 @@ def require_published(*names: str, ac: str) -> list[Path]:
     missing = [n for n in names if published(n) is None]
     if missing:
         pytest.skip(
-            f"AC-{ac}: third-party fixture not supplied: "
+            f"PRD-001 AC-{ac}: third-party fixture not supplied: "
             + ", ".join(missing)
             + f". See {CME_PUBLISHED / 'README.md'} — this comparison is against a "
             "published number and is skipped rather than faked."
         )
     return [CME_PUBLISHED / n for n in names]
+
+
+@pytest.fixture(scope="session")
+def option_curve():
+    """A fifteen-year flat 4% continuous curve, for the option tests.
+
+    Flat and analytic on purpose: every option identity below is exact, so a
+    failure is the pricer's and not the curve's shape.
+    """
+    import math
+    from datetime import timedelta
+
+    from rates_engine.curves import DiscountCurve
+
+    nodes = tuple(AS_OF + timedelta(days=365 * k) for k in range(1, 16))
+    return DiscountCurve(AS_OF, nodes, tuple(math.exp(-0.04 * k) for k in range(1, 16)))
+
+
+@pytest.fixture
+def option_curve_set(option_curve) -> CurveSet:
+    """A single-curve set on :func:`option_curve`."""
+    return CurveSet(option_curve)
+
+
+@pytest.fixture
+def underlying_swap():
+    """The 5y10y swap the swaption tests are written on."""
+    from datetime import timedelta
+
+    return OISSwap(
+        effective=AS_OF + timedelta(days=365 * 5),
+        maturity=AS_OF + timedelta(days=365 * 15),
+        fixed_rate=0.04,
+        notional=100_000_000.0,
+    )
+
+
+@pytest.fixture
+def forward_swap_rate(underlying_swap, option_curve_set) -> float:
+    """The 5y10y forward swap rate under :func:`option_curve`."""
+    return par_rate(underlying_swap, option_curve_set).value
+
+
+@pytest.fixture
+def atm_swaption(underlying_swap, forward_swap_rate):
+    """An at-the-money payer swaption on the 5y10y."""
+    from datetime import timedelta
+
+    from rates_engine.instruments import Swaption
+
+    return Swaption(
+        expiry=AS_OF + timedelta(days=365 * 5),
+        underlying=underlying_swap,
+        strike=forward_swap_rate,
+        side=Side.PAYER,
+        notional=100_000_000.0,
+    )

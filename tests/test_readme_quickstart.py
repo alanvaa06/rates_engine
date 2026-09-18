@@ -94,9 +94,23 @@ def test_the_quickstart_prints_what_the_readme_claims(readme, tmp_path):
 
 
 def test_every_bash_command_in_the_readme_is_one_this_package_offers(readme):
-    commands = re.findall(r"^rateng (\w+)", readme, flags=re.MULTILINE)
+    # Read the command set from the CLI's own table rather than repeating it
+    # here, so adding a command cannot leave this test asserting the old one.
+    from rates_engine.cli import _COMMANDS
+
+    commands = re.findall(r"^rateng ([\w-]+)", readme, flags=re.MULTILINE)
     assert commands, "the README shows no CLI usage"
-    assert set(commands) <= {"bootstrap", "price", "hedge", "describe"}
+    assert set(commands) <= set(_COMMANDS)
+
+
+def test_the_readme_names_every_console_script(readme):
+    import tomllib
+
+    config = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    scripts = set(config["project"]["scripts"])
+    assert scripts, "the package declares no console script"
+    missing = [name for name in scripts if name not in readme]
+    assert missing == [], missing
 
 
 def test_the_version_agrees_between_the_package_and_pyproject():

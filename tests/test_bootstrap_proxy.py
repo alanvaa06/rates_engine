@@ -1,4 +1,4 @@
-"""AC-3.6, 3.7 and 3.8: the Treasury proxy is opt-in, labelled, and barred from goldens.
+"""PRD-001 AC-3.6, 3.7 and 3.8: the Treasury proxy is opt-in, labelled, and barred from goldens.
 
 Decision B2 accepted the swap spread a Treasury par yield carries. These are
 the three things that keep that decision from quietly spreading: it cannot be
@@ -37,7 +37,7 @@ def _treasury_node(as_of: date, label: str = "DGS2", rate: float = 0.0405) -> Pa
 
 
 class TestOptIn:
-    """AC-3.6: no default admits a proxy."""
+    """PRD-001 AC-3.6: no default admits a proxy."""
 
     def test_undeclared_proxy_refuses_and_names_the_instrument(self, as_of):
         with pytest.raises(ProxySourceNotDeclaredError, match="DGS2"):
@@ -67,7 +67,7 @@ class TestOptIn:
 
 
 class TestLabelling:
-    """AC-3.7: the nodes, the warning and the payload all say so."""
+    """PRD-001 AC-3.7: the nodes, the warning and the payload all say so."""
 
     @pytest.fixture
     def proxied(self, as_of, strip):
@@ -123,7 +123,7 @@ class TestLabelling:
 
 
 class TestGoldensStayClean:
-    """AC-3.8: no published number is validated against a proxied curve."""
+    """PRD-001 AC-3.8: no published number is validated against a proxied curve."""
 
     def test_the_suite_s_shared_curve_has_no_proxy_node(self, flat_curve):
         assert DataQuality.PROXY not in flat_curve.node_quality
@@ -135,5 +135,5 @@ class TestGoldensStayClean:
 
         source = (Path(__file__).parent / "test_golden_cme.py").read_text(encoding="utf-8")
         assert "assert_no_proxy" in source, (
-            "test_golden_cme.py must assert its curve is proxy-free (AC-3.8)"
+            "test_golden_cme.py must assert its curve is proxy-free (PRD-001 AC-3.8)"
         )

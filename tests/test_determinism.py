@@ -1,4 +1,4 @@
-"""AC-3.3: bit-exact inside one interpreter, 1e-14 relative across the matrix.
+"""PRD-001 AC-3.3: bit-exact inside one interpreter, 1e-14 relative across the matrix.
 
 Bit-exactness across Python or numpy versions is not promised, because it is
 not deliverable: BLAS and libm differ between builds, and a suite that demands

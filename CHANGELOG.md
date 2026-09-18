@@ -9,6 +9,96 @@ claims, so it belongs here too.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-18
+
+Rate options, a volatility cube, two parametric curves, a second
+interpolation, and the same payloads over MCP. No v1 number moves.
+
+### Added
+
+- **Volatility with its units attached.** `Volatility(value, units)` and
+  `VolUnits` (`normal_bp`, `normal_decimal`, `lognormal_percent`,
+  `lognormal_decimal`). There is no conversion between normal and lognormal
+  because there is none to have; `atm_equivalent_normal` and
+  `atm_equivalent_lognormal` are named for the at-the-money approximation
+  they are. Out-of-band magnitudes raise `VolUnitsError`, with
+  `Volatility.unchecked()` as the deliberate way past it.
+- **Bachelier and Black.** Price, vega, delta and implied volatility for
+  each. Black refuses a non-positive forward with `ShiftRequiredError`
+  rather than returning a number, and has the exact `K = 0` limit.
+- **Swaptions and caps/floors.** `Swaption`, `Caplet` and `CapFloor` as
+  contracts, priced through `optionpricing` on the annuity numeraire.
+  `optionpricing.model_for` picks the model from the volatility's units.
+  A cap period ending past the projection curve's last node raises
+  `MissingForwardError`.
+- **Option greeks.** `risk.option_greeks`: delta, gamma, vega and theta by
+  bump and reprice, with the bump in the evidence. Vega is always on the
+  normal basis, whichever model priced the option.
+- **SABR.** Hagan et al. (2002) eq. (2.17a), (2.18) and (A.59a), with β
+  fixed rather than fitted and the reason recorded. `calibrate`,
+  `density_diagnostics` (Breeden-Litzenberger) and `expansion_is_valid`.
+  Where the expansion goes negative it raises `ExpansionBreakdownError`
+  instead of returning a volatility that prices nothing.
+- **The volatility cube.** `VolCube` fills unquoted strikes inside a quoted
+  smile with SABR and marks them synthetic; across expiries or tenors it
+  raises `SliceNotQuotedError`. Units, strike convention, as-of date, β and
+  shift all serialise with it.
+- **Monotone convex interpolation.** Hagan and West (2006) as a second
+  `DiscountCurve` interpolation, with the step-2 collar that carries
+  positivity from the inputs to the interpolated forwards.
+  `curves.compare_interpolations` bootstraps one instrument set both ways
+  and reports the largest instantaneous-forward gap, which is the only thing
+  the choice changes.
+- **Parametric curves.** `fit_nelson_siegel` by concentrated least squares,
+  deterministic where a four-way nonlinear search is not, and
+  `fit_fomc_step_curve`, a piecewise-constant overnight path fitted to SR1
+  and SR3 settlements. A term rate read off the latter carries
+  `TERM_RATE_CAVEAT` and a `Degradation`: it is an expected average
+  overnight rate, not a traded term rate.
+- **`pricing.price_on_parametric`.** Prices one instrument on a fitted curve
+  and on the curve it was fitted to, and reports the gap. The payload is
+  marked `curve_kind="parametric"` and takes the model's name from the fit.
+- **`rateng-mcp`.** The five CLI handlers over stdio, behind the `mcp`
+  extra. A tool's answer is byte-identical to the corresponding `--json`
+  command because it is the same callable; the server writes no file, opens
+  no socket and invokes no model. Without the SDK the module still imports
+  and names the extra that installs it.
+- **`rateng list-instruments`.** What this build prices and what each
+  instrument needs.
+- **Fixtures.** `swaption_vol_cube.csv`, `zero_curve.csv`,
+  `fomc_futures_strip.csv` and `fomc_meetings.csv`, each constructed from a
+  shape the model being fitted cannot reproduce, each with a provenance
+  sibling saying so.
+
+### Changed
+
+- `rateng describe` reports the option models, volatility units, smile
+  model and parametric curves alongside what it already reported.
+- `docs/RESEARCH.md` gains the v2 formulas and what "not read" costs for
+  Hagan and Hagan-West. `AGENTS.md` gains the volatility-units trap and the
+  five refusals around it.
+- Acceptance criteria are now referenced in tests as `PRD-001 AC-3.1`
+  rather than `AC-3.1`, because the two PRDs have criteria with the same
+  numbers. `scripts/audit_acceptance.py` audits every shipped PRD.
+
+### Fixed
+
+- `_z_over_x` in the SABR expansion used `1 + ρz/2` in its small-`z` series
+  where the expansion gives `1 − ρz/2`. The error was below 1e-7 in implied
+  volatility and only near the money, which is why it took a branch
+  continuity test to find.
+- The monotone convex region-four formulas divided by zero when either end
+  of an interval sat exactly on its discrete forward. The limit there is
+  `g == 0` across the interval, whose integral agrees with the plain
+  quadratic's, so no node discount factor changes.
+
+### Added (errors)
+
+- `VolatilityError` and its five children: `VolUnitsError`,
+  `ShiftRequiredError`, `MissingForwardError`, `ExpansionBreakdownError`,
+  `SliceNotQuotedError`. Plus `CalibrationError` and `ConfigurationError`.
+  Twenty-four classes plus the base; `docs/ERRORS.md` covers all of them.
+
 ## [0.1.0] - 2026-09-16
 
 First release. Curves, futures convexity, linear pricing, risk and hedging,
@@ -77,5 +167,6 @@ divided by a zero price.
 - The Hull-White convexity formula is transcribed via Skov and Skovmand rather
   than read in Henrard 2018. The Ho-Lee limit test is what guards it.
 
-[Unreleased]: https://github.com/alanvaa06/rates_engine/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/alanvaa06/rates_engine/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/alanvaa06/rates_engine/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/alanvaa06/rates_engine/releases/tag/v0.1.0

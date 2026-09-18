@@ -1,4 +1,4 @@
-"""AC-4.1 to AC-4.5: four views of one curve, and the conversions between them."""
+"""PRD-001 AC-4.1 to PRD-001 AC-4.5: four views of one curve, and the conversions between them."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from rates_engine.errors import UnsupportedConventionError
 
 
 class TestZeroCurve:
-    """AC-4.1: the three compounding bases agree with each other."""
+    """PRD-001 AC-4.1: the three compounding bases agree with each other."""
 
     def test_continuous_is_minus_log_df_over_t(self, flat_curve):
         curve = flat_curve.curve
@@ -53,7 +53,7 @@ class TestZeroCurve:
 
 
 class TestForwardRelation:
-    """AC-4.2: the annual-compounded no-arbitrage identity, to 1e-12."""
+    """PRD-001 AC-4.2: the annual-compounded no-arbitrage identity, to 1e-12."""
 
     def test_spot_forward_identity_holds(self, flat_curve):
         curve = flat_curve.curve
@@ -89,7 +89,7 @@ class TestForwardRelation:
 
 
 class TestParCurve:
-    """AC-4.3: the par rate is the rate that prices a swap at zero."""
+    """PRD-001 AC-4.3: the par rate is the rate that prices a swap at zero."""
 
     def test_par_rate_prices_its_own_swap_at_zero(self, flat_curve, curve_set):
         from rates_engine.instruments import OISSwap
@@ -130,7 +130,7 @@ class TestParCurve:
 
 
 class TestRoundTrip:
-    """AC-4.4: par to zero to par returns the curve it started from."""
+    """PRD-001 AC-4.4: par to zero to par returns the curve it started from."""
 
     def test_flat_par_curve_survives_the_round_trip(self):
         as_of = date(2026, 1, 15)
@@ -166,7 +166,7 @@ class TestRoundTrip:
 
 
 class TestConventionsTravel:
-    """AC-4.5: no rate is exported without the convention that defines it."""
+    """PRD-001 AC-4.5: no rate is exported without the convention that defines it."""
 
     def test_each_view_declares_its_conventions(self, flat_curve):
         views = all_views(flat_curve.curve, source_evidence=flat_curve.evidence)

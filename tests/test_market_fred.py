@@ -1,4 +1,4 @@
-"""AC-2.1: the FRED provider, exercised without touching the network.
+"""PRD-001 AC-2.1: the FRED provider, exercised without touching the network.
 
 The provider is the only code here that dials out, so the test stubs the one
 call it makes. Doing it any other way would make the suite depend on a
@@ -72,7 +72,7 @@ def test_treasuries_arrive_classified_as_proxies(stub_urlopen):
     assert series.provenance.instrument_kind == "treasury_par_yield"
 
 
-#: The six series AC-2.1 names.
+#: The six series PRD-001 AC-2.1 names.
 AC_2_1_SERIES = ("SOFR", "SOFR30DAYAVG", "SOFR90DAYAVG", "SOFRINDEX", "EFFR", "DGS2")
 
 

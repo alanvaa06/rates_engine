@@ -1,4 +1,4 @@
-"""AC-3.1, 3.2, 3.4 and 3.5: everything reprices, nothing is dropped in silence."""
+"""PRD-001 AC-3.1, 3.2, 3.4 and 3.5: everything reprices, nothing is dropped in silence."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from rates_engine.errors import (
 
 
 class TestRoundTrip:
-    """AC-3.1: every input instrument reprices to under a hundredth of a bp."""
+    """PRD-001 AC-3.1: every input instrument reprices to under a hundredth of a bp."""
 
     def test_every_residual_is_inside_tolerance(self, flat_curve):
         assert flat_curve.residuals_bp
@@ -66,7 +66,7 @@ class TestRoundTrip:
 
 
 class TestCurveShape:
-    """AC-3.2: positive, non-increasing, or a refusal naming the segment."""
+    """PRD-001 AC-3.2: positive, non-increasing, or a refusal naming the segment."""
 
     def test_discount_factors_are_positive_and_non_increasing(self, flat_curve):
         dfs = flat_curve.curve.dfs
@@ -124,7 +124,7 @@ class TestCurveShape:
 
 
 class TestRefusalsAndDrops:
-    """AC-3.4: nothing is discarded quietly, under either strictness."""
+    """PRD-001 AC-3.4: nothing is discarded quietly, under either strictness."""
 
     def test_no_instruments_refuses(self, as_of):
         with pytest.raises(UnderdeterminedCurveError, match="undefined"):
@@ -142,8 +142,13 @@ class TestRefusalsAndDrops:
     def test_an_unsupported_interpolation_refuses(self, as_of, strip):
         from rates_engine.errors import UnsupportedConventionError
 
-        with pytest.raises(UnsupportedConventionError, match="monotone_convex"):
-            bootstrap_discount_curve(as_of, strip, interpolation="monotone_convex")
+        with pytest.raises(UnsupportedConventionError, match="cubic_spline"):
+            bootstrap_discount_curve(as_of, strip, interpolation="cubic_spline")
+
+    def test_the_two_supported_interpolations_are_both_accepted(self, as_of, strip):
+        for name in ("log_linear_df", "monotone_convex"):
+            result = bootstrap_discount_curve(as_of, strip, interpolation=name)
+            assert result.curve.interpolation == name
 
     def test_strict_raises_where_lenient_records(self, as_of, monkeypatch):
         # An instrument the solver cannot zero: its residual does not depend on
@@ -190,7 +195,7 @@ class TestRefusalsAndDrops:
 
 
 class TestEvidence:
-    """AC-3.5: the evidence carries everything needed to audit the fit."""
+    """PRD-001 AC-3.5: the evidence carries everything needed to audit the fit."""
 
     def test_the_required_fields_are_all_present(self, flat_curve):
         fields = flat_curve.evidence.fields

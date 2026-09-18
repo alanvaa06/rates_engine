@@ -12,8 +12,8 @@ Drop the files in and the tests run. No code changes.
 | --- | --- | --- |
 | `sr1_final_settlements.csv` | PRD-001 AC-5.1 | At least six expired SR1 contracts: `symbol,contract_month,settlement_price,settlement_date` |
 | `sr3_final_settlements.csv` | PRD-001 AC-5.2 | At least six expired SR3 contracts, same columns |
-| `sofr_fixings.csv` | AC-5.1, AC-5.2 | Published SOFR over the same span: `date,value`, value a decimal (`0.0531`) |
-| `whitepaper_2025_strip.csv` | AC-6.6, AC-8.1, AC-8.2 | The SR3 strip the CME/Rogerson 2025 whitepaper lists: `label,start,end,price`, plus `as_of` and `sigma` in the sidecar |
+| `sofr_fixings.csv` | PRD-001 AC-5.1, AC-5.2 | Published SOFR over the same span: `date,value`, value a decimal (`0.0531`) |
+| `whitepaper_2025_strip.csv` | PRD-001 AC-6.6, AC-8.1, AC-8.2 | The SR3 strip the CME/Rogerson 2025 whitepaper lists: `label,start,end,price`, plus `as_of` and `sigma` in the sidecar |
 
 ## Why they are missing
 

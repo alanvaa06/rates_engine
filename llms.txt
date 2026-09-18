@@ -16,10 +16,13 @@ The core install is numpy, pandas and scipy, and nothing else. YAML configs
 for the CLI are the one extra (`config`); JSON configs are native precisely so
 that a core install can run every command.
 
-Two ways in. As a library, importing `rates_engine`. As a CLI, `rateng`, where
-`bootstrap`, `price`, `hedge` and `describe` take `--json` and put one
-parseable document on stdout with all narration on stderr. An MCP server is
-planned for v2.
+Three ways in. As a library, importing `rates_engine`. As a CLI, `rateng`,
+where `bootstrap`, `price`, `hedge`, `describe` and `list-instruments` take
+`--json` and put one parseable document on stdout with all narration on
+stderr. As an MCP server, `rateng-mcp` (the `mcp` extra), whose five tools
+are those same five handlers and whose answers are byte-identical to the
+CLI's — the server is transport and nothing else: it writes no file, opens no
+socket and invokes no model.
 
 ## What it does
 
@@ -34,15 +37,27 @@ and the effective measures where the price is not zero. Sizes a futures strip
 against a swap and shocks the hedged position, so the convexity the strip
 cannot hedge shows up in dollars and in basis points.
 
+Prices European swaptions and caps and floors with Bachelier when the
+volatility is normal and Black when it is lognormal — the units pick the
+model, because a volatility here is never a bare float. Fits SABR to a
+quoted smile and fills unquoted strikes inside it, reporting the parameters
+and the residual and refusing to interpolate across expiries or tenors.
+Offers two curve interpolations and measures what the choice changes, and two
+parametric curves — Nelson-Siegel and a piecewise-constant FOMC path fitted
+to the futures strip — reporting how far each smoothing moves a price.
+
 ## What it refuses
 
 A missing fixing is never interpolated. An unimplemented convention never
 falls back to a default. A Treasury par yield never enters a curve without
 being declared. A key rate is never extrapolated past the curve. A duration is
 never divided by a zero price. Macaulay and modified duration are never
-approximated by effective duration under their own names. Seventeen named
-exceptions, each with an exit code and an entry in `docs/ERRORS.md` saying
-whether it is recoverable and what to do.
+approximated by effective duration under their own names. A lognormal model is never used on a
+non-positive forward. A volatility is never converted between normal and
+lognormal, because there is no such conversion. A volatility cube never
+interpolates across expiry or tenor. An asymptotic expansion never returns a
+negative volatility. Twenty-four named exceptions, each with an exit code and
+an entry in `docs/ERRORS.md` saying whether it is recoverable and what to do.
 
 ## What it is not
 
@@ -51,11 +66,13 @@ token is spent at runtime. There is no randomness: the same input on the same
 interpreter gives the same output bit for bit, and across interpreter versions
 to 1e-14 relative.
 
-Not a volatility engine. Swaptions, caps, floors and the SABR cube are v2.
-Not multi-currency: TIIE, FX forwards and FX options are v3. No CVA, FVA, KVA
-or MVA; no CCP margin; no SA-CCR. Clean prices only.
+Not multi-currency: TIIE, FX forwards and FX options are v3. No CVA, FVA,
+KVA or MVA; no CCP margin; no SA-CCR. Clean prices only. No Bermudan or
+American swaptions, no CMS, no HJM or LMM beyond the closed-form convexity
+already in v1. No live market data behind the volatility cube: v2 calibrates
+to a cube the caller supplies.
 
-## Honest limits in v1
+## Honest limits
 
 The dual-curve solver is validated against synthetic inputs, because no free
 source of Term SOFR par or basis swap quotes exists; every such result
@@ -65,6 +82,16 @@ variable and not quantified here — it is opt-in, it marks every node it
 touches, and it is barred from any test that validates a published number. The
 SR1 contract notional is assumed rather than read from the contract spec, and
 the evidence says `notional_source="assumed"`.
+
+In v2: Hagan's SABR expansion and Hagan-West's interpolation are both
+transcribed from secondary sources, and what stands in for reading them is a
+set of limits the formulas must satisfy plus, for SABR, a Monte Carlo of the
+process it approximates. The volatility cube, the zero curve and the futures
+strip that the v2 tests fit are constructed, because no free source of
+swaption quotes exists; each is built from a shape the model being fitted
+cannot reproduce, so the residual measures the model rather than the solver,
+and each fixture's provenance says so. β is fixed rather than calibrated,
+which is a choice the payload carries.
 
 ## Links
 

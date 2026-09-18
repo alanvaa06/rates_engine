@@ -1,4 +1,4 @@
-"""AC-9.5: every exception is in ``docs/ERRORS.md``, saying what to do about it.
+"""PRD-001 AC-9.5: every exception is in ``docs/ERRORS.md``, saying what to do about it.
 
 A refusal contract that drifts from the code is worse than none: it tells a
 caller to catch something that no longer exists, or stays silent about the one

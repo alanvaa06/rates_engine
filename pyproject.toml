@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "finport-ratesengine"
-version = "0.1.0"
-description = "Deterministic SOFR rates engine: curves, futures convexity, swap pricing, risk and futures-strip hedging, each result carrying the evidence it rests on."
+version = "0.2.0"
+description = "Deterministic SOFR rates engine: curves, futures convexity, swaps, swaptions and caps under Black and Bachelier, a SABR volatility cube, parametric curves, risk and futures-strip hedging, each result carrying the evidence it rests on."
 readme = "README.md"
 license = { file = "LICENSE" }
 # 3.11 rather than optengine's 3.9 (PRD-001 decision D1): 3.9 reached
@@ -13,7 +13,7 @@ license = { file = "LICENSE" }
 # costs modern typing syntax for nothing this package gains.
 requires-python = ">=3.11"
 authors = [{ name = "Alan Vazquez" }]
-keywords = ["sofr", "rates", "curve", "swap", "futures", "convexity", "dv01", "quant"]
+keywords = ["sofr", "rates", "curve", "swap", "swaption", "sabr", "volatility", "futures", "convexity", "dv01", "quant"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
@@ -44,6 +44,11 @@ data = ["pyarrow>=14.0"]
 # YAML configs for the CLI. JSON is the native format precisely so that
 # the core install can run every command; --config c.yaml needs this.
 config = ["pyyaml>=6.0"]
+# The MCP server, for agents that call the engine as a tool rather than
+# importing it. A thin transport over the same payloads the CLI prints; the
+# server module itself imports on a core install so that the missing-extra
+# message is a sentence rather than a traceback.
+mcp = ["mcp>=2.0,<3"]
 dev = [
     "pytest>=7.4",
     "pytest-cov>=4.1",
@@ -61,6 +66,7 @@ docs = ["pdoc>=14.0"]
 
 [project.scripts]
 rateng = "rates_engine.cli:main"
+rateng-mcp = "rates_engine.mcp_server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -1,4 +1,4 @@
-"""AC-6.6, AC-8.1 and AC-8.2: the numbers published by someone else.
+"""PRD-001 AC-6.6, PRD-001 AC-8.1 and PRD-001 AC-8.2: the numbers published by someone else.
 
 These are the only tests in the suite whose value comes from outside this
 package: 779 contracts, a 3.3304% IMM par coupon, +22,292 USD at minus a
@@ -18,7 +18,7 @@ no code change.
 
 What runs unconditionally is the part that does not need the whitepaper: that
 the machinery produces an answer of the right shape and magnitude, and that
-AC-3.8 holds — no golden is validated against a curve carrying a proxy.
+PRD-001 AC-3.8 holds — no golden is validated against a curve carrying a proxy.
 """
 
 from __future__ import annotations
@@ -55,9 +55,9 @@ WHITEPAPER_RELATIVE_TOLERANCE = 0.03
 
 
 def assert_no_proxy(result) -> None:
-    """AC-3.8: a published number is never validated against a proxied curve."""
+    """PRD-001 AC-3.8: a published number is never validated against a proxied curve."""
     assert DataQuality.PROXY not in result.node_quality, (
-        "this golden rests on a Treasury proxy; AC-3.8 forbids it, because the "
+        "this golden rests on a Treasury proxy; PRD-001 AC-3.8 forbids it, because the "
         "swap spread would be inside the number being compared"
     )
     assert result.long_end_source is None
@@ -118,7 +118,7 @@ class TestWhitepaperGoldens:
     """Third-party numbers. Skipped until the strip is supplied; tolerances fixed."""
 
     def test_two_year_imm_par_coupon(self):
-        """AC-6.6: 3.3304% within half a basis point."""
+        """PRD-001 AC-6.6: 3.3304% within half a basis point."""
         as_of, instruments = _load_whitepaper_strip(ac="6.6")
         result = bootstrap_discount_curve(as_of, instruments)
         assert_no_proxy(result)
@@ -136,7 +136,7 @@ class TestWhitepaperGoldens:
         )
 
     def test_contract_count(self):
-        """AC-8.1: 779 contracts, plus or minus two, summing over the periods."""
+        """PRD-001 AC-8.1: 779 contracts, plus or minus two, summing over the periods."""
         as_of, instruments = _load_whitepaper_strip(ac="8.1")
         result = bootstrap_discount_curve(as_of, instruments)
         assert_no_proxy(result)
@@ -158,7 +158,7 @@ class TestWhitepaperGoldens:
         assert sum(hedge.contracts.values()) == pytest.approx(hedge.total_contracts)
 
     def test_minus_one_hundred_basis_points(self):
-        """AC-8.2: +22,292 USD net, and the DV01 moving 19,480 -> 19,921."""
+        """PRD-001 AC-8.2: +22,292 USD net, and the DV01 moving 19,480 -> 19,921."""
         as_of, instruments = _load_whitepaper_strip(ac="8.2")
         result = bootstrap_discount_curve(as_of, instruments)
         assert_no_proxy(result)

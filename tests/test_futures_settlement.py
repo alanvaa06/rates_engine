@@ -1,4 +1,4 @@
-"""AC-5.1, AC-5.2 and AC-8.5: settlement formulas and the derived contract DV01.
+"""PRD-001 AC-5.1, PRD-001 AC-5.2 and PRD-001 AC-8.5: settlement formulas and the derived contract DV01.
 
 The comparison against CME's published final settlements is the test that
 would catch a wrong *convention*, and it is skipped here because this
@@ -49,7 +49,7 @@ def _daily_rates(snapshot, start: date, end: date) -> list[float]:
 
 
 class TestSR1Settlement:
-    """AC-5.1: one-month contracts settle on the arithmetic average."""
+    """PRD-001 AC-5.1: one-month contracts settle on the arithmetic average."""
 
     def test_matches_an_independent_arithmetic_average(self, snapshot):
         for month in range(1, 13):
@@ -79,7 +79,7 @@ class TestSR1Settlement:
         assert contract.accrual_end == date(2026, 3, 1)
 
     def test_against_cme_final_settlements(self):
-        """AC-5.1's third-party half: skipped until the settlements are supplied."""
+        """PRD-001 AC-5.1's third-party half: skipped until the settlements are supplied."""
         settlements, fixings = require_published(
             "sr1_final_settlements.csv", "sofr_fixings.csv", ac="5.1"
         )
@@ -89,14 +89,14 @@ class TestSR1Settlement:
             as_of=date.today(), series={"SOFR": load_series_csv(fixings, "SOFR")}
         )
         rows = [s for s in load_settlements_csv(settlements) if s.symbol == "SR1"]
-        assert len(rows) >= 6, "AC-5.1 asks for at least six expired contracts"
+        assert len(rows) >= 6, "PRD-001 AC-5.1 asks for at least six expired contracts"
         for row in rows:
             computed = SOFRFuture1M(row.contract_month).settlement_price(snapshot)
             assert computed == pytest.approx(row.settlement_price, abs=0.001)
 
 
 class TestSR3Settlement:
-    """AC-5.2: three-month contracts settle on the compounded rate."""
+    """PRD-001 AC-5.2: three-month contracts settle on the compounded rate."""
 
     def test_matches_an_independent_compounding(self, snapshot):
         period = imm_date(2025, 3)
@@ -127,7 +127,7 @@ class TestSR3Settlement:
         assert contract.implied_forward_rate(96.0, 2.25e-4) == pytest.approx(0.04 - 2.25e-4)
 
     def test_against_cme_final_settlements(self):
-        """AC-5.2's third-party half: skipped until the settlements are supplied."""
+        """PRD-001 AC-5.2's third-party half: skipped until the settlements are supplied."""
         settlements, fixings = require_published(
             "sr3_final_settlements.csv", "sofr_fixings.csv", ac="5.2"
         )
@@ -137,7 +137,7 @@ class TestSR3Settlement:
             as_of=date.today(), series={"SOFR": load_series_csv(fixings, "SOFR")}
         )
         rows = [s for s in load_settlements_csv(settlements) if s.symbol == "SR3"]
-        assert len(rows) >= 6, "AC-5.2 asks for at least six expired contracts"
+        assert len(rows) >= 6, "PRD-001 AC-5.2 asks for at least six expired contracts"
         for row in rows:
             start = next_imm_on_or_after(row.contract_month)
             contract = SOFRFuture3M(start, next_imm_on_or_after(start + timedelta(days=1)))
@@ -147,7 +147,7 @@ class TestSR3Settlement:
 
 
 class TestContractDV01:
-    """AC-8.5: DV01 is derived from notional and nominal tenor, not quoted."""
+    """PRD-001 AC-8.5: DV01 is derived from notional and nominal tenor, not quoted."""
 
     def test_sr3_is_twenty_five_dollars(self):
         contract = SOFRFuture3M.from_contract_month(2026, 3)

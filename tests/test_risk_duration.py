@@ -1,4 +1,4 @@
-"""AC-10.8 to AC-10.13: the duration conventions, and the two that do not exist."""
+"""PRD-001 AC-10.8 to PRD-001 AC-10.13: the duration conventions, and the two that do not exist."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ def off_market(par_swap):
 
 
 class TestEquivalences:
-    """AC-10.8: pvbp is dv01, money duration is dv01 times ten thousand."""
+    """PRD-001 AC-10.8: pvbp is dv01, money duration is dv01 times ten thousand."""
 
     def test_pvbp_is_dv01(self, par_swap, curve_set):
         assert pvbp(par_swap, curve_set).value == dv01(par_swap, curve_set).value
@@ -57,7 +57,7 @@ class TestEquivalences:
 
 
 class TestMoneyConvexity:
-    """AC-10.9: defined even when the price is zero, which is the point of it."""
+    """PRD-001 AC-10.9: defined even when the price is zero, which is the point of it."""
 
     def test_it_works_on_a_par_swap(self, par_swap, curve_set):
         assert abs(pv(par_swap, curve_set).value) < 1e-6
@@ -89,7 +89,7 @@ class TestMoneyConvexity:
 
 
 class TestEffectiveMeasures:
-    """AC-10.11: curve-based, full reprice, and named as effective."""
+    """PRD-001 AC-10.11: curve-based, full reprice, and named as effective."""
 
     def test_effective_duration_is_the_normalised_first_difference(
         self, off_market, curve_set
@@ -125,7 +125,7 @@ class TestEffectiveMeasures:
 
 
 class TestZeroPriceRefusals:
-    """AC-10.12: normalised measures refuse at a zero price; monetary ones answer."""
+    """PRD-001 AC-10.12: normalised measures refuse at a zero price; monetary ones answer."""
 
     def test_effective_duration_refuses_on_a_par_swap(self, par_swap, curve_set):
         with pytest.raises(UndefinedDurationError, match="effective_duration"):
@@ -162,7 +162,7 @@ class TestZeroPriceRefusals:
 
 
 class TestYieldBasedStubs:
-    """AC-10.13: the two that need a bond say so, and are never faked."""
+    """PRD-001 AC-10.13: the two that need a bond say so, and are never faked."""
 
     @pytest.mark.parametrize("function", [macaulay_duration, modified_duration])
     def test_they_raise_not_implemented(self, function):

@@ -22,7 +22,7 @@ from rates_engine.errors import UnsupportedConventionError
 
 
 class TestYearFraction:
-    """AC-1.1: the same ninety days, three different answers."""
+    """PRD-001 AC-1.1: the same ninety days, three different answers."""
 
     START = date(2026, 1, 15)
     END = date(2026, 4, 15)
@@ -56,7 +56,7 @@ class TestYearFraction:
 
 
 class TestUnsupportedConventions:
-    """AC-1.4: name something unimplemented and get a refusal, never a default."""
+    """PRD-001 AC-1.4: name something unimplemented and get a refusal, never a default."""
 
     def test_unknown_name_refuses_and_names_it(self):
         with pytest.raises(UnsupportedConventionError, match="ACT/ACT ISMA"):
@@ -77,7 +77,7 @@ class TestUnsupportedConventions:
 
 
 class TestCalendar:
-    """AC-1.2: the SIFMA holiday set, and the observance rule it turns on."""
+    """PRD-001 AC-1.2: the SIFMA holiday set, and the observance rule it turns on."""
 
     def test_fixture_matches_the_implemented_calendar(self, fixtures_dir):
         # Generated from the same rules, so this catches an accidental edit to
@@ -105,7 +105,7 @@ class TestCalendar:
         assert date(2025, 4, 18) in SIFMA_US.holidays(2025)
 
     def test_saturday_holiday_observed_on_the_friday(self):
-        # 4 July 2026 is a Saturday. This is the rule AC-1.2 flags for manual
+        # 4 July 2026 is a Saturday. This is the rule PRD-001 AC-1.2 flags for manual
         # confirmation, so it is asserted explicitly rather than incidentally.
         assert date(2026, 7, 4).weekday() == 5
         assert date(2026, 7, 3) in SIFMA_US.holidays(2026)
@@ -133,7 +133,7 @@ class TestCalendar:
 
 
 class TestIMM:
-    """AC-1.3: IMM dates are third Wednesdays of the quarterly months."""
+    """PRD-001 AC-1.3: IMM dates are third Wednesdays of the quarterly months."""
 
     def test_imm_dates_are_third_wednesdays(self):
         for day in imm_dates(2026):

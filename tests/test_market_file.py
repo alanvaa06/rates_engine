@@ -1,4 +1,4 @@
-"""AC-2.2, 2.3, 2.4 and 2.6: loading data, refusing to invent it, and the proxy label."""
+"""PRD-001 AC-2.2, 2.3, 2.4 and 2.6: loading data, refusing to invent it, and the proxy label."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from rates_engine.market.classify import TREASURY_PAR_YIELD
 
 
 class TestLoading:
-    """AC-2.2: a row on disk becomes a value with a source attached."""
+    """PRD-001 AC-2.2: a row on disk becomes a value with a source attached."""
 
     def test_series_loads_with_provenance(self, fixtures_dir):
         series = load_series_csv(fixtures_dir / "sofr_fixings.csv", "SOFR")
@@ -64,7 +64,7 @@ class TestLoading:
 
 
 class TestRefusals:
-    """AC-2.3: a fixing that is not there is never made up."""
+    """PRD-001 AC-2.3: a fixing that is not there is never made up."""
 
     def test_missing_fixing_names_the_date(self, snapshot):
         # A business day before the series begins: in range for the question,
@@ -105,7 +105,7 @@ class TestRefusals:
 
 
 class TestNonPublicationDays:
-    """AC-2.4: a non-publication day repeats the last rate, and says how often."""
+    """PRD-001 AC-2.4: a non-publication day repeats the last rate, and says how often."""
 
     def test_weekend_days_repeat_and_are_counted(self, snapshot):
         # Mon 5 Jan to Mon 12 Jan 2026: five business days, two weekend days.
@@ -151,7 +151,7 @@ class TestNonPublicationDays:
 
 
 class TestTreasuryClassification:
-    """AC-2.6: a DGS series is a proxy from the moment it is loaded."""
+    """PRD-001 AC-2.6: a DGS series is a proxy from the moment it is loaded."""
 
     def test_dgs_is_a_proxy_with_the_right_instrument_kind(self, fixtures_dir, tmp_path):
         path = tmp_path / "dgs2.csv"

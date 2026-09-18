@@ -27,6 +27,23 @@ of claim, and a reader deserves to know which one they are getting.
 | Key-rate shocks as a partition of unity | `risk.py` | Standard construction; the property is asserted directly rather than cited | Derived here |
 | Duration conventions: money duration, PVBP, effective duration and convexity | `risk.py` | CFA Level I *Fixed Income* | Read |
 
+## Formulas added in v2
+
+| What | Where it lives | Source | Read? |
+| --- | --- | --- | --- |
+| Bachelier (normal) option value, `A[(F-K)N(d) + σ√T n(d)]` | `volatility/bachelier.py` | Standard; the vault note *Volatility, Greeks and Option Strategy Practice (2026)* states it in this form | Secondary |
+| Black (lognormal) option value on a forward | `volatility/black.py` | Black 1976, via *CFA L2 Derivatives — Pricing and Valuation* | Secondary |
+| The annuity is the numeraire that makes the forward swap rate a martingale | `optionpricing.py` | *Forwards, Multi-Curve and Swaptions (Post-LIBOR)*; Mercurio | Secondary |
+| SABR implied lognormal volatility, Hagan et al. (2002) eq. (2.17a) | `volatility/sabr.py` | Hagan, Kumar, Lesniewski and Woodward, via *Stochastic, Local and Rough Volatility Models* | **Not read in Hagan** |
+| SABR at-the-money expansion, eq. (2.18) | `volatility/sabr.py` | Same | **Not read in Hagan** |
+| SABR implied normal volatility, eq. (A.59a) | `volatility/sabr.py` | Same | **Not read in Hagan** |
+| β fixed rather than calibrated, at a market convention | `volatility/sabr.py` | *Stochastic, Local and Rough Volatility Models*, on the β/ρ identification problem | Secondary |
+| Breeden-Litzenberger: the second strike derivative of the call price is the density | `volatility/sabr.py` diagnostics | Breeden and Litzenberger 1978; standard | Secondary |
+| Nelson-Siegel zero curve and its three loadings | `curves/parametric.py` | Nelson and Siegel 1987, via *Term Structure Models for Swaps and Swaptions* | Secondary |
+| Concentrated least squares: betas linear given tau | `curves/parametric.py` | Standard result; the reason is argued in the module rather than cited | Derived here |
+| Piecewise-constant policy path fitted to the futures strip | `curves/parametric.py` | Heitfield and Park, via *SOFR Futures — Pricing, Convexity and Hedging Swaps* | Secondary |
+| Monotone convex interpolation, the four regions and the step-2 collar | `curves/interpolation.py` | Hagan and West 2006, *Interpolation Methods for Curve Construction* | **Not read in Hagan-West** |
+
 ## What "not read" costs, concretely
 
 **The Hull-White adjustment.** Transcribed rather than derived, so the
@@ -50,6 +67,31 @@ be fetched and neither could CME's published settlements. See
 generated fixture would turn a test that proves something into a test that
 proves the generator agrees with itself.
 
+**Hagan's SABR expansion.** Transcribed from a secondary source, so the
+protection is the set of limits the formula must satisfy and a check against
+the process it claims to approximate. With `nu = 0` and `beta = 1` it must
+collapse to a constant lognormal volatility; with `beta = 0` the normal
+expansion must collapse to `alpha`; the at-the-money form must agree with the
+general form as the strike approaches the forward, from both sides. Above
+those, `tests/test_sabr.py` runs a Monte Carlo of the SABR stochastic
+differential equation and compares the simulated implied volatility with the
+expansion, which is the only check here that would catch an error the limits
+and the reference both share. Reading Hagan 2002 directly is what would close
+the rest.
+
+That comparison also bounds where the expansion stops being usable, which is
+why `ExpansionBreakdownError` exists: the `O(nu² T)` correction can drive the
+expansion negative at long expiry and high vol of vol, and a negative
+volatility prices nothing.
+
+**Hagan-West.** The four regions and the collar are transcribed. The
+protection is the property the paper is about: positive inputs must give
+positive interpolated forwards, and `tests/test_interpolation.py` asserts it
+on six shapes including a sawtooth that goes negative with the collar
+switched off. That the *uncollared* version fails is what shows the test has
+something to catch. Reproducing every node's discount factor to 1e-13 across
+all four regions bounds the transcription of the integrals.
+
 ## What is validated against nothing external
 
 The dual-curve solver. There is no free source of Term SOFR par rates or
@@ -59,6 +101,21 @@ properties that hold for any basis plus an exact identity at zero basis. Every
 such result declares `inputs_origin="synthetic"`, and asking for real quotes
 raises rather than substituting something plausible.
 
+The same is true of the volatility cube in v2. There is no free source of
+swaption volatility quotes, so `tests/fixtures/swaption_vol_cube.csv` is
+constructed, and its provenance says so. It is generated from a smile that is
+quadratic in moneyness — deliberately *not* SABR — so the residual AC-3.2
+bounds measures how well Hagan's expansion approximates a shape it did not
+produce. A cube generated by SABR would have made that residual a statement
+about the solver.
+
+`tests/fixtures/zero_curve.csv` and `tests/fixtures/fomc_futures_strip.csv`
+are built the same way: the first from a Svensson curve, which Nelson-Siegel
+cannot reproduce because it has a second hump, and the second from a known
+step path rounded to the exchange price tick, so that no step path reprices
+the rounded strip exactly. In both cases the fit is measured against
+something it cannot reach by construction.
+
 ## Assumptions carried in the code
 
 | Assumption | Where | How it is marked |
@@ -66,6 +123,8 @@ raises rather than substituting something plausible.
 | SR1 contract notional is USD 5,000,000 | `instruments/futures.py` | `notional_source="assumed"`; the DV01 of 41.67 is derived from it, not quoted |
 | SIFMA observes a Saturday holiday on the preceding Friday | `conventions/calendar.py` | The fixture's provenance records the manual check as **not done** |
 | Treasury par yields are usable as a stand-in for OIS par | `curves/bootstrap.py` | Opt-in only; marks every node; a `Degradation` names the swap spread as an unquantified bias |
+| SABR's backbone exponent β is 0.5 unless the caller says otherwise | `volatility/sabr.py` | Carried in every `SABRParameters` and every calibration payload; the module says why it is fixed rather than fitted |
+| A term rate read off a futures-fitted curve carries no convexity adjustment | `curves/parametric.py` | `TERM_RATE_CAVEAT` plus a `Degradation` marking the result `assumed`; the evidence sets `convexity_adjustment_applied: false` |
 
 ## Vault notes behind this package
 
@@ -78,4 +137,7 @@ raises rather than substituting something plausible.
 *Swap Hedging, Central Clearing and XVA* ·
 *Forwards, Multi-Curve and Swaptions (Post-LIBOR)* ·
 *CFA L2 Fixed Income — Term Structure and Arbitrage-Free Valuation* ·
-*CFA L3 Derivatives — Swap Strategies*
+*CFA L3 Derivatives — Swap Strategies* ·
+*Stochastic, Local and Rough Volatility Models* ·
+*Volatility, Greeks and Option Strategy Practice (2026)* ·
+*CFA L2 Derivatives — Pricing and Valuation*

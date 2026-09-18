@@ -32,6 +32,7 @@ __all__ = [
     "InsufficientDataError",
     "ProxySourceNotDeclaredError",
     "MissingDependencyError",
+    "ConfigurationError",
     "CurveError",
     "CurveArbitrageError",
     "BootstrapResidualError",
@@ -42,6 +43,13 @@ __all__ = [
     "RiskError",
     "UndefinedDurationError",
     "KeyTenorOutOfRangeError",
+    "VolatilityError",
+    "VolUnitsError",
+    "ShiftRequiredError",
+    "ExpansionBreakdownError",
+    "MissingForwardError",
+    "CalibrationError",
+    "SliceNotQuotedError",
 ]
 
 
@@ -102,6 +110,19 @@ class MissingDependencyError(RatesEngineError):
     """An optional extra is needed for this path and is not installed.
 
     The message names the install command that fixes it.
+    """
+
+    exit_code = 1
+
+
+class ConfigurationError(RatesEngineError):
+    """The command was asked to run without the configuration it needs.
+
+    ``describe`` and ``list-instruments`` answer from the build itself; every
+    other command reads a config. Over the CLI argparse enforces that, but the
+    MCP server's tools take the config as an optional argument, so the refusal
+    has to be a named one rather than whatever the first missing key happens
+    to raise.
     """
 
     exit_code = 1
@@ -169,3 +190,76 @@ class UndefinedDurationError(RiskError):
 
 class KeyTenorOutOfRangeError(RiskError):
     """A key tenor falls outside the span of the curve, and is not extrapolated."""
+
+
+class VolatilityError(RatesEngineError):
+    """The volatility input or surface cannot support the calculation."""
+
+    exit_code = 1
+
+
+class VolUnitsError(VolatilityError):
+    """A volatility was quoted in units that do not match what was asked for.
+
+    Either a relative volatility was handed to something expecting an absolute
+    one, which is not a scaling away, or the magnitude is implausible for the
+    units declared. Both are the same mistake wearing different clothes, and
+    both are wrong by orders of magnitude rather than by a little.
+    """
+
+
+class ShiftRequiredError(VolatilityError):
+    """A lognormal model was asked for at a forward at or below zero.
+
+    Black and unshifted SABR take the logarithm of the forward. Use a shifted
+    model, or quote normal volatility, which is what the market does.
+    """
+
+    exit_code = 2
+
+
+class MissingForwardError(VolatilityError):
+    """A period of a cap or floor has no forward on the projection curve.
+
+    Never extrapolated: the missing caplet would be priced off a rate the
+    curve does not imply, and the cap would report as complete.
+    """
+
+    exit_code = 2
+
+
+class CalibrationError(RatesEngineError):
+    """A model could not be fitted to the quotes supplied.
+
+    The message says which quotes and what the fit achieved, because a
+    calibration that silently returns its starting point is worse than one
+    that refuses.
+    """
+
+    exit_code = 2
+
+
+class ExpansionBreakdownError(VolatilityError):
+    """An asymptotic expansion returned a volatility at or below zero.
+
+    Not a coding error and not a bad input: it is the expansion reporting
+    that it has left the region where it approximates anything. Hagan's SABR
+    implied volatility carries an ``O(nu^2 T)`` correction that can drive the
+    result negative at long expiries, high vol-of-vol and strikes far into
+    the wing. The honest response is to refuse, because a negative volatility
+    prices nothing, and to say where the boundary was crossed.
+    """
+
+    exit_code = 2
+
+
+class SliceNotQuotedError(VolatilityError):
+    """The volatility cube holds no quotes at that expiry and tenor.
+
+    Filling an unquoted strike inside a quoted smile is a model fitted to
+    data. Filling a whole missing slice would be a model fitted to a
+    *different* slice, which is a larger claim than v2 makes: there is no
+    interpolation across expiry or tenor.
+    """
+
+    exit_code = 2

@@ -31,14 +31,17 @@ LAYERS: tuple[str, ...] = (
     "conventions",
     "market",
     "convexity",
+    "volatility",
     "curves",
     "instruments",
     "pricing",
+    "optionpricing",
     "risk",
     "hedging",
     "diagnostics",
     "reporting",
     "cli",
+    "mcp_server",
 )
 
 RANK = {name: index for index, name in enumerate(LAYERS)}
