@@ -114,10 +114,12 @@ el nombre de cada convención sin verificar, y `strict=True` se rehúsa.
 
 ## Estado de implementación (2026-09-18)
 
-v0.3.0 construido. `pytest -q`: **1464 pasan, 5 saltan** (los goldens CME de
-v1, sin cambio). `ruff check .` limpio. `mypy src/rates_engine` limpio en 59
-archivos, allowlist vacía. `python scripts/audit_acceptance.py 003`:
-**20 AC, 0 sin cubrir, 0 parciales**.
+v0.3.0 construido, y después revisado a fondo (ver abajo). `pytest -q`:
+**1611 pasan, 5 saltan** (los goldens CME de v1, sin cambio). `ruff check .`
+limpio. `mypy src/rates_engine` limpio en 59 archivos, allowlist vacía.
+`python scripts/audit_acceptance.py`: **109 AC en tres PRDs, 0 sin cubrir,
+5 parciales** — los cinco son comparaciones contra números publicados por
+CME que este entorno no puede descargar.
 
 ### La decisión que no estaba en el PRD, y por qué fue primero
 
@@ -191,6 +193,46 @@ es una propiedad de las estructuras. El test lo asiente donde se cumple y
 asiente que falla donde falla; lo que **sí** es universal —protección ATM
 completa es lo más caro, el seagull lo más barato— se prueba en ambas
 direcciones.
+
+### La revisión profunda, y lo que encontró
+
+Cinco revisores en paralelo sobre el código ya "terminado". Los dos
+hallazgos serios fueron fallas de raíz, no detalles:
+
+**La curva MXN no podía valuar nada.** Ningún instrumento ponía moneda en
+sus flujos, así que todo flujo salía USD; `pv` sobre una curva en pesos
+comparaba MXN contra USD y rehusaba. Es decir: `bootstrap_mxn_curve`
+producía una curva que el propio motor se negaba a usar. Ningún test lo
+atrapó porque **todos** los tests de moneda construían el flujo a mano con
+un shim. Ahora un `OISSwap` real sobre una curva en pesos toma flujos en
+pesos, valúa, y sale etiquetado `"MXN"`.
+
+**La marca `ASSUMED` era decorativa.** Las `Degradation` de
+`UNRESOLVED_MXN` vivían en `MXNCurveResult` y `CurveSet(result.curve)` las
+tiraba, así que cualquier precio sobre la curva en pesos salía `OBSERVED`
+— exactamente lo contrario de lo que promete AC-1.4. La procedencia ahora
+va en `DiscountCurve`, sobrevive a `shifted` y `with_node`, y `CurveSet` la
+une de sus dos curvas.
+
+Lo demás, en orden de gravedad: el signo de la base cross-currency
+contradecía su propia prosa por 976 pips; dos curvas con fechas de
+valuación distintas se combinaban en silencio (3999 pips); el seagull
+financiaba su ala comprada dos veces; `PriceResult` no tenía `__add__`, así
+que la negativa que `docs/ERRORS.md` prometía —"sumar valores presentes en
+monedas distintas"— no tenía código detrás; `audit_hedge(strict=True)`
+lanzaba `ConfigurationError`, la misma excepción que un archivo de política
+ilegible, para un caso que pide lo contrario (cambiar el trade, no el
+archivo); cuatro lugares construían una curva nueva y perdían la moneda;
+y `test_docstrings.py` verificaba 157 nombres de los 229 públicos, hueco
+por el que se colaron los seis greeks de Garman-Kohlhagen sin unidades
+—`vega` por unidad de vol donde un trader lee por punto, `theta` por año
+donde lee por día.
+
+Tres tests que pasaban por la razón equivocada se reescribieron: el de
+`participation` se cumplía con una constante 0.5, el de las convenciones
+TIIE comparaba las fechas contra las constantes que las generaron, y el de
+moneda nunca tocaba un instrumento real. Cada arreglo de moneda se verificó
+revirtiéndolo y comprobando que el test falla.
 
 ### Lo que falta, y cuánto cuesta
 

@@ -74,7 +74,20 @@ comparator that does not recommend. No v1 or v2 number moves.
 - **`ImplausibleInputError`.** A well-formed number outside the band this
   build accepts — a cross-currency basis beyond ±500 bp. The band is a
   named constant a caller can widen deliberately, and its own message
-  admits it is a plausibility check rather than a measurement.
+  admits it is a plausibility check rather than a measurement. Also raised
+  by `solve_zero_cost_strike` when the protection asked for is worth more
+  than the entire opposite wing, so no strike funds it.
+- **`PriceResult.__add__`.** Two present values add, and two in different
+  currencies refuse. The sum carries both evidence chains, so an `assumed`
+  leg added to an `observed` one degrades the total instead of laundering
+  the mark. A measure mismatch — a par rate plus an annuity — is a
+  `TypeError`, because that is a mistake in the caller and not a problem
+  with the data.
+- **`PolicyBreachError`** (exit code 2), raised by
+  `audit_hedge(..., strict=True)` where a `ConfigurationError` was raised
+  before. A policy file that will not load and a proposal the policy
+  forbids need opposite responses — edit the file, or change the trade —
+  so catching one no longer catches the other.
 
 ### Changed
 
@@ -83,7 +96,22 @@ comparator that does not recommend. No v1 or v2 number moves.
   unresolved MXN conventions, and `recommends: false`.
 - `bootstrap_discount_curve` takes a `currency`, defaulting to USD.
 - `DiscountCurve.shifted`, `.with_node` and the parametric samplers carry
-  the currency through.
+  the currency through, as do `solve_dual_curve` and
+  `compare_interpolations`, which both take a `currency` and give it to
+  every curve they build.
+- `CurveView` carries and serialises the currency. A zero rate is
+  dimensionless and a discount factor more so, so the export was the one
+  place a currency could be lost on the way out.
+- `shock_table` states the currency of its money columns, and refuses a
+  curve set that is not USD: the strip's P&L comes from `SR3_DV01`, a
+  dollar constant, so netting it against a peso swap P&L would report two
+  currencies as one number.
+- `audit_hedge` reports `hedge_ratio` as `None` on an option row rather
+  than `0.0`, which read as a ratio the structure had rather than one it
+  does not define.
+- The docstring contract in `test_docstrings.py` now covers each module's
+  own `__all__` — 229 names — where it covered the 157 the top-level
+  package re-exports.
 
 ### Fixed
 
