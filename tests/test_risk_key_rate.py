@@ -1,4 +1,4 @@
-"""AC-10.1 to AC-10.7: tent shocks, the sum that follows from them, and two bases.
+"""PRD-001 AC-10.1 to PRD-001 AC-10.7: tent shocks, the sum that follows from them, and two bases.
 
 The load-bearing test here is :meth:`TestTentShocks.test_the_shocks_sum_to_a_parallel_shift`.
 Everything else about the key-rate profile — that it adds up to the parallel
@@ -28,7 +28,7 @@ SUM_RELATIVE_TOLERANCE = 1e-6
 
 
 class TestTentShocks:
-    """AC-10.1: the shocks are a partition of unity, checked directly."""
+    """PRD-001 AC-10.1: the shocks are a partition of unity, checked directly."""
 
     @pytest.mark.parametrize(
         "time", [0.0, 0.1, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.4, 3.0, 10.0]
@@ -69,7 +69,7 @@ class TestTentShocks:
 
 
 class TestKeyRateDV01:
-    """AC-10.2: the profile sums to the parallel DV01."""
+    """PRD-001 AC-10.2: the profile sums to the parallel DV01."""
 
     def test_the_total_matches_the_parallel_dv01(self, par_swap, curve_set):
         profile = key_rate_dv01(par_swap, curve_set, TENORS)
@@ -116,7 +116,7 @@ class TestKeyRateDV01:
 
 
 class TestOutOfRange:
-    """AC-10.4: a tenor beyond the curve is refused, not extrapolated."""
+    """PRD-001 AC-10.4: a tenor beyond the curve is refused, not extrapolated."""
 
     def test_a_tenor_past_the_last_node_refuses(self, par_swap, curve_set):
         with pytest.raises(KeyTenorOutOfRangeError, match="not extrapolated"):
@@ -134,7 +134,7 @@ class TestOutOfRange:
 
 
 class TestEvidence:
-    """AC-10.3: the basis, the shape, the nodes and the caveat are all recorded."""
+    """PRD-001 AC-10.3: the basis, the shape, the nodes and the caveat are all recorded."""
 
     def test_the_basis_and_shape_are_named(self, par_swap, curve_set):
         fields = key_rate_dv01(par_swap, curve_set, TENORS).evidence.fields
@@ -163,7 +163,7 @@ class TestEvidence:
 
 
 class TestNormalisedRefusal:
-    """AC-10.5: at a zero price the normalised profile does not exist."""
+    """PRD-001 AC-10.5: at a zero price the normalised profile does not exist."""
 
     def test_a_par_swap_refuses(self, par_swap, curve_set):
         with pytest.raises(UndefinedDurationError, match="key_rate_duration"):
@@ -196,7 +196,7 @@ class TestNormalisedRefusal:
 
 
 class TestTwoBases:
-    """AC-10.6 and AC-10.7: node basis and quote basis, named and reconciled."""
+    """PRD-001 AC-10.6 and PRD-001 AC-10.7: node basis and quote basis, named and reconciled."""
 
     def test_the_hedge_reports_a_bucketed_delta_by_instrument(self, par_swap, strip, as_of):
         hedge = strip_hedge(par_swap, strip, as_of=as_of)

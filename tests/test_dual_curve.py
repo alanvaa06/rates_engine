@@ -1,4 +1,4 @@
-"""AC-7.1 to AC-7.5: the dual-curve solver, validated on inputs it was given.
+"""PRD-001 AC-7.1 to PRD-001 AC-7.5: the dual-curve solver, validated on inputs it was given.
 
 Every input here is constructed. That is the decision, not an accident: there
 is no free source of Term SOFR par rates or OIS-versus-term basis spreads, so
@@ -89,7 +89,7 @@ def _dual_instruments(basis: float):
 
 
 class TestSyntheticGate:
-    """AC-7.5: asking for real quotes is refused, and the origin is declared."""
+    """PRD-001 AC-7.5: asking for real quotes is refused, and the origin is declared."""
 
     def test_a_real_source_refuses(self):
         tenor, basis = _dual_instruments(0.0005)
@@ -123,7 +123,7 @@ class TestSyntheticGate:
 
 
 class TestRepricing:
-    """AC-7.1: every instrument reprices under the simultaneous solve."""
+    """PRD-001 AC-7.1: every instrument reprices under the simultaneous solve."""
 
     @pytest.mark.parametrize("basis", [0.0, 0.0005, 0.0025])
     def test_all_residuals_are_inside_tolerance(self, basis):
@@ -145,7 +145,7 @@ class TestRepricing:
 
 
 class TestModes:
-    """AC-7.2: the two modes are compared, and agree when there is nothing to feed back."""
+    """PRD-001 AC-7.2: the two modes are compared, and agree when there is nothing to feed back."""
 
     def test_zero_basis_makes_the_modes_agree(self):
         tenor, basis_nodes = _dual_instruments(0.0)
@@ -182,7 +182,7 @@ class TestModes:
 
 
 class TestForwardBasis:
-    """AC-7.3: the forward basis reproduces the spread that was fed in."""
+    """PRD-001 AC-7.3: the forward basis reproduces the spread that was fed in."""
 
     def test_the_forward_basis_matches_the_quoted_spread(self):
         quoted = 0.0025
@@ -206,7 +206,7 @@ class TestForwardBasis:
 
 
 class TestUnderdetermined:
-    """AC-7.4: a node with no instrument of its own is named, not guessed."""
+    """PRD-001 AC-7.4: a node with no instrument of its own is named, not guessed."""
 
     def test_two_instruments_on_one_node_refuses(self):
         tenor, basis_nodes = _dual_instruments(0.0005)

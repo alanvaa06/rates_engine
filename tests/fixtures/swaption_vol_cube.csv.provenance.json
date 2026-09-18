@@ -1,0 +1,9 @@
+{
+  "file": "swaption_vol_cube.csv",
+  "generated_by": "tests/fixtures/generate.py",
+  "generated_at": "2026-09-18T05:37:58.197579+00:00",
+  "seed": 20260916,
+  "data_quality": "synthetic",
+  "source": "Constructed by this generator; no market quote was copied.",
+  "note": "Normal volatility in basis points, strikes absolute. ATM levels and the sign of the skew are typical of the USD swaption grid, but every number is generated from vol(m) = atm * (1 + -0.03 m + 0.02 m^2) with m the strike offset in units of 100 bp. The shape is quadratic in moneyness, which SABR is not, so the residual in PRD-002 AC-3.2 measures the expansion's fit to a smile it did not produce. The 5y10y slice omits the -50 bp strike on purpose: that is the gap AC-3.1 fills."
+}

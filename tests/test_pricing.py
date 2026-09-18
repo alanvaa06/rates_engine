@@ -1,4 +1,4 @@
-"""AC-6.1 to AC-6.5: par prices at zero, signs mirror, and two curves stay apart."""
+"""PRD-001 AC-6.1 to PRD-001 AC-6.5: par prices at zero, signs mirror, and two curves stay apart."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ def _flat(as_of: date, rate: float, years: int = 6) -> DiscountCurve:
 
 
 class TestParPricesAtZero:
-    """AC-6.1: a swap struck at its own par rate is worth nothing."""
+    """PRD-001 AC-6.1: a swap struck at its own par rate is worth nothing."""
 
     def test_par_swap_prices_at_zero(self, par_swap, curve_set):
         assert abs(pv(par_swap, curve_set).value) < 1e-8 * par_swap.notional
@@ -49,7 +49,7 @@ class TestParPricesAtZero:
 
 
 class TestDV01Signs:
-    """AC-6.2: payer and receiver mirror each other exactly."""
+    """PRD-001 AC-6.2: payer and receiver mirror each other exactly."""
 
     def test_signs_are_opposite_and_magnitudes_equal(self, par_swap, curve_set):
         payer = dv01(replace(par_swap, side=Side.PAYER), curve_set).value
@@ -84,7 +84,7 @@ class TestDV01Signs:
 
 
 class TestMultiCurve:
-    """AC-6.3: the tenor curve projects, the OIS curve discounts, and collapsing them agrees."""
+    """PRD-001 AC-6.3: the tenor curve projects, the OIS curve discounts, and collapsing them agrees."""
 
     def test_with_no_basis_the_irs_matches_the_ois(self, as_of):
         curve = _flat(as_of, 0.04)
@@ -146,7 +146,7 @@ class TestMultiCurve:
 
 
 class TestFRA:
-    """AC-6.4: the FRA rate follows the projection curve, both branches."""
+    """PRD-001 AC-6.4: the FRA rate follows the projection curve, both branches."""
 
     def test_with_a_basis_it_differs_from_the_discount_forward(self, as_of):
         discount = _flat(as_of, 0.04)

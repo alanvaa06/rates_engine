@@ -5,14 +5,14 @@ helps if the refusal is legible, so this is the contract: every exception the
 library raises on purpose, what causes it, whether it is recoverable, and what
 to catch.
 
-There are seventeen exception classes plus the base. You almost never want to
+There are twenty-five exception classes plus the base. You almost never want to
 catch all of them, because they mean two different things — and the exit code
 says which.
 
 | It means | Recoverable | Do this | Exit code | Examples |
 | --- | --- | --- | --- | --- |
-| **Your inputs cannot support the calculation** | Yes, by changing the input | Supply the missing data, name a convention that exists, or declare the proxy you meant to use. Retrying unchanged is pointless. | `1` | `MissingFixingError`, `UnsupportedConventionError`, `InsufficientDataError`, `ProxySourceNotDeclaredError`, `MissingDependencyError` |
-| **The calculation is impossible or undefined on inputs that are fine** | No | Ask a different question, or relax the thing the message names. | `2` | `CurveArbitrageError`, `BootstrapResidualError`, `UnderdeterminedCurveError`, `NoTenorQuoteSourceError`, `IncompleteStripError`, `UndefinedDurationError`, `KeyTenorOutOfRangeError` |
+| **Your inputs cannot support the calculation** | Yes, by changing the input | Supply the missing data, name a convention that exists, or declare the proxy you meant to use. Retrying unchanged is pointless. | `1` | `MissingFixingError`, `UnsupportedConventionError`, `InsufficientDataError`, `ProxySourceNotDeclaredError`, `MissingDependencyError`, `IncompatibleDependencyError`, `ConfigurationError` |
+| **The calculation is impossible or undefined on inputs that are fine** | No | Ask a different question, or relax the thing the message names. | `2` | `CurveArbitrageError`, `BootstrapResidualError`, `UnderdeterminedCurveError`, `NoTenorQuoteSourceError`, `IncompleteStripError`, `UndefinedDurationError`, `KeyTenorOutOfRangeError`, `ShiftRequiredError`, `ExpansionBreakdownError`, `MissingForwardError`, `SliceNotQuotedError`, `CalibrationError` |
 
 Everything derives from `RatesEngineError`, so one `except` catches the lot:
 
@@ -110,6 +110,29 @@ Also raised for an unrecognised `long_end_source`: the only accepted value is
 An optional extra is needed for this path. Today that means YAML configs:
 `pip install "finport-ratesengine[config]"`. JSON configs need no extra, which
 is why they are the native format.
+
+### `IncompatibleDependencyError`
+
+**Exit code 1. Recoverable: install the version range the package pins.**
+
+An optional extra *is* installed, at a version this code does not speak. It
+subclasses `MissingDependencyError`, so one `except` still covers "the extra
+is not usable", and it exists separately because the two have different fixes.
+Telling someone to install what they already have sends them the wrong way —
+which is exactly what happened before this class existed: `rateng-mcp` reported
+"the MCP server needs the SDK" at an SDK that was installed, because mcp 2.x
+renamed `FastMCP` to `MCPServer` and the import looked in the 1.x place.
+
+### `ConfigurationError`
+
+**Exit code 1. Recoverable: pass the config.**
+
+A command that reads a configuration was called without one. Over the `rateng`
+CLI argparse makes this unreachable, because `--config` is required for every
+command that needs it. It exists for the MCP server, whose tools take the
+config as an optional argument: without this, calling `bootstrap` with no
+config would surface as whichever `KeyError` the handler hit first. `describe`
+and `list-instruments` are the two tools that answer without a config.
 
 ### `MarketDataError`
 
@@ -247,6 +270,91 @@ evidence chain:
 
 Read them with `rates_engine.diagnostics.all_warnings(result.evidence)`, or
 check `result.evidence.worst_quality`.
+
+---
+
+## Volatility and options
+
+### `VolUnitsError`
+
+**Exit code 1. Recoverable: quote the volatility in the units the call wants.**
+
+Two failures wearing one name, both worth orders of magnitude.
+
+A *relative* volatility was handed to something expecting an *absolute* one,
+or the reverse. There is no conversion between them — only the at-the-money
+equivalence `sigma_normal = sigma_lognormal * F`, which is the leading term of
+an expansion and is wrong away from the forward.
+`Volatility.atm_equivalent_normal` computes it and says so; nothing converts
+silently.
+
+Or the magnitude is implausible for the units declared: a normal volatility
+outside 0.1 to 1,000 basis points, or a lognormal one outside 5% to 500%. The
+lognormal floor is 5% rather than the 0.5% PRD-002 first proposed, because
+0.5% does not catch the mistake: swaption normal vols are 60 to 150 bp, which
+as decimals are 0.006 to 0.015, all of it above 0.005. A floor of 5% sits in
+the gap between the two populations.
+
+`Volatility.unchecked` skips the magnitude band — and only that band — for a
+genuinely extreme market or for testing the limits.
+
+### `ShiftRequiredError`
+
+**Exit code 2. Recoverable: shift the model, or quote normal volatility.**
+
+A lognormal model was asked for at a forward or strike at or below zero. Black
+and unshifted SABR take logarithms of both. This is not a hard case for the
+model, it is the wrong model; the market's answer is Bachelier, and SABR's is
+a shift.
+
+A strike of exactly zero under Black is *not* this error: the limit exists and
+is finite, so the call is worth the forward and the put is worth nothing.
+
+### `ExpansionBreakdownError`
+
+**Exit code 2. Not recoverable at these parameters.**
+
+Hagan's SABR implied volatility is an asymptotic expansion with error of order
+`nu^2 T`, and its `O(T)` correction is additive. At long expiries, high
+vol-of-vol and far strikes that correction can exceed the leading term and
+drive the result to or below zero. A negative volatility prices nothing, so
+the expansion is refused rather than passed on, and the message names the
+strike and expiry where the boundary was crossed.
+
+Shorten the expiry, lower `nu`, narrow the strikes, or use a model that solves
+SABR rather than expanding it. `density_diagnostics` maps the region, and
+`expansion_is_valid` tests one point.
+
+### `MissingForwardError`
+
+**Exit code 2. Recoverable: extend the projection curve, or shorten the cap.**
+
+A period of a cap or floor ends past the projection curve's last node. The
+curve will extrapolate a flat forward there, which is a defensible convention
+for a discount factor and not for an option: the caplet would be priced off a
+rate the market never quoted, inside a total that reports as complete.
+
+### `SliceNotQuotedError`
+
+**Exit code 2. Recoverable: quote the slice.**
+
+The volatility cube has no quotes at that expiry and tenor. Filling a strike
+inside a quoted smile is a model fitted to data; filling a whole missing slice
+would be a model fitted to a *different* slice, which is a larger claim than
+v2 makes. There is no interpolation across expiry or tenor.
+
+### `CalibrationError`
+
+**Exit code 2. Recoverable: supply more quotes, or loosen the tolerance.**
+
+A model could not be fitted: fewer quotes than parameters, inputs that do not
+align, or a fit outside the tolerance the caller set. The message carries the
+error achieved and the parameters reached, because a calibration that quietly
+returns its starting point is worse than one that refuses.
+
+### `VolatilityError`
+
+The parent of the volatility family.
 
 ---
 

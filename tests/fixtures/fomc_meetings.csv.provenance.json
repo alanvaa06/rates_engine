@@ -1,0 +1,10 @@
+{
+  "file": "fomc_meetings.csv",
+  "generated_by": "tests/fixtures/generate.py",
+  "generated_at": "2026-09-18T05:37:58.198389+00:00",
+  "seed": 20260916,
+  "data_quality": "synthetic",
+  "as_of": "2026-09-16",
+  "source": "Constructed by this generator; no exchange settlement was copied.",
+  "note": "Settlements are the arithmetic average (SR1) and daily-compounded (SR3) overnight rate under the step path (0.043, 0.0405, 0.038, 0.0365, 0.0355) with effective dates ['2026-11-05', '2026-12-17', '2027-01-28', '2027-03-18'], then rounded to the 0.0025 price tick. The rounding is deliberate: no step path reprices the rounded strip exactly, so the residual bounded by PRD-002 AC-4.2 is a real measurement. fomc_meetings.csv carries the path that generated them so a test can check recovery, not just fit."
+}

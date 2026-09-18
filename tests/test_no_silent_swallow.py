@@ -1,4 +1,4 @@
-"""AC-9.4: no handler in ``src/`` catches everything and says nothing.
+"""PRD-001 AC-9.4: no handler in ``src/`` catches everything and says nothing.
 
 ``except Exception: pass`` is the shape that turns a bug into a wrong number:
 the exception carried the only evidence that the computation did not happen,

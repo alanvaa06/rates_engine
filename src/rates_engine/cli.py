@@ -22,6 +22,7 @@ import argparse
 import json
 import sys
 import traceback
+from collections.abc import Callable
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -35,7 +36,11 @@ from rates_engine.curves.bootstrap import (
 )
 from rates_engine.curves.discount import CURVE_TIME_BASIS, CurveSet
 from rates_engine.curves.views import all_views
-from rates_engine.errors import MissingDependencyError, UndefinedDurationError
+from rates_engine.errors import (
+    ConfigurationError,
+    MissingDependencyError,
+    UndefinedDurationError,
+)
 from rates_engine.errors import __all__ as EXCEPTION_NAMES
 from rates_engine.evidence import DataQuality, Provenance
 from rates_engine.hedging import DEFAULT_SHOCKS_BP, SR3_DV01, shock_table, strip_hedge
@@ -52,6 +57,7 @@ from rates_engine.risk import (
     money_duration,
     pvbp,
 )
+from rates_engine.volatility.units import VolUnits
 
 __all__ = ["main", "build_parser", "load_config"]
 
@@ -102,6 +108,33 @@ def _as_date(value: str | date) -> date:
     if isinstance(value, date):
         return value
     return date.fromisoformat(value)
+
+
+def _require_config(config: dict[str, Any] | None, command: str) -> dict[str, Any]:
+    """The config, or a named refusal saying which command needed one.
+
+    Every handler in :data:`_COMMANDS` has the same signature so that the MCP
+    server can expose the table unchanged. Two of them genuinely take no
+    config; the other three go through here, so that calling them without one
+    is a sentence rather than whichever ``KeyError`` happens to come first.
+
+    Args:
+        config: The configuration mapping, or ``None``.
+        command: The command's name, for the message.
+
+    Returns:
+        The configuration mapping.
+
+    Raises:
+        ConfigurationError: ``config`` is ``None``.
+    """
+    if config is None:
+        raise ConfigurationError(
+            f"{command} needs a configuration and was given none. "
+            "describe and list-instruments are the two commands that answer "
+            "without one."
+        )
+    return config
 
 
 def _build_instruments(config: dict[str, Any], as_of: date) -> tuple[Any, ...]:
@@ -180,6 +213,47 @@ def _build_swap(config: dict[str, Any]) -> OISSwap:
     )
 
 
+def _command_list_instruments(_config: dict[str, Any] | None) -> dict[str, Any]:
+    """List the instruments this build can price, and what each one needs.
+
+    Exists so that the MCP tool of the same name has a command to be equal
+    to: PRD-002 AC-6.1 holds the server to returning exactly the payload of
+    the equivalent ``--json`` command, which requires the equivalent command
+    to exist.
+    """
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "result_type": "InstrumentCatalogue",
+        "linear": [
+            {"name": "OISSwap", "index": "compounded_sofr", "curves": ["discount"]},
+            {"name": "IRSwap", "index": "term_sofr", "curves": ["discount", "tenor"]},
+            {"name": "FRA", "index": "term_sofr", "curves": ["discount", "tenor"]},
+            {"name": "SOFRFuture1M", "settlement": "arithmetic_average", "dv01_usd": 41.67},
+            {"name": "SOFRFuture3M", "settlement": "daily_compounded", "dv01_usd": 25.0},
+        ],
+        "options": [
+            {
+                "name": "Swaption",
+                "style": "european",
+                "models": ["bachelier", "black"],
+                "numeraire": "swap_annuity",
+            },
+            {
+                "name": "CapFloor",
+                "style": "strip_of_european",
+                "models": ["bachelier", "black"],
+                "numeraire": "discounted_accrual",
+            },
+        ],
+        "not_implemented": {
+            "FixedRateBond": "v1.1; brings Macaulay and modified duration with it",
+            "Bermudan swaptions": "out of scope for v2",
+            "CMS": "out of scope for v2",
+        },
+        "evidence": None,
+    }
+
+
 def _command_describe(_config: dict[str, Any] | None) -> dict[str, Any]:
     """Describe the engine's surface without computing anything."""
     return {
@@ -188,11 +262,15 @@ def _command_describe(_config: dict[str, Any] | None) -> dict[str, Any]:
         "distribution": "finport-ratesengine",
         "import_name": "rates_engine",
         "console_script": "rateng",
-        "commands": ["bootstrap", "price", "hedge", "describe"],
+        "commands": ["bootstrap", "price", "hedge", "describe", "list-instruments"],
         "day_counts": ["ACT/360", "ACT/365F", "30/360"],
         "calendars": ["SIFMA_US"],
-        "interpolation": ["log_linear_df"],
+        "interpolation": ["log_linear_df", "monotone_convex"],
         "convexity_models": ["none", "ho_lee", "hull_white"],
+        "option_models": ["bachelier", "black"],
+        "volatility_units": [u.value for u in VolUnits],
+        "smile_model": "sabr_hagan_2002",
+        "parametric_curves": ["nelson_siegel", "fomc_step"],
         "curve_views": ["discount", "zero", "par", "forward"],
         "risk_measures": [
             "dv01",
@@ -215,8 +293,9 @@ def _command_describe(_config: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
-def _command_bootstrap(config: dict[str, Any]) -> dict[str, Any]:
+def _command_bootstrap(config: dict[str, Any] | None) -> dict[str, Any]:
     """Bootstrap the discount curve and export its four views."""
+    config = _require_config(config, "bootstrap")
     as_of = _as_date(config["as_of"])
     instruments = _build_instruments(config, as_of)
     result = bootstrap_discount_curve(
@@ -229,8 +308,9 @@ def _command_bootstrap(config: dict[str, Any]) -> dict[str, Any]:
     return result_payload(result, views=views.to_dict(), command="bootstrap")
 
 
-def _command_price(config: dict[str, Any]) -> dict[str, Any]:
+def _command_price(config: dict[str, Any] | None) -> dict[str, Any]:
     """Price the configured swap and report every risk measure that is defined."""
+    config = _require_config(config, "price")
     as_of = _as_date(config["as_of"])
     instruments = _build_instruments(config, as_of)
     boot = bootstrap_discount_curve(
@@ -272,8 +352,9 @@ def _command_price(config: dict[str, Any]) -> dict[str, Any]:
     return {**price.to_dict(), "measures": measures, "command": "price"}
 
 
-def _command_hedge(config: dict[str, Any]) -> dict[str, Any]:
+def _command_hedge(config: dict[str, Any] | None) -> dict[str, Any]:
     """Size the futures strip against the swap and shock the hedged position."""
+    config = _require_config(config, "hedge")
     as_of = _as_date(config["as_of"])
     instruments = _build_instruments(config, as_of)
     swap = _build_swap(config)
@@ -290,8 +371,9 @@ def _command_hedge(config: dict[str, Any]) -> dict[str, Any]:
     return result_payload(hedge, shock_table=table.to_dict(), command="hedge")
 
 
-_COMMANDS = {
+_COMMANDS: dict[str, Callable[[dict[str, Any] | None], dict[str, Any]]] = {
     "describe": _command_describe,
+    "list-instruments": _command_list_instruments,
     "bootstrap": _command_bootstrap,
     "price": _command_price,
     "hedge": _command_hedge,
@@ -311,10 +393,12 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     for name in _COMMANDS:
         sub = subparsers.add_parser(name, help=f"{name} command")
-        if name != "describe":
+        if name not in ("describe", "list-instruments"):
             sub.add_argument("--config", required=True, help="JSON or YAML configuration file")
         else:
-            sub.add_argument("--config", required=False, help="ignored by describe")
+            sub.add_argument(
+                "--config", required=False, help="ignored by describe and list-instruments"
+            )
         sub.add_argument(
             "--json",
             action="store_true",
@@ -337,7 +421,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         config = load_config(args.config) if args.config else None
-        payload = _COMMANDS[args.command](config)  # type: ignore[arg-type]
+        payload = _COMMANDS[args.command](config)
     except BaseException as exc:  # noqa: BLE001 - re-raised below unless --json
         if not args.json:
             raise

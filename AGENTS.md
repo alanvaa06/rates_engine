@@ -99,6 +99,55 @@ basis point on an ACT/360 simple forward is not a basis point on a
 continuously compounded zero rate. Neither is the correct one. Compare
 `hedge_ratio` against the quote basis, which is what it uses.
 
+**A volatility is never a bare float.** `Volatility(value, units)` carries
+its unit, and there is no conversion between normal and lognormal, because
+there is none to have: `atm_equivalent_normal` and `atm_equivalent_lognormal`
+are named for the at-the-money approximation they are, not for a conversion
+they are not. The magnitude band catches what is left — normal outside
+`[0.1, 1000]` bp or lognormal outside `[5%, 500%]` raises `VolUnitsError`.
+The lognormal floor is 5% rather than something smaller on purpose: swaption
+normal vols live at 60-150 bp, which as decimals are 0.006-0.015, so any
+floor below that lets the entire population of "normal passed as lognormal"
+through. `Volatility.unchecked()` exists for the genuinely extreme case.
+
+**The model follows from the units, not from an argument.** `optionpricing`
+picks Bachelier for a normal volatility and Black for a lognormal one. Pass
+the volatility you have; do not convert it to reach the model you wanted.
+
+**Black refuses a non-positive forward.** A lognormal model on a forward at
+or below zero has nothing to say, so it raises `ShiftRequiredError` and names
+the shift as the fix rather than returning a number. Bachelier is defined
+there and is the other answer.
+
+**SABR fills strikes inside a smile and nothing else.** `VolCube` raises
+`SliceNotQuotedError` for an expiry or tenor it does not quote. Interpolating
+across slices is a surface model, and v2 has not chosen one.
+
+**SABR's expansion can run out.** At long expiry and high vol of vol the
+`O(nu² T)` correction drives it negative, and it raises
+`ExpansionBreakdownError` rather than returning a volatility that prices
+nothing. `expansion_is_valid` asks the question without raising.
+
+**A term rate off a futures-fitted curve is not a traded term rate.** It is
+the expected average overnight rate, with no convexity adjustment. The
+number is returned; `TERM_RATE_CAVEAT` and a `Degradation` marking the result
+`assumed` come with it.
+
+**Changing the interpolation does not change the fit.** Both `log_linear_df`
+and `monotone_convex` reproduce the discrete forwards exactly, so both
+reprice every calibration instrument. They differ in the instantaneous
+forward *between* nodes, which no instrument constrains.
+`curves.compare_interpolations` measures that gap rather than declaring a
+winner.
+
+**An extra that is installed at the wrong version says so.** The MCP server
+is written against `mcp>=2.0,<3`, where the server class is `MCPServer`; it
+was `FastMCP` in 1.x. `IncompatibleDependencyError` names the range and what
+moved, and subclasses `MissingDependencyError` so one `except` still covers
+both. Reporting a version mismatch as an absent package sends you to
+reinstall what you already have — which this codebase did once, until CI
+caught it.
+
 **A Treasury par yield will not enter a bootstrap by accident.** Anything
 whose provenance says `data_quality="proxy"` raises
 `ProxySourceNotDeclaredError` unless you pass
@@ -132,14 +181,17 @@ installs no warning filter; `tests/test_import_side_effects.py` enforces both.
 | `errors` | Every deliberate refusal, each with an exit code |
 | `market` | Snapshots, the SOFR compounding rules, `file` and `fred` providers |
 | `instruments` | `OISSwap`, `IRSwap`, `FRA`, `SOFRFuture1M`, `SOFRFuture3M` |
-| `curves` | `DiscountCurve`, the bootstrap, the four views, the dual-curve solver |
+| `volatility` | `Volatility` and its units, Bachelier, Black, SABR, the cube |
+| `curves` | `DiscountCurve`, the bootstrap, the four views, the dual-curve solver, monotone convex, Nelson-Siegel and the FOMC step curve |
 | `convexity` | Ho-Lee and Hull-White adjustments, realised sigma |
-| `pricing` | `pv`, `par_rate`, `annuity`, parallel `dv01` |
-| `risk` | Key rate, duration conventions, convexity, and the stubs |
+| `pricing` | `pv`, `par_rate`, `annuity`, parallel `dv01`, `price_on_parametric` |
+| `optionpricing` | Forward swap rate, swaption annuity, swaption and cap/floor PV |
+| `risk` | Key rate, duration conventions, convexity, option greeks, and the stubs |
 | `hedging` | `strip_hedge`, `shock_table` |
 | `diagnostics` | Reading an evidence chain |
 | `reporting` | JSON payloads and error payloads |
-| `cli` | `rateng bootstrap / price / hedge / describe` |
+| `cli` | `rateng bootstrap / price / hedge / describe / list-instruments` |
+| `mcp_server` | `rateng-mcp`: the same five payloads over stdio |
 
 ## The CLI in one line
 
@@ -148,6 +200,17 @@ rateng describe --json                          # capabilities, no config needed
 rateng bootstrap --config c.json --json         # curve plus its four views
 rateng price --config c.json --json             # pv, par, annuity, every risk measure
 rateng hedge --config c.json --json             # contracts per period plus the shock table
+rateng list-instruments --json                  # what this build prices, and what each needs
+```
+
+The MCP server is the same five handlers over stdio, so a tool's answer is
+byte-identical to the corresponding `--json` command. It needs the `mcp`
+extra; without it, `rateng-mcp` says which extra installs it rather than
+raising `ModuleNotFoundError`.
+
+```bash
+pip install "finport-ratesengine[mcp]"
+rateng-mcp
 ```
 
 With `--json`, stdout is exactly one document and all narration goes to

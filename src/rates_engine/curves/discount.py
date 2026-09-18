@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from datetime import date
 
 from rates_engine.conventions.daycount import DayCount, year_fraction
+from rates_engine.curves.interpolation import MonotoneConvex
 from rates_engine.errors import CurveArbitrageError, UnsupportedConventionError
 
 __all__ = ["DiscountCurve", "CurveSet", "CURVE_TIME_BASIS"]
@@ -32,6 +33,20 @@ CURVE_TIME_BASIS = DayCount.ACT_365F
 interpolation variable should not inherit ACT/360's 365/360 stretch."""
 
 _COMPOUNDING = ("continuous", "annual", "simple")
+
+INTERPOLATIONS = ("log_linear_df", "monotone_convex")
+"""The interpolations a curve may declare.
+
+``log_linear_df``
+    Piecewise-constant instantaneous forwards. The v1 default, and the reason
+    the futures bootstrap is exact: a futures period is priced by a ratio of
+    discount factors, which a constant forward reproduces with no
+    interpolation error inside the period.
+``monotone_convex``
+    Hagan and West (2006). Continuous forwards that still integrate back to
+    the discrete ones exactly, so every calibration instrument reprices
+    either way and the two can be compared on the same fit.
+"""
 
 
 @dataclass(frozen=True)
@@ -56,10 +71,10 @@ class DiscountCurve:
             raise ValueError(f"{len(self.nodes)} nodes and {len(self.dfs)} discount factors")
         if not self.nodes:
             raise ValueError("a discount curve needs at least one node")
-        if self.interpolation != "log_linear_df":
+        if self.interpolation not in INTERPOLATIONS:
             raise UnsupportedConventionError(
                 f"interpolation {self.interpolation!r} is not implemented; "
-                "v1 supports 'log_linear_df'"
+                f"supported: {', '.join(INTERPOLATIONS)}"
             )
         previous_date = self.as_of
         for node, df in zip(self.nodes, self.dfs, strict=True):
@@ -138,6 +153,8 @@ class DiscountCurve:
         if day <= self.as_of:
             return 1.0
         target = self.time(day)
+        if self.interpolation == "monotone_convex":
+            return math.exp(self._monotone_convex.log_df(target))
         times, logs = self.node_times, self._log_dfs
         if target <= times[0]:
             return math.exp(logs[0] * target / times[0]) if times[0] else 1.0
@@ -156,6 +173,38 @@ class DiscountCurve:
     @property
     def _log_dfs(self) -> tuple[float, ...]:
         return tuple(math.log(df) for df in self.dfs)
+
+    @property
+    def _monotone_convex(self) -> MonotoneConvex:
+        """The Hagan-West interpolant over this curve's nodes."""
+        return MonotoneConvex(self.node_times, self._log_dfs)
+
+    def instantaneous_forward(self, day: date) -> float:
+        """The instantaneous forward rate at a date, as a decimal a year.
+
+        The quantity the two interpolations actually differ in: log-linear
+        holds it constant across each interval and jumps at the nodes, while
+        monotone convex makes it continuous. Discount factors at the nodes
+        are identical either way, so this is where a comparison has to look.
+
+        Args:
+            day: The date to evaluate at.
+
+        Returns:
+            The instantaneous forward on the curve's own time basis.
+        """
+        target = self.time(day)
+        if self.interpolation == "monotone_convex":
+            return self._monotone_convex.instantaneous_forward(target)
+        times, logs = self.node_times, self._log_dfs
+        if target <= times[0]:
+            return -logs[0] / times[0]
+        for left in range(len(times) - 1):
+            if times[left] <= target < times[left + 1]:
+                return -(logs[left + 1] - logs[left]) / (times[left + 1] - times[left])
+        if len(times) == 1:
+            return -logs[0] / times[0]
+        return -(logs[-1] - logs[-2]) / (times[-1] - times[-2])
 
     def zero(
         self,

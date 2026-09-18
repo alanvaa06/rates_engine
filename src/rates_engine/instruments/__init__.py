@@ -1,5 +1,6 @@
 """The linear instruments v1 prices: OIS, IRS, FRA and the two SOFR futures."""
 
+from rates_engine.instruments.capfloor import CapFloor, Caplet
 from rates_engine.instruments.cashflow import Cashflow
 from rates_engine.instruments.fra import FRA
 from rates_engine.instruments.futures import (
@@ -11,9 +12,12 @@ from rates_engine.instruments.futures import (
 )
 from rates_engine.instruments.side import Side, fixed_leg_sign
 from rates_engine.instruments.swaps import IRSwap, OISSwap
+from rates_engine.instruments.swaption import Swaption
 
 __all__ = [
     "BASIS_POINT",
+    "CapFloor",
+    "Caplet",
     "Cashflow",
     "FRA",
     "IRSwap",
@@ -23,5 +27,6 @@ __all__ = [
     "SR1_NOTIONAL",
     "SR3_NOTIONAL",
     "Side",
+    "Swaption",
     "fixed_leg_sign",
 ]

@@ -1,4 +1,4 @@
-"""AC-9.6: every public name is documented, and numeric parameters carry units.
+"""PRD-001 AC-9.6: every public name is documented, and numeric parameters carry units.
 
 The units half is the one that earns its keep. A rate without a compounding
 basis and a DV01 quoted per percent are the two ways this kind of library is

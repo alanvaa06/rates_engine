@@ -1,4 +1,4 @@
-"""AC-9.2 and AC-9.3: one document on stdout, narration on stderr, exit codes that mean something."""
+"""PRD-001 AC-9.2 and PRD-001 AC-9.3: one document on stdout, narration on stderr, exit codes that mean something."""
 
 from __future__ import annotations
 
@@ -68,7 +68,7 @@ def _run(*args: str) -> subprocess.CompletedProcess[str]:
 
 
 class TestStdoutIsOneDocument:
-    """AC-9.2: exactly one JSON document, and no narration mixed into it."""
+    """PRD-001 AC-9.2: exactly one JSON document, and no narration mixed into it."""
 
     @pytest.mark.parametrize("command", ["bootstrap", "price", "hedge"])
     def test_stdout_parses_as_one_document(self, command, config_path):
@@ -81,7 +81,9 @@ class TestStdoutIsOneDocument:
     def test_describe_needs_no_config(self):
         done = _run("describe", "--json")
         assert done.returncode == 0
-        assert json.loads(done.stdout)["commands"] == ["bootstrap", "price", "hedge", "describe"]
+        assert json.loads(done.stdout)["commands"] == [
+            "bootstrap", "price", "hedge", "describe", "list-instruments",
+        ]
 
     def test_narration_goes_to_stderr(self, config_path):
         done = _run("bootstrap", "--config", str(config_path))
@@ -162,7 +164,7 @@ class TestCommands:
 
 
 class TestFailures:
-    """AC-9.3: a failure before a result is still one document, with a code."""
+    """PRD-001 AC-9.3: a failure before a result is still one document, with a code."""
 
     def test_a_missing_file_is_exit_one_with_a_document(self, tmp_path):
         done = _run("bootstrap", "--config", str(tmp_path / "nope.json"), "--json")

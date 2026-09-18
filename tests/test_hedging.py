@@ -1,4 +1,4 @@
-"""AC-8.3 and AC-8.4: the shock table, and the refusal when the strip has a hole."""
+"""PRD-001 AC-8.3 and PRD-001 AC-8.4: the shock table, and the refusal when the strip has a hole."""
 
 from __future__ import annotations
 
@@ -68,7 +68,7 @@ class TestSizing:
 
 
 class TestIncompleteStrip:
-    """AC-8.4: a gap is named, never extrapolated over."""
+    """PRD-001 AC-8.4: a gap is named, never extrapolated over."""
 
     def test_a_strip_that_stops_short_refuses(self, par_swap, strip, as_of):
         short = tuple(i for i in strip if not isinstance(i, FuturesNode) or i.label != "SR3-9")
@@ -101,7 +101,7 @@ class TestIncompleteStrip:
 
 
 class TestShockTable:
-    """AC-8.3: every column the table promises, and the residual behaving."""
+    """PRD-001 AC-8.3: every column the table promises, and the residual behaving."""
 
     @pytest.fixture
     def table(self, par_swap, strip, as_of):
@@ -164,7 +164,7 @@ class TestShockTable:
 
 
 class TestConvexityReconciliation:
-    """AC-10.10: DV01 and money convexity reproduce the full reprice."""
+    """PRD-001 AC-10.10: DV01 and money convexity reproduce the full reprice."""
 
     def test_the_swap_pnl_is_dv01_plus_half_convexity(self, par_swap, strip, curve_set, as_of):
         from rates_engine.pricing import dv01
