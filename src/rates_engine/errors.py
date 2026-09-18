@@ -46,6 +46,7 @@ __all__ = [
     "NoTenorQuoteSourceError",
     "HedgeError",
     "IncompleteStripError",
+    "PolicyBreachError",
     "RiskError",
     "UndefinedDurationError",
     "KeyTenorOutOfRangeError",
@@ -271,6 +272,22 @@ class IncompleteStripError(HedgeError):
 
     Names the period. A missing contract is never extrapolated from its
     neighbours: the hedge would be reported as complete when it is not.
+    """
+
+
+class PolicyBreachError(HedgeError):
+    """A proposal is well-formed and the programme forbids it anyway.
+
+    Distinct from :class:`ConfigurationError`, which is the programme
+    failing to load: here the policy file was read and understood, the
+    proposed hedge is a perfectly good hedge, and the two disagree. Exit
+    code 2 rather than 1 for the reason the base class gives — nothing about
+    the inputs is fixable by correcting them, because neither is wrong.
+
+    Raised only by ``audit_hedge(..., strict=True)``. The default is to
+    return the findings, because whether a breach stops the trade is a
+    treasury decision and not this package's to make; ``strict`` is how a
+    caller says it has already made that decision.
     """
 
 

@@ -12,7 +12,7 @@ says which.
 | It means | Recoverable | Do this | Exit code | Examples |
 | --- | --- | --- | --- | --- |
 | **Your inputs cannot support the calculation** | Yes, by changing the input | Supply the missing data, name a convention that exists, or declare the proxy you meant to use. Retrying unchanged is pointless. | `1` | `MissingFixingError`, `UnsupportedConventionError`, `InsufficientDataError`, `ProxySourceNotDeclaredError`, `ImplausibleInputError`, `MissingDependencyError`, `IncompatibleDependencyError`, `ConfigurationError`, `DeltaConventionError` |
-| **The calculation is impossible or undefined on inputs that are fine** | No | Ask a different question, or relax the thing the message names. | `2` | `CurveArbitrageError`, `CurveMismatchError`, `BootstrapResidualError`, `UnderdeterminedCurveError`, `NoTenorQuoteSourceError`, `IncompleteStripError`, `UnresolvedConventionError`, `UndefinedDurationError`, `KeyTenorOutOfRangeError`, `CurrencyMismatchError`, `ShiftRequiredError`, `ExpansionBreakdownError`, `MissingForwardError`, `SliceNotQuotedError`, `CalibrationError` |
+| **The calculation is impossible or undefined on inputs that are fine** | No | Ask a different question, or relax the thing the message names. | `2` | `CurveArbitrageError`, `CurveMismatchError`, `BootstrapResidualError`, `UnderdeterminedCurveError`, `NoTenorQuoteSourceError`, `IncompleteStripError`, `PolicyBreachError`, `UnresolvedConventionError`, `UndefinedDurationError`, `KeyTenorOutOfRangeError`, `CurrencyMismatchError`, `ShiftRequiredError`, `ExpansionBreakdownError`, `MissingForwardError`, `SliceNotQuotedError`, `CalibrationError` |
 
 Everything derives from `RatesEngineError`, so one `except` catches the lot:
 
@@ -155,6 +155,16 @@ command that needs it. It exists for the MCP server, whose tools take the
 config as an optional argument: without this, calling `bootstrap` with no
 config would surface as whichever `KeyError` the handler hit first. `describe`
 and `list-instruments` are the two tools that answer without a config.
+
+Also raised by `load_program` for a policy file this engine cannot read: an
+unknown key, a missing required one, a rebalance frequency that is not one
+of the four, a value that will not coerce, or an `allowed_instruments` entry
+naming a structure the engine does not build. Every one of those is the same
+mistake — the file says something the engine cannot act on — and every one is
+fixed by editing the file.
+
+A proposal the programme *forbids* is not one of them; that is
+`PolicyBreachError`, below.
 
 ### `UnresolvedConventionError`
 
@@ -309,9 +319,28 @@ neighbours, because the hedge would then report as complete when it is not.
 
 Pass `require_full_coverage=False` when a partial hedge is what you want.
 
+### `PolicyBreachError`
+
+**Exit code 2. Not recoverable by changing the input: neither input is wrong.**
+
+`audit_hedge(..., strict=True)` and the proposal departs from the programme —
+outside the discretion band, or an instrument the policy does not permit. The
+message carries every non-informational finding.
+
+It is deliberately not a `ConfigurationError`, which it used to be. The two
+need opposite responses: a `ConfigurationError` from `load_program` means the
+policy file is unreadable and you fix the file, while this means the file was
+read and understood, the hedge is a perfectly good hedge, and the two
+disagree — you change the trade, or you get the mandate changed. Catching one
+must not catch the other.
+
+The default is to report rather than refuse. Whether a breach stops a trade
+is a treasury decision and not this package's to make; `strict=True` is how a
+caller says it has already made that decision.
+
 ### `HedgeError`
 
-The parent.
+The parent of both of the above.
 
 ---
 

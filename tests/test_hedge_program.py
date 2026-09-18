@@ -17,7 +17,12 @@ import json
 
 import pytest
 
-from rates_engine.errors import ConfigurationError, RatesEngineError
+from rates_engine.errors import (
+    ConfigurationError,
+    HedgeError,
+    PolicyBreachError,
+    RatesEngineError,
+)
 from rates_engine.evidence import DataQuality
 from rates_engine.hedge_program import (
     HedgeProgram,
@@ -207,16 +212,35 @@ class TestStrictAuditing:
     """The report becomes a refusal when the caller asks."""
 
     def test_strict_refuses_on_a_violation(self, program):
-        with pytest.raises(ConfigurationError) as excinfo:
+        with pytest.raises(PolicyBreachError) as excinfo:
             audit_hedge(program, 0.30, strict=True)
         assert "departs from programme 'treasury_2026'" in str(excinfo.value)
+
+    def test_a_breach_is_not_a_malformed_programme(self, program):
+        """Deep review: this used to raise `ConfigurationError`, the same
+        refusal as an unreadable policy file. The two need different
+        handling — one is fixed by editing the file, the other by changing
+        the trade — so catching one must not catch the other."""
+        with pytest.raises(PolicyBreachError) as excinfo:
+            audit_hedge(program, 0.30, strict=True)
+        assert not isinstance(excinfo.value, ConfigurationError)
+        assert isinstance(excinfo.value, HedgeError)
+        assert excinfo.value.exit_code == 2
+
+    def test_a_malformed_ratio_is_still_a_configuration_error(self, program):
+        """The other half: the argument being out of range is a caller
+        mistake, and it keeps the exit code that says so."""
+        with pytest.raises(ConfigurationError) as excinfo:
+            audit_hedge(program, 1.4, strict=True)
+        assert not isinstance(excinfo.value, PolicyBreachError)
+        assert excinfo.value.exit_code == 1
 
     def test_strict_passes_when_compliant(self, program):
         audit = audit_hedge(program, 0.85, proposed_instrument="collar", strict=True)
         assert audit.compliant
 
     def test_the_refusal_carries_the_messages(self, program):
-        with pytest.raises(ConfigurationError) as excinfo:
+        with pytest.raises(PolicyBreachError) as excinfo:
             audit_hedge(program, 0.30, proposed_instrument="seagull", strict=True)
         message = str(excinfo.value)
         assert "outside the programme" in message

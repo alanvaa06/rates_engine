@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
-from rates_engine.errors import ConfigurationError
+from rates_engine.errors import ConfigurationError, PolicyBreachError
 from rates_engine.evidence import DataQuality, Degradation, Evidence
 from rates_engine.hedging_structures import STRUCTURE_NAMES
 from rates_engine.results import EngineResult
@@ -288,8 +288,11 @@ def audit_hedge(
         The :class:`ProgramAudit`.
 
     Raises:
-        ConfigurationError: ``strict`` is set and the proposal departs from
-            the programme, or ``proposed_ratio`` is not a fraction.
+        ConfigurationError: ``proposed_ratio`` is not a fraction in [0, 1].
+        PolicyBreachError: ``strict`` is set and the proposal departs from
+            the programme. Separate from the above because nothing here is
+            malformed: the programme loaded, the hedge is a good hedge, and
+            the two disagree.
     """
     if not 0.0 <= proposed_ratio <= 1.0:
         raise ConfigurationError(
@@ -375,7 +378,7 @@ def audit_hedge(
     compliant = all(v.severity is Severity.INFO for v in ordered)
 
     if strict and not compliant:
-        raise ConfigurationError(
+        raise PolicyBreachError(
             f"the proposed hedge departs from programme {program.name!r}: "
             + "; ".join(v.message for v in ordered if v.severity is not Severity.INFO)
         )
