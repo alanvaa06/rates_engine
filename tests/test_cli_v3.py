@@ -15,7 +15,8 @@ from datetime import date
 
 import pytest
 
-from rates_engine import cli, mcp_server
+from rates_engine import mcp_server
+from rates_engine.app import commands
 from rates_engine.reporting.payloads import dumps
 
 AS_OF = date(2026, 9, 16)
@@ -186,14 +187,14 @@ class TestTheyReachMCPUnchanged:
 
     @pytest.mark.parametrize("name", ["fx-forward", "hedge-structures"])
     def test_the_tool_is_the_command(self, name):
-        assert mcp_server.TOOLS[name] is cli._COMMANDS[name]
+        assert mcp_server.TOOLS[name] is commands.COMMANDS[name]
 
     def test_the_hedge_description_says_it_does_not_recommend(self):
         assert "does not recommend" in mcp_server.TOOL_DESCRIPTIONS["hedge-structures"]
 
     @pytest.mark.parametrize("name", ["fx-forward", "hedge-structures"])
     def test_calling_without_a_config_refuses_by_name(self, name):
-        from rates_engine.errors import ConfigurationError
+        from rates_engine.core.errors import ConfigurationError
 
         with pytest.raises(ConfigurationError, match=name):
             mcp_server.call_tool(name)
@@ -201,5 +202,5 @@ class TestTheyReachMCPUnchanged:
     def test_the_document_is_the_same_twice(self, config_path):
         config = json.loads(config_path.read_text())
         assert mcp_server.call_tool("fx-forward", config) == dumps(
-            cli._COMMANDS["fx-forward"](config)
+            commands.COMMANDS["fx-forward"](config)
         )

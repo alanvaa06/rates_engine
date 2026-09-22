@@ -35,12 +35,12 @@ from datetime import date
 from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
 
-from rates_engine.errors import ImplausibleInputError
-from rates_engine.evidence import Evidence
-from rates_engine.fx import garman_kohlhagen as gk
-from rates_engine.fx.quote import CurrencyPair
-from rates_engine.results import EngineResult
-from rates_engine.volatility.kinds import OptionKind
+from rates_engine.conventions.currency_pair import CurrencyPair
+from rates_engine.conventions.option_kind import OptionKind
+from rates_engine.core.errors import ImplausibleInputError
+from rates_engine.core.evidence import Evidence
+from rates_engine.core.results import EngineResult
+from rates_engine.models import garman_kohlhagen as gk
 
 __all__ = [
     "STRUCTURE_NAMES",
@@ -68,7 +68,7 @@ STRUCTURE_NAMES: frozenset[str] = frozenset(
 )
 """Every structure :func:`compare_structures` builds.
 
-Exported so that :mod:`rates_engine.hedge_program` can validate the names a
+Exported so that :mod:`rates_engine.hedging.program` can validate the names a
 policy permits against the names that exist, rather than the two modules
 agreeing by coincidence across a string literal.
 """
@@ -169,7 +169,7 @@ class ReadableSmile(Protocol):
     """A volatility source that reports where its number came from.
 
     Structural rather than nominal so that this module does not depend on
-    :mod:`rates_engine.fx.vannavolga`'s concrete class — and so a test can
+    :mod:`rates_engine.volatility.fx_smile`'s concrete class — and so a test can
     supply a two-line stand-in.
     """
 
@@ -190,7 +190,7 @@ class StructureQuote:
         volatility: One of three things. A ``float`` is a single lognormal
             volatility for every leg. A :class:`ReadableSmile` — anything
             with ``volatility_at(strike)`` returning a reading, which is
-            what :class:`~rates_engine.fx.vannavolga.VannaVolgaSmile` is —
+            what :class:`~rates_engine.volatility.fx_smile.VannaVolgaSmile` is —
             prices each leg on its own point of the smile *and* carries
             that reading's evidence, which is the honest way to price a
             collar. A bare callable returning a float also works and is the

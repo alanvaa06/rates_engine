@@ -23,12 +23,13 @@ import pytest
 
 from rates_engine.conventions.calendar import BMV
 from rates_engine.conventions.daycount import DayCount, year_fraction
+from rates_engine.conventions.indices import TIIE_DAY_COUNT, TIIE_PERIOD_DAYS, UNRESOLVED_MXN
+from rates_engine.core.errors import RatesEngineError, UnresolvedConventionError
+from rates_engine.core.evidence import DataQuality
+from rates_engine.core.money import Currency
 from rates_engine.curves.bootstrap import ParSwapNode, RealizedStubNode
 from rates_engine.curves.discount import CurveSet
 from rates_engine.curves.mxn import (
-    TIIE_DAY_COUNT,
-    TIIE_PERIOD_DAYS,
-    UNRESOLVED_MXN,
     MXNCurveResult,
     TIIEBenchmark,
     bootstrap_mxn_curve,
@@ -36,9 +37,6 @@ from rates_engine.curves.mxn import (
     tiie_par_swap_node,
     tiie_schedule,
 )
-from rates_engine.errors import RatesEngineError, UnresolvedConventionError
-from rates_engine.evidence import DataQuality
-from rates_engine.money import Currency
 
 AS_OF = date(2026, 9, 16)
 FLAT = 0.0950
@@ -177,9 +175,9 @@ class TestTheBootstrapArithmetic:
 
     def test_a_peso_curve_will_not_discount_a_dollar_flow(self):
         """The currency carried in phase 0, doing its job on a real curve."""
-        from rates_engine.errors import CurrencyMismatchError
+        from rates_engine.core.errors import CurrencyMismatchError
         from rates_engine.instruments.cashflow import Cashflow
-        from rates_engine.pricing import pv
+        from rates_engine.pricing.linear import pv
 
         flow = Cashflow(
             payment_date=AS_OF + timedelta(days=28),
@@ -298,8 +296,9 @@ class TestTheUnresolvedConventions:
     def test_anything_priced_on_the_curve_inherits_that(self):
         """The evidence chain is the mechanism, and this is the test that it
         is actually connected rather than decorative."""
-        from rates_engine.instruments.swaps import OISSwap, Side
-        from rates_engine.pricing import pv
+        from rates_engine.conventions.side import Side
+        from rates_engine.instruments.swaps import OISSwap
+        from rates_engine.pricing.linear import pv
 
         result = _curve()
         swap = OISSwap(

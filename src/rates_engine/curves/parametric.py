@@ -34,13 +34,13 @@ from typing import Any
 import numpy as np
 from scipy.optimize import minimize_scalar
 
-from rates_engine.conventions.calendar import SIFMA_US, SIFMAUSCalendar
+from rates_engine.conventions.calendar import SIFMA_US, HolidayCalendar
 from rates_engine.conventions.daycount import year_fraction
+from rates_engine.core.errors import CalibrationError, UnderdeterminedCurveError
+from rates_engine.core.evidence import DataQuality, Degradation, Evidence
+from rates_engine.core.money import Currency
+from rates_engine.core.results import EngineResult
 from rates_engine.curves.discount import CURVE_TIME_BASIS, DiscountCurve
-from rates_engine.errors import CalibrationError, UnderdeterminedCurveError
-from rates_engine.evidence import DataQuality, Degradation, Evidence
-from rates_engine.money import Currency
-from rates_engine.results import EngineResult
 
 __all__ = [
     "NelsonSiegel",
@@ -362,7 +362,7 @@ class FOMCStepCurve:
         return total / (end - start).days
 
     def term_rate(
-        self, start: date, months: int, *, calendar: SIFMAUSCalendar = SIFMA_US
+        self, start: date, months: int, *, calendar: HolidayCalendar = SIFMA_US
     ) -> float:
         """The compounded overnight rate over a term, with the caveat attached.
 

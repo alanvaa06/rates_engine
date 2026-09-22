@@ -19,16 +19,16 @@ from datetime import date, timedelta
 
 import pytest
 
+from rates_engine.conventions.currency_pair import USDMXN, CurrencyPair
+from rates_engine.core.errors import CurrencyMismatchError, ImplausibleInputError
+from rates_engine.core.money import Currency
 from rates_engine.curves.discount import DiscountCurve
-from rates_engine.errors import CurrencyMismatchError, ImplausibleInputError
-from rates_engine.fx.forward import (
+from rates_engine.pricing.fx_forward import (
     CIP_BROKEN_NOTE,
     MAX_PLAUSIBLE_BASIS_BP,
     forward_from_curves,
     implied_basis,
 )
-from rates_engine.fx.quote import USDMXN, CurrencyPair
-from rates_engine.money import Currency
 
 AS_OF = date(2026, 9, 16)
 SPOT = 18.50
@@ -157,7 +157,7 @@ class TestTheBasisIsKeptSeparate:
     def test_the_leg_is_named_in_the_payload(self, usd, mxn, delivery):
         """A sign nobody can check is a sign nobody should trust, so the
         leg the spread sits on travels with the number."""
-        from rates_engine.fx.forward import BASIS_LEG
+        from rates_engine.pricing.fx_forward import BASIS_LEG
 
         payload = forward_from_curves(
             USDMXN, SPOT, delivery, mxn, usd, basis_bp=-25.0
@@ -257,7 +257,7 @@ class TestTheCurvesMustDescribeTheSameMarket:
     """Two valuation dates make a forward that is part forward, part stale."""
 
     def test_curves_as_of_different_dates_refuse(self, usd, delivery):
-        from rates_engine.errors import CurveMismatchError
+        from rates_engine.core.errors import CurveMismatchError
 
         stale = DiscountCurve(
             AS_OF - timedelta(days=178),
@@ -270,7 +270,7 @@ class TestTheCurvesMustDescribeTheSameMarket:
         assert "part forward and part stale" in str(excinfo.value)
 
     def test_the_inverse_checks_it_too(self, usd, delivery):
-        from rates_engine.errors import CurveMismatchError
+        from rates_engine.core.errors import CurveMismatchError
 
         stale = DiscountCurve(
             AS_OF - timedelta(days=178),
@@ -345,7 +345,7 @@ class TestSerialisation:
         json.dumps(forward_from_curves(USDMXN, SPOT, delivery, mxn, usd).to_dict())
 
     def test_curve_evidence_chains_in(self, usd, mxn, delivery):
-        from rates_engine.evidence import Evidence
+        from rates_engine.core.evidence import Evidence
 
         source = Evidence(produced_by="test.curve")
         result = forward_from_curves(

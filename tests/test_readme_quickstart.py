@@ -65,7 +65,7 @@ def test_every_name_a_fragment_uses_is_one_the_package_exports(readme):
     # The failure this catches is a fragment quietly going stale: it renames
     # nothing and still refers to an attribute that no longer exists.
     import rates_engine
-    from rates_engine import diagnostics
+    from rates_engine.core import diagnostics
 
     for block in _python_blocks(readme):
         if _is_complete_program(block):
@@ -96,7 +96,7 @@ def test_the_quickstart_prints_what_the_readme_claims(readme, tmp_path):
 def test_every_bash_command_in_the_readme_is_one_this_package_offers(readme):
     # Read the command set from the CLI's own table rather than repeating it
     # here, so adding a command cannot leave this test asserting the old one.
-    from rates_engine.cli import _COMMANDS
+    from rates_engine.app.commands import COMMANDS as _COMMANDS
 
     commands = re.findall(r"^rateng ([\w-]+)", readme, flags=re.MULTILINE)
     assert commands, "the README shows no CLI usage"

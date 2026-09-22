@@ -30,7 +30,9 @@ closed form, so discount factors come from arithmetic rather than quadrature.
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from dataclasses import dataclass
+from functools import cached_property
 
 __all__ = ["MonotoneConvex", "discrete_forwards", "node_forwards"]
 
@@ -220,12 +222,18 @@ class MonotoneConvex:
     log_dfs: tuple[float, ...]
     collar: bool = True
 
-    @property
+    def __post_init__(self) -> None:
+        # Tuples, so the cached forwards and integrals cannot outlive a
+        # mutation of the caller's lists.
+        object.__setattr__(self, "times", tuple(self.times))
+        object.__setattr__(self, "log_dfs", tuple(self.log_dfs))
+
+    @cached_property
     def discrete(self) -> tuple[float, ...]:
         """Average forward over each interval."""
         return discrete_forwards(self.times, self.log_dfs)
 
-    @property
+    @cached_property
     def nodes(self) -> tuple[float, ...]:
         """Instantaneous forward at time zero and at each node."""
         return node_forwards(self.times, self.discrete, collar=self.collar)
@@ -243,25 +251,43 @@ class MonotoneConvex:
         """
         if time <= 0.0:
             return 0.0
-        grid = (0.0, *self.times)
-        discrete, node = self.discrete, self.nodes
         if time >= self.times[-1]:
-            tail = node[-1]
+            tail = self.nodes[-1]
             return self.log_dfs[-1] - tail * (time - self.times[-1])
+        # The interval holding ``time``, found by bisection, plus the running
+        # sum of every whole interval before it. The prefix sums accumulate in
+        # the same order the per-call loop did, so the result is bit-identical;
+        # the loop just no longer runs on every discount factor.
+        grid = self._grid
+        index = bisect_right(grid, time)
+        left, right = grid[index - 1], grid[index]
+        span = right - left
+        f_d = self.discrete[index - 1]
+        g0, g1 = self.nodes[index - 1] - f_d, self.nodes[index] - f_d
+        x = (time - left) / span
+        total = self._whole_intervals[index - 1]
+        total += f_d * (time - left) + span * _g_integral(g0, g1, x)
+        return -total
 
+    @cached_property
+    def _grid(self) -> tuple[float, ...]:
+        """Interval endpoints, starting at the valuation date."""
+        return (0.0, *self.times)
+
+    @cached_property
+    def _whole_intervals(self) -> tuple[float, ...]:
+        """Running integral of the forward over whole intervals, ``[0, t_k]``."""
+        grid, discrete, node = self._grid, self.discrete, self.nodes
+        sums = [0.0]
         total = 0.0
         for index in range(1, len(grid)):
             left, right = grid[index - 1], grid[index]
             span = right - left
             f_d = discrete[index - 1]
             g0, g1 = node[index - 1] - f_d, node[index] - f_d
-            if time >= right:
-                total += f_d * span + span * _g_integral(g0, g1, 1.0)
-                continue
-            x = (time - left) / span
-            total += f_d * (time - left) + span * _g_integral(g0, g1, x)
-            break
-        return -total
+            total += f_d * span + span * _g_integral(g0, g1, 1.0)
+            sums.append(total)
+        return tuple(sums)
 
     def instantaneous_forward(self, time: float) -> float:
         """The instantaneous forward at a time, for inspecting smoothness.
@@ -272,14 +298,14 @@ class MonotoneConvex:
         Returns:
             The instantaneous forward rate as a decimal.
         """
-        grid = (0.0, *self.times)
         discrete, node = self.discrete, self.nodes
         if time >= self.times[-1]:
             return node[-1]
-        for index in range(1, len(grid)):
+        grid = self._grid
+        index = bisect_right(grid, time)
+        if index > 0:
             left, right = grid[index - 1], grid[index]
-            if left <= time < right:
-                f_d = discrete[index - 1]
-                g0, g1 = node[index - 1] - f_d, node[index] - f_d
-                return f_d + _g_value(g0, g1, (time - left) / (right - left))
+            f_d = discrete[index - 1]
+            g0, g1 = node[index - 1] - f_d, node[index] - f_d
+            return f_d + _g_value(g0, g1, (time - left) / (right - left))
         return node[-1]  # pragma: no cover - covered by the tail branch above

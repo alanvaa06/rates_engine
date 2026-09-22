@@ -11,17 +11,14 @@ from pathlib import Path
 
 import pytest
 
-from rates_engine.conventions import imm_date, next_imm_on_or_after
-from rates_engine.curves import (
-    CurveSet,
-    FuturesNode,
-    RealizedStubNode,
-    bootstrap_discount_curve,
-)
-from rates_engine.instruments import OISSwap, Side
-from rates_engine.market import load_series_csv, load_snapshot_csv
+from rates_engine.conventions.schedule import imm_date, next_imm_on_or_after
+from rates_engine.conventions.side import Side
+from rates_engine.curves.bootstrap import FuturesNode, RealizedStubNode, bootstrap_discount_curve
+from rates_engine.curves.discount import CurveSet
+from rates_engine.instruments.swaps import OISSwap
+from rates_engine.market.providers.file import load_series_csv, load_snapshot_csv
 from rates_engine.market.snapshot import MarketSnapshot
-from rates_engine.pricing import par_rate
+from rates_engine.pricing.linear import par_rate
 
 FIXTURES = Path(__file__).parent / "fixtures"
 CME_PUBLISHED = FIXTURES / "cme_published"
@@ -173,7 +170,7 @@ def option_curve():
     import math
     from datetime import timedelta
 
-    from rates_engine.curves import DiscountCurve
+    from rates_engine.curves.discount import DiscountCurve
 
     nodes = tuple(AS_OF + timedelta(days=365 * k) for k in range(1, 16))
     return DiscountCurve(AS_OF, nodes, tuple(math.exp(-0.04 * k) for k in range(1, 16)))
@@ -209,7 +206,7 @@ def atm_swaption(underlying_swap, forward_swap_rate):
     """An at-the-money payer swaption on the 5y10y."""
     from datetime import timedelta
 
-    from rates_engine.instruments import Swaption
+    from rates_engine.instruments.swaption import Swaption
 
     return Swaption(
         expiry=AS_OF + timedelta(days=365 * 5),

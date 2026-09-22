@@ -10,8 +10,8 @@ on the dollar curve produces a number. Adding a dollar present value to a
 peso one produces a number. Neither raises, and the evidence chain — the
 whole argument of this package — records nothing, because nothing in it
 ever knew what a currency was. Both now refuse:
-:func:`rates_engine.pricing.pv` checks each flow against the curve that
-discounts it, and :meth:`rates_engine.pricing.PriceResult.__add__` checks
+:func:`rates_engine.pricing.linear.pv` checks each flow against the curve that
+discounts it, and :meth:`rates_engine.pricing.linear.PriceResult.__add__` checks
 the two units.
 
 The fix is the one v2 used for volatility units: the type carries the fact,
@@ -20,13 +20,13 @@ default is :data:`Currency.USD`, which is what keeps the change additive —
 every v1 and v2 call means exactly what it meant before, and the existing
 test suite is the regression test for that claim.
 
-**Not a second home for the refusal.** :class:`~rates_engine.errors.
+**Not a second home for the refusal.** :class:`~rates_engine.core.errors.
 CurrencyMismatchError` is imported here and raised from here, and is *not*
 in this module's ``__all__``: every refusal has one documented home.
 
 **What this is not.** Not FX conversion. Nothing here turns pesos into
 dollars; that needs a rate, a date and a quoting convention, and it lives
-in :mod:`rates_engine.fx`. This module only lets two amounts say whether
+in :mod:`rates_engine.pricing.fx_forward`. This module only lets two amounts say whether
 they are commensurable, and refuses when they are not.
 """
 
@@ -34,11 +34,11 @@ from __future__ import annotations
 
 from enum import StrEnum
 
-from rates_engine.errors import CurrencyMismatchError
+from rates_engine.core.errors import CurrencyMismatchError
 
 __all__ = ["Currency", "require_same_currency"]
 # CurrencyMismatchError is imported for use, not re-exported: every refusal
-# has exactly one documented home, which is rates_engine.errors.
+# has exactly one documented home, which is rates_engine.core.errors.
 
 
 class Currency(StrEnum):
@@ -78,6 +78,6 @@ def require_same_currency(left: Currency, right: Currency, *, operation: str) ->
         raise CurrencyMismatchError(
             f"{operation} needs one currency and got two: {left.value} and {right.value}. "
             "There is no implicit conversion here — a rate, a date and a quoting "
-            "convention are needed for that, and rates_engine.fx is where they live."
+            "convention are needed for that, and rates_engine.pricing.fx_forward is where they live."
         )
     return left

@@ -1,17 +1,13 @@
-"""Present value, par rate, annuity and the parallel DV01.
+"""Present value, par rate and annuity of linear instruments.
 
 Everything here discounts on ``curve_set.discount`` and nothing here decides
-what that curve is. Collateralised flows belong on the OIS-SOFR curve because
-the collateral earns SOFR, and the evidence of every result says so rather
-than leaving it to be inferred from the absence of an alternative.
+what that curve is. Collateralised flows belong on the curve of the rate the
+collateral earns -- OIS-SOFR for dollars -- and the evidence of every result
+says which, through :mod:`rates_engine.pricing.collateral`, rather than
+leaving it to be inferred from the absence of an alternative.
 
-**DV01 is a central difference.** ``(PV(y - 1bp) - PV(y + 1bp)) / 2``, not a
-one-sided bump. The symmetric form cancels the second-order term exactly,
-which is what lets a receiver and a payer agree in magnitude to machine
-precision and what lets the key-rate profile in :mod:`rates_engine.risk` sum
-back to this number. A one-sided bump would leave a curvature residual in both
-places, and it would look like a bug in the key rates rather than in the
-differencing.
+Sensitivities, the parallel DV01 included, are :mod:`rates_engine.risk`'s:
+they move the curve and call back into :func:`discounted_value`.
 """
 
 from __future__ import annotations
@@ -20,13 +16,14 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any, Protocol, runtime_checkable
 
+from rates_engine.conventions.side import Side
+from rates_engine.core.errors import CurrencyMismatchError
+from rates_engine.core.evidence import Evidence
+from rates_engine.core.money import require_same_currency
+from rates_engine.core.results import EngineResult
 from rates_engine.curves.discount import CurveSet
-from rates_engine.errors import CurrencyMismatchError
-from rates_engine.evidence import Evidence
 from rates_engine.instruments.cashflow import Cashflow
-from rates_engine.instruments.swaps import Side
-from rates_engine.money import require_same_currency
-from rates_engine.results import EngineResult
+from rates_engine.pricing.collateral import collateral_warnings, curve_warnings, discounting_fields
 
 __all__ = [
     "Priceable",
@@ -34,15 +31,12 @@ __all__ = [
     "PriceResult",
     "ParametricComparison",
     "pv",
+    "discounted_value",
+    "valuation_evidence",
     "par_rate",
     "annuity",
-    "dv01",
     "price_on_parametric",
-    "BUMP_BP",
 ]
-
-BUMP_BP = 1.0
-"""Default bump size in basis points for :func:`dv01` and the risk measures."""
 
 
 @runtime_checkable
@@ -143,10 +137,10 @@ class PriceResult(EngineResult):
         Refuses a unit mismatch rather than converting: a peso present value
         and a dollar one are not commensurable, and making them so needs a
         rate, a date and a quoting convention that only
-        :mod:`rates_engine.fx` may supply. A measure mismatch — a par rate
+        :mod:`rates_engine.pricing.fx_forward` may supply. A measure mismatch — a par rate
         plus an annuity — raises ``TypeError`` instead, because that is a
         mistake in the calling code rather than a problem with the data, and
-        :mod:`rates_engine.errors` is for the latter.
+        :mod:`rates_engine.core.errors` is for the latter.
 
         The result's evidence names this sum as its producer and carries both
         operands as sources, so ``worst_quality`` degrades to the weaker of
@@ -169,7 +163,7 @@ class PriceResult(EngineResult):
             raise CurrencyMismatchError(
                 f"cannot add {self.unit} to {other.unit}: converting between them "
                 "needs a rate, a date and a quoting convention, which is "
-                "rates_engine.fx's job and never an implicit one"
+                "rates_engine.pricing.fx_forward's job and never an implicit one"
             )
         flows: tuple[Cashflow, ...] | None = None
         if self.cashflows is not None and other.cashflows is not None:
@@ -185,16 +179,6 @@ class PriceResult(EngineResult):
             unit=self.unit,
             cashflows=flows,
         )
-
-
-def _discount_note() -> dict[str, Any]:
-    return {
-        "discounting": "collateral_rate_ois_sofr",
-        "discounting_note": (
-            "Discounted on the OIS-SOFR curve because collateral is remunerated at "
-            "SOFR (Fujii-Shimada-Takahashi; Piterbarg), not on a separate funding curve."
-        ),
-    }
 
 
 def _pv_of(flows: tuple[Cashflow, ...], curve_set: CurveSet) -> float:
@@ -215,13 +199,32 @@ def _pv_of(flows: tuple[Cashflow, ...], curve_set: CurveSet) -> float:
     return total
 
 
-def _evidence(
+def valuation_evidence(
     produced_by: str,
     instrument: Priceable,
     curve_set: CurveSet,
     extra: dict[str, Any],
     sources: tuple[Evidence, ...],
 ) -> Evidence:
+    """The evidence every valuation on a curve set records.
+
+    Public because :mod:`rates_engine.risk` reports DV01 as a valuation
+    measure and must describe it exactly as a price is described: the
+    instrument, the curve's currency and interpolation, the discounting and
+    the curve's own degradations.
+
+    Args:
+        produced_by: Stable identifier of the producing call, e.g.
+            ``"pricing.pv"``. An identifier, not a module path: it is part of
+            the payload and does not move when the code does.
+        instrument: What was valued.
+        curve_set: The curves it was valued on.
+        extra: Measure-specific fields, merged last.
+        sources: Evidence of the inputs, chained in.
+
+    Returns:
+        The evidence record.
+    """
     return Evidence(
         produced_by=produced_by,
         fields={
@@ -230,7 +233,7 @@ def _evidence(
             "curve_interpolation": curve_set.discount.interpolation,
             "dual_curve": curve_set.is_dual,
             "projection_curve": "tenor" if curve_set.is_dual else "discount",
-            **_discount_note(),
+            **discounting_fields(curve_set.currency),
             **extra,
         },
         sources=sources,
@@ -238,8 +241,29 @@ def _evidence(
         # conventions are assumed inherits that without the caller having
         # to remember to pass source_evidence. That forgetting is what made
         # the marking decorative.
-        warnings=curve_set.provenance,
+        warnings=curve_warnings(curve_set),
     )
+
+
+def discounted_value(instrument: Priceable, curve_set: CurveSet) -> float:
+    """Present value as a bare float, for callers that reprice many times.
+
+    Exactly the number :func:`pv` returns, without the cashflow list and the
+    evidence record :func:`pv` assembles around it. A risk measure reprices
+    two or more times per bucket and discards all of that; this is what it
+    calls instead.
+
+    Args:
+        instrument: Anything with :meth:`cashflows`.
+        curve_set: Discount and projection curves.
+
+    Returns:
+        The present value in the discount curve's currency.
+
+    Raises:
+        CurrencyMismatchError: A flow is in another currency than the curve.
+    """
+    return _pv_of(instrument.cashflows(curve_set), curve_set)
 
 
 def pv(
@@ -263,7 +287,7 @@ def pv(
     flows = instrument.cashflows(curve_set)
     value = _pv_of(flows, curve_set)
     return PriceResult(
-        evidence=_evidence("pricing.pv", instrument, curve_set, {"cashflows": len(flows)}, source_evidence),
+        evidence=valuation_evidence("pricing.pv", instrument, curve_set, {"cashflows": len(flows)}, source_evidence),
         value=value,
         measure="pv",
         unit=curve_set.discount.currency.value,
@@ -290,7 +314,7 @@ def annuity(
     unit_swap = swap.with_terms(fixed_rate=1.0, side=Side.RECEIVER)
     value = _pv_of(unit_swap.fixed_cashflows(curve_set), curve_set) / swap.notional
     return PriceResult(
-        evidence=_evidence("pricing.annuity", swap, curve_set, {}, source_evidence),
+        evidence=valuation_evidence("pricing.annuity", swap, curve_set, {}, source_evidence),
         value=value,
         measure="annuity",
         unit="years",
@@ -328,7 +352,7 @@ def par_rate(
     annuity_value = annuity(swap, curve_set).value
     value = float_pv / (swap.notional * annuity_value)
     return PriceResult(
-        evidence=_evidence(
+        evidence=valuation_evidence(
             "pricing.par_rate",
             swap,
             curve_set,
@@ -338,58 +362,6 @@ def par_rate(
         value=value,
         measure="par_rate",
         unit="decimal_rate",
-    )
-
-
-def dv01(
-    instrument: Priceable,
-    curve_set: CurveSet,
-    *,
-    bump_bp: float = BUMP_BP,
-    source_evidence: tuple[Evidence, ...] = (),
-) -> PriceResult:
-    """Parallel DV01 in USD per basis point, by symmetric bump and full reprice.
-
-    The whole zero curve — discount and projection alike — shifts by
-    ``bump_bp``, and the instrument is repriced from scratch. Positive for a
-    receiver, negative for a payer, because the sign follows the value of the
-    position rather than the direction of the shift.
-
-    Args:
-        instrument: Anything with :meth:`cashflows`.
-        curve_set: Discount and projection curves.
-        bump_bp: Shift size in basis points.
-        source_evidence: Evidence of the curves.
-
-    Returns:
-        A :class:`PriceResult` with ``measure="dv01"`` and
-        ``unit="<CCY>_per_bp"`` for the discount curve's currency.
-
-    Raises:
-        ValueError: ``bump_bp`` is not positive.
-    """
-    if bump_bp <= 0.0:
-        raise ValueError(f"bump_bp must be positive, got {bump_bp!r}")
-    shift = bump_bp * 1e-4
-    up = _pv_of(instrument.cashflows(curve_set.shifted(shift)), curve_set.shifted(shift))
-    down = _pv_of(instrument.cashflows(curve_set.shifted(-shift)), curve_set.shifted(-shift))
-    value = (down - up) / 2.0 / bump_bp
-    return PriceResult(
-        evidence=_evidence(
-            "pricing.dv01",
-            instrument,
-            curve_set,
-            {
-                "bump_bp": bump_bp,
-                "bump_basis": "zero_curve_parallel",
-                "bump_shape": "parallel",
-                "difference": "central",
-            },
-            source_evidence,
-        ),
-        value=value,
-        measure="dv01",
-        unit=f"{curve_set.discount.currency.value}_per_bp",
     )
 
 
@@ -499,7 +471,7 @@ def price_on_parametric(
             "difference": difference,
             "difference_bp_of_notional": per_bp,
             "currency": currency.value,
-            **_discount_note(),
+            **discounting_fields(currency),
             "note": (
                 "A parametric curve smooths the quotes rather than reproducing them, "
                 "so this difference is the cost of the smoothing, not an error in "
@@ -507,6 +479,7 @@ def price_on_parametric(
             ),
         },
         sources=(fit.evidence,),
+        warnings=collateral_warnings(currency),
     )
     return ParametricComparison(
         evidence=evidence,

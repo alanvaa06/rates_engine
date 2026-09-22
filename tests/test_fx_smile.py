@@ -18,17 +18,17 @@ import math
 
 import pytest
 
-from rates_engine.errors import CalibrationError
-from rates_engine.evidence import DataQuality
-from rates_engine.fx import garman_kohlhagen as gk
-from rates_engine.fx.delta import DeltaBasis, DeltaConvention, PremiumAdjustment
-from rates_engine.fx.vannavolga import (
+from rates_engine.conventions.option_kind import OptionKind
+from rates_engine.core.errors import CalibrationError
+from rates_engine.core.evidence import DataQuality
+from rates_engine.models import garman_kohlhagen as gk
+from rates_engine.models.fx_delta import DeltaBasis, DeltaConvention, PremiumAdjustment
+from rates_engine.volatility.fx_smile import (
     NOT_ARBITRAGE_FREE,
     ATMConvention,
     SmileQuotes,
     VannaVolgaSmile,
 )
-from rates_engine.volatility.kinds import OptionKind
 
 SPOT = 18.50
 EXPIRY = 0.25

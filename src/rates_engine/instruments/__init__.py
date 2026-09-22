@@ -1,32 +1,8 @@
-"""The linear instruments v1 prices: OIS, IRS, FRA and the two SOFR futures."""
+"""Product terms: swaps, futures, FRAs, caps and floors, swaptions (layer 3).
 
-from rates_engine.instruments.capfloor import CapFloor, Caplet
-from rates_engine.instruments.cashflow import Cashflow
-from rates_engine.instruments.fra import FRA
-from rates_engine.instruments.futures import (
-    BASIS_POINT,
-    SR1_NOTIONAL,
-    SR3_NOTIONAL,
-    SOFRFuture1M,
-    SOFRFuture3M,
-)
-from rates_engine.instruments.side import Side, fixed_leg_sign
-from rates_engine.instruments.swaps import IRSwap, OISSwap
-from rates_engine.instruments.swaption import Swaption
-
-__all__ = [
-    "BASIS_POINT",
-    "CapFloor",
-    "Caplet",
-    "Cashflow",
-    "FRA",
-    "IRSwap",
-    "OISSwap",
-    "SOFRFuture1M",
-    "SOFRFuture3M",
-    "SR1_NOTIONAL",
-    "SR3_NOTIONAL",
-    "Side",
-    "Swaption",
-    "fixed_leg_sign",
-]
+Immutable dataclasses describing what a trade is. Depends on
+:mod:`rates_engine.conventions` and below. Linear products still project
+their own floating cashflows from a curve set, which is the one declared
+exception in ``tests/test_layering.py`` (``instruments -> curves``) and is
+scheduled to move into :mod:`rates_engine.pricing`.
+"""

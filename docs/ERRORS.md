@@ -5,7 +5,7 @@ helps if the refusal is legible, so this is the contract: every exception the
 library raises on purpose, what causes it, whether it is recoverable, and what
 to catch.
 
-There are thirty-one exception classes plus the base. You almost never want to
+There are thirty-two exception classes plus the base. You almost never want to
 catch all of them, because they mean two different things — and the exit code
 says which.
 
@@ -285,7 +285,7 @@ carries both evidence chains into the total instead of dropping them.
 
 There is no implicit conversion and there will not be one. Converting needs
 a spot rate, a date and a quoting convention, all of which are decisions;
-`rates_engine.fx` is where they are made explicitly. Until v3 the engine had
+`rates_engine.pricing.fx_forward` is where they are made explicitly. Until v3 the engine had
 one currency and never said so, which is why `Currency` defaults to `USD`:
 every v1 and v2 call means what it always meant.
 
@@ -403,7 +403,7 @@ evidence chain:
 | --- | --- |
 | `treasury_par_proxy` | The long end rests on Treasury par yields standing in for OIS par. The swap spread they carry is negative and variable, and the bias is known to exist and is not quantified. |
 
-Read them with `rates_engine.diagnostics.all_warnings(result.evidence)`, or
+Read them with `rates_engine.core.diagnostics.all_warnings(result.evidence)`, or
 check `result.evidence.worst_quality`.
 
 ---

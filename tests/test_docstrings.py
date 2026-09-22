@@ -86,8 +86,8 @@ def test_the_scope_is_the_whole_package_not_just_the_re_exports():
     than the suite quietly checking a third of what it claims to."""
     assert len(PUBLIC) > len(rates_engine.__all__)
     checked = {module for module, _, _ in PUBLIC}
-    assert "rates_engine.fx.garman_kohlhagen" in checked
-    assert "rates_engine.hedging_structures" in checked
+    assert "rates_engine.models.garman_kohlhagen" in checked
+    assert "rates_engine.hedging.fx_structures" in checked
 
 
 def test_every_public_name_has_a_docstring():
@@ -178,13 +178,13 @@ def test_the_greeks_say_per_what(name, phrase):
     caller nothing about which of the two numbers it is, so the phrasing is
     pinned rather than the presence of a word.
     """
-    from rates_engine.fx import garman_kohlhagen
+    from rates_engine.models import garman_kohlhagen
 
     assert phrase in (getattr(garman_kohlhagen, name).__doc__ or "")
 
 
 def test_every_exception_explains_itself():
-    from rates_engine import errors
+    from rates_engine.core import errors
 
     for name in errors.__all__:
         doc = getattr(errors, name).__doc__ or ""

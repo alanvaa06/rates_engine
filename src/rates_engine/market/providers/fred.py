@@ -14,7 +14,7 @@ import csv
 import io
 from datetime import UTC, date, datetime
 
-from rates_engine.evidence import Provenance
+from rates_engine.core.evidence import Provenance
 from rates_engine.market.classify import classify_series
 from rates_engine.market.snapshot import MarketSnapshot, Series
 

@@ -1,7 +1,7 @@
 """Deterministic SOFR rates engine: curves, futures convexity, swaps, risk, hedging.
 
 A curve is not a result until you can see what it rests on. Every public call
-here returns a value *and* an :class:`~rates_engine.evidence.Evidence` chain —
+here returns a value *and* an :class:`~rates_engine.core.evidence.Evidence` chain —
 which instruments were used and where they came from, what each one's
 repricing residual was, which interpolation joined the nodes, which convexity
 model and sigma adjusted the futures, which bump basis a risk number used, and
@@ -10,7 +10,7 @@ built on a proxied curve says so at the top level without the hedging code
 knowing what a proxy is.
 
 What cannot be computed honestly is refused, never filled in. The contract for
-those refusals is :mod:`rates_engine.errors` and ``docs/ERRORS.md``.
+those refusals is :mod:`rates_engine.core.errors` and ``docs/ERRORS.md``.
 
 Importing this package touches no network and installs no warning filters.
 
@@ -38,58 +38,17 @@ The shortest correct program::
     print(par_rate(swap, CurveSet(curve.curve)).value)
 """
 
-from rates_engine.conventions import (
+from rates_engine.conventions.calendar import (
     SIFMA_US,
     BusinessDayConvention,
     Calendar,
-    DayCount,
-    Schedule,
     SIFMAUSCalendar,
-    day_count_from_name,
-    imm_date,
-    imm_dates,
-    next_imm_on_or_after,
-    year_fraction,
 )
-from rates_engine.convexity import (
-    ConvexityModel,
-    ConvexityResult,
-    SigmaEstimate,
-    convexity_adjustment,
-    realized_sofr_sigma,
-)
-from rates_engine.curves import (
-    BootstrapResult,
-    CurveSet,
-    CurveView,
-    CurveViews,
-    DiscountCurve,
-    FuturesNode,
-    ParSwapNode,
-    RealizedStubNode,
-    all_views,
-    bootstrap_discount_curve,
-    forward_curve,
-    par_curve,
-    zero_curve,
-)
-from rates_engine.curves.comparison import InterpolationComparison, compare_interpolations
-from rates_engine.curves.dual import (
-    BasisSwapNode,
-    DualCurveResult,
-    TenorParSwapNode,
-    solve_dual_curve,
-)
-from rates_engine.curves.interpolation import MonotoneConvex
-from rates_engine.curves.parametric import (
-    FOMCStepCurve,
-    FOMCStepFit,
-    NelsonSiegel,
-    NelsonSiegelFit,
-    fit_fomc_step_curve,
-    fit_nelson_siegel,
-)
-from rates_engine.errors import (
+from rates_engine.conventions.daycount import DayCount, day_count_from_name, year_fraction
+from rates_engine.conventions.option_kind import OptionKind
+from rates_engine.conventions.schedule import Schedule, imm_date, imm_dates, next_imm_on_or_after
+from rates_engine.conventions.side import Side
+from rates_engine.core.errors import (
     BootstrapResidualError,
     CalibrationError,
     ConfigurationError,
@@ -124,23 +83,49 @@ from rates_engine.errors import (
     VolatilityError,
     VolUnitsError,
 )
-from rates_engine.evidence import DataQuality, Degradation, Evidence, Provenance
-from rates_engine.hedge_program import (
-    HedgeProgram,
-    ProgramAudit,
-    RebalanceFrequency,
-    Severity,
-    audit_hedge,
-    load_program,
+from rates_engine.core.evidence import DataQuality, Degradation, Evidence, Provenance
+from rates_engine.core.money import Currency, require_same_currency
+from rates_engine.core.results import SCHEMA_VERSION, EngineResult
+from rates_engine.curves.bootstrap import (
+    BootstrapResult,
+    FuturesNode,
+    ParSwapNode,
+    RealizedStubNode,
+    bootstrap_discount_curve,
 )
-from rates_engine.hedging import (
+from rates_engine.curves.comparison import InterpolationComparison, compare_interpolations
+from rates_engine.curves.discount import CurveSet, DiscountCurve
+from rates_engine.curves.dual import (
+    BasisSwapNode,
+    DualCurveResult,
+    TenorParSwapNode,
+    solve_dual_curve,
+)
+from rates_engine.curves.interpolation import MonotoneConvex
+from rates_engine.curves.parametric import (
+    FOMCStepCurve,
+    FOMCStepFit,
+    NelsonSiegel,
+    NelsonSiegelFit,
+    fit_fomc_step_curve,
+    fit_nelson_siegel,
+)
+from rates_engine.curves.views import (
+    CurveView,
+    CurveViews,
+    all_views,
+    forward_curve,
+    par_curve,
+    zero_curve,
+)
+from rates_engine.hedging.futures_strip import (
     SR3_DV01,
     HedgeResult,
     ShockTableResult,
     shock_table,
     strip_hedge,
 )
-from rates_engine.hedging_structures import (
+from rates_engine.hedging.fx_structures import (
     Exposure,
     ExposureDirection,
     StructureComparison,
@@ -148,49 +133,53 @@ from rates_engine.hedging_structures import (
     StructureResult,
     compare_structures,
 )
-from rates_engine.instruments import (
-    FRA,
-    CapFloor,
-    Caplet,
-    Cashflow,
-    IRSwap,
-    OISSwap,
-    Side,
-    SOFRFuture1M,
-    SOFRFuture3M,
-    Swaption,
+from rates_engine.hedging.program import (
+    HedgeProgram,
+    ProgramAudit,
+    RebalanceFrequency,
+    Severity,
+    audit_hedge,
+    load_program,
 )
-from rates_engine.market import (
-    CompoundedRate,
+from rates_engine.instruments.capfloor import CapFloor, Caplet
+from rates_engine.instruments.cashflow import Cashflow
+from rates_engine.instruments.fra import FRA
+from rates_engine.instruments.futures import SOFRFuture1M, SOFRFuture3M
+from rates_engine.instruments.swaps import IRSwap, OISSwap
+from rates_engine.instruments.swaption import Swaption
+from rates_engine.market.estimators import SigmaEstimate, realized_sofr_sigma
+from rates_engine.market.providers.file import (
     FuturesSettlement,
-    MarketSnapshot,
-    Series,
     load_series_csv,
     load_settlements_csv,
     load_snapshot_csv,
 )
-from rates_engine.money import Currency, require_same_currency
-from rates_engine.optionpricing import (
+from rates_engine.market.snapshot import CompoundedRate, MarketSnapshot, Series
+from rates_engine.models import bachelier, black
+from rates_engine.models.convexity import ConvexityModel, ConvexityResult, convexity_adjustment
+from rates_engine.models.sabr import SABRCalibration, SABRParameters, density_diagnostics
+from rates_engine.models.sabr import calibrate as calibrate_sabr
+from rates_engine.pricing.linear import (
+    ParametricComparison,
+    PriceResult,
+    annuity,
+    par_rate,
+    price_on_parametric,
+    pv,
+)
+from rates_engine.pricing.options import (
     OptionPriceResult,
     cap_floor_pv,
     caplet_pv,
     model_for,
     swaption_pv,
 )
-from rates_engine.pricing import (
-    ParametricComparison,
-    PriceResult,
-    annuity,
-    dv01,
-    par_rate,
-    price_on_parametric,
-    pv,
-)
-from rates_engine.results import SCHEMA_VERSION, EngineResult
-from rates_engine.risk import (
-    GreeksResult,
+from rates_engine.risk.bumps import tent_weights
+from rates_engine.risk.greeks import GreeksResult, option_greeks
+from rates_engine.risk.sensitivities import (
     KeyRateResult,
     RiskResult,
+    dv01,
     effective_convexity,
     effective_duration,
     key_rate_duration,
@@ -199,25 +188,10 @@ from rates_engine.risk import (
     modified_duration,
     money_convexity,
     money_duration,
-    option_greeks,
     pvbp,
-    tent_weights,
 )
-from rates_engine.volatility import (
-    CubePoint,
-    CubeQuote,
-    OptionKind,
-    SABRCalibration,
-    SABRParameters,
-    StrikeConvention,
-    Volatility,
-    VolCube,
-    VolUnits,
-    bachelier,
-    black,
-    density_diagnostics,
-)
-from rates_engine.volatility.sabr import calibrate as calibrate_sabr
+from rates_engine.volatility.cube import CubePoint, CubeQuote, StrikeConvention, VolCube
+from rates_engine.volatility.units import Volatility, VolUnits
 
 __version__ = "0.3.0"
 

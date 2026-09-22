@@ -157,8 +157,8 @@ jobs:
           from rates_engine import (
               CurveSet, FuturesNode, OISSwap, RealizedStubNode,
               bootstrap_discount_curve, dv01, imm_date, next_imm_on_or_after, par_rate,
+              shock_table, strip_hedge,
           )
-          from rates_engine.hedging import shock_table, strip_hedge
 
           as_of, start = date(2026, 1, 15), imm_date(2026, 3)
           items = [RealizedStubNode(end=start,
@@ -188,8 +188,8 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
-          from rates_engine.cli import load_config
-          from rates_engine.errors import MissingDependencyError
+          from rates_engine.app.config import load_config
+          from rates_engine import MissingDependencyError
 
           Path("c.yaml").write_text("as_of: 2026-01-15\n", encoding="utf-8")
           try:
@@ -206,10 +206,10 @@ jobs:
         run: |
           python - <<'PY'
           from rates_engine import mcp_server
-          from rates_engine.cli import _COMMANDS
-          from rates_engine.errors import MissingDependencyError
+          from rates_engine.app.commands import COMMANDS as _COMMANDS
+          from rates_engine import MissingDependencyError
 
-          # Derived from the CLI's own table rather than a list written here,
+          # Derived from the application layer's table rather than a list written here,
           # which is exactly the staleness that failed this job when v3 added
           # two commands. What matters is that the two agree and that every
           # tool is described, not what the set happens to contain today.

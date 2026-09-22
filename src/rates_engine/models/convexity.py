@@ -35,29 +35,19 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import date
 from enum import StrEnum
 from typing import Any
 
-from rates_engine.errors import InsufficientDataError, UnsupportedConventionError
-from rates_engine.evidence import DataQuality, Evidence, Provenance
-from rates_engine.market.snapshot import MarketSnapshot
-from rates_engine.results import EngineResult
+from rates_engine.conventions.indices import SOFR
+from rates_engine.core.errors import UnsupportedConventionError
+from rates_engine.core.evidence import DataQuality, Evidence, Provenance
+from rates_engine.core.results import EngineResult
 
 __all__ = [
     "ConvexityModel",
     "ConvexityResult",
     "convexity_adjustment",
-    "realized_sofr_sigma",
-    "MIN_REALIZED_OBSERVATIONS",
-    "TRADING_DAYS_PER_YEAR",
 ]
-
-MIN_REALIZED_OBSERVATIONS = 60
-"""Fewest daily changes a realised-volatility estimate is allowed to rest on."""
-
-TRADING_DAYS_PER_YEAR = 252
-"""Annualisation factor for a daily realised volatility."""
 
 _KAPPA_FLOOR = 1e-8
 """Below this, the Hull-White expression is evaluated as its Ho-Lee limit.
@@ -229,11 +219,13 @@ def convexity_adjustment(
             "time_to_start": time_to_start,
             "time_to_end": time_to_end,
             "hull_white_evaluated_as_ho_lee_limit": took_limit,
-            "discounting": "collateral_rate_ois_sofr",
+            # SOFR futures are a dollar product, so the collateral index is
+            # SOFR by construction rather than read from a curve.
+            "discounting": f"collateral_rate_ois_{SOFR.slug}",
             "discounting_note": (
-                "Collateralised flows discount on the OIS-SOFR curve because the "
-                "collateral is remunerated at SOFR (Fujii-Shimada-Takahashi; Piterbarg), "
-                "not on a separate funding curve."
+                f"Collateralised flows discount on the OIS-{SOFR.label} curve because the "
+                f"collateral is remunerated at {SOFR.label} (Fujii-Shimada-Takahashi; "
+                "Piterbarg), not on a separate funding curve."
             ),
             "atm_calibration_caveat": (
                 "Calibrating sigma at the money alone overstates the adjustment by "
@@ -251,99 +243,4 @@ def convexity_adjustment(
         kappa=kappa,
         time_to_start=time_to_start,
         time_to_end=time_to_end,
-    )
-
-
-@dataclass(frozen=True)
-class SigmaEstimate(EngineResult):
-    """A realised-volatility estimate of sigma and the window it came from.
-
-    Attributes:
-        sigma: Annualised normal volatility as an absolute rate.
-        window: Number of daily changes requested.
-        observations: Number actually used.
-        start: First fixing date in the window.
-        end: Last fixing date in the window.
-    """
-
-    sigma: float
-    window: int
-    observations: int
-    start: date
-    end: date
-
-    def payload_fields(self) -> dict[str, Any]:
-        """Sigma and the window behind it."""
-        return {
-            "sigma": self.sigma,
-            "window": self.window,
-            "observations": self.observations,
-            "start": self.start.isoformat(),
-            "end": self.end.isoformat(),
-        }
-
-
-def realized_sofr_sigma(
-    snapshot: MarketSnapshot,
-    *,
-    window: int = 252,
-    series_id: str = "SOFR",
-    as_of: date | None = None,
-) -> SigmaEstimate:
-    """Estimate the normal volatility of SOFR from its own recent history.
-
-    Daily changes in the overnight rate, annualised by the square root of 252.
-    Normal rather than lognormal because the convexity formulas above are
-    written in absolute rate terms, and because a lognormal volatility is
-    undefined at a zero rate that SOFR has been near before.
-
-    Args:
-        snapshot: Snapshot holding the fixings.
-        window: Number of daily changes to use.
-        series_id: Overnight series to estimate from.
-        as_of: Last date considered. Defaults to the snapshot's own.
-
-    Returns:
-        The :class:`SigmaEstimate`.
-
-    Raises:
-        InsufficientDataError: Fewer than
-            :data:`MIN_REALIZED_OBSERVATIONS` changes are available. A
-            volatility from thirty observations is a number, not an estimate.
-        MissingFixingError: The snapshot has no such series.
-    """
-    series = snapshot.require(series_id)
-    cutoff = as_of or snapshot.as_of
-    usable = [(d, v) for d, v in zip(series.dates, series.values, strict=True) if d <= cutoff]
-    tail = usable[-(window + 1) :]
-    changes = [b[1] - a[1] for a, b in zip(tail, tail[1:], strict=False)]
-    if len(changes) < MIN_REALIZED_OBSERVATIONS:
-        raise InsufficientDataError(
-            f"realised sigma needs at least {MIN_REALIZED_OBSERVATIONS} daily changes of "
-            f"{series_id!r} on or before {cutoff}; the snapshot supports {len(changes)}"
-        )
-    mean = sum(changes) / len(changes)
-    variance = sum((c - mean) ** 2 for c in changes) / (len(changes) - 1)
-    sigma = math.sqrt(variance * TRADING_DAYS_PER_YEAR)
-    evidence = Evidence(
-        produced_by="convexity.realized_sofr_sigma",
-        inputs=(series.provenance,),
-        fields={
-            "series_id": series_id,
-            "window": window,
-            "observations": len(changes),
-            "start": tail[0][0].isoformat(),
-            "end": tail[-1][0].isoformat(),
-            "annualisation": TRADING_DAYS_PER_YEAR,
-            "sigma": sigma,
-            "basis": "normal_absolute_rate",
-        },
-    )
-    return SigmaEstimate(
-        evidence=evidence,
-        sigma=sigma,
-        window=window,
-        observations=len(changes),
-        start=tail[0][0],
-        end=tail[-1][0],
     )

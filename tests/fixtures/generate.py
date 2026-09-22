@@ -22,9 +22,12 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from rates_engine.conventions.calendar import BMV, SIFMA_US  # noqa: E402
-from rates_engine.conventions.schedule import add_months  # noqa: E402
+from rates_engine.conventions.schedule import (
+    add_months,  # noqa: E402
+    imm_date,
+    next_imm_on_or_after,
+)  # noqa: E402
 from rates_engine.curves.parametric import FOMCStepCurve  # noqa: E402
-from rates_engine.instruments.futures import imm_date, next_imm_on_or_after  # noqa: E402
 
 HERE = Path(__file__).parent
 START = date(2022, 1, 3)

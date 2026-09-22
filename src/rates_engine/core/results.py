@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from rates_engine.evidence import Evidence
+from rates_engine.core.evidence import Evidence
 
 __all__ = ["SCHEMA_VERSION", "EngineResult"]
 

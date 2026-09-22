@@ -20,7 +20,7 @@ from datetime import date, timedelta
 from typing import Protocol, runtime_checkable
 
 from rates_engine.conventions.daycount import DayCount, year_fraction
-from rates_engine.errors import UnsupportedConventionError
+from rates_engine.core.errors import UnsupportedConventionError
 
 __all__ = [
     "BMV",

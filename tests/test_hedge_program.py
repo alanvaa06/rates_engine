@@ -17,14 +17,14 @@ import json
 
 import pytest
 
-from rates_engine.errors import (
+from rates_engine.core.errors import (
     ConfigurationError,
     HedgeError,
     PolicyBreachError,
     RatesEngineError,
 )
-from rates_engine.evidence import DataQuality
-from rates_engine.hedge_program import (
+from rates_engine.core.evidence import DataQuality
+from rates_engine.hedging.program import (
     HedgeProgram,
     ProgramAudit,
     RebalanceFrequency,
@@ -302,8 +302,8 @@ class TestItIntegratesWithTheComparator:
     def test_every_permitted_name_is_a_real_structure(self, program):
         from datetime import date
 
-        from rates_engine.fx.quote import USDMXN
-        from rates_engine.hedging_structures import (
+        from rates_engine.conventions.currency_pair import USDMXN
+        from rates_engine.hedging.fx_structures import (
             Exposure,
             ExposureDirection,
             StructureQuote,

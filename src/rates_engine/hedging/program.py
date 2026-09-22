@@ -27,10 +27,10 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
-from rates_engine.errors import ConfigurationError, PolicyBreachError
-from rates_engine.evidence import DataQuality, Degradation, Evidence
-from rates_engine.hedging_structures import STRUCTURE_NAMES
-from rates_engine.results import EngineResult
+from rates_engine.core.errors import ConfigurationError, PolicyBreachError
+from rates_engine.core.evidence import DataQuality, Degradation, Evidence
+from rates_engine.core.results import EngineResult
+from rates_engine.hedging.fx_structures import STRUCTURE_NAMES
 
 __all__ = [
     "RebalanceFrequency",

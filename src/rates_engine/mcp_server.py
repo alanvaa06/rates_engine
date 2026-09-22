@@ -1,7 +1,8 @@
-"""``rateng-mcp``: the CLI's payloads over stdio, and nothing else.
+"""``rateng-mcp``: the use cases in :mod:`rates_engine.app.commands` over stdio, and nothing else.
 
 The server is transport. It does not reason, does not decide, and does not
-reformat: every tool calls the same handler the corresponding ``--json``
+reformat: every tool calls the same handler in
+:data:`rates_engine.app.commands.COMMANDS` that the corresponding ``--json``
 command calls and returns the same document, so PRD-002 AC-6.1's byte
 equality is a structural property rather than something kept true by hand.
 
@@ -29,8 +30,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from rates_engine.cli import _COMMANDS
-from rates_engine.errors import (
+from rates_engine.app.commands import COMMANDS
+from rates_engine.core.errors import (
     IncompatibleDependencyError,
     MissingDependencyError,
     RatesEngineError,
@@ -39,12 +40,13 @@ from rates_engine.reporting.payloads import dumps, error_payload
 
 __all__ = ["TOOLS", "TOOL_DESCRIPTIONS", "call_tool", "build_server", "main"]
 
-TOOLS: dict[str, Callable[[dict[str, Any] | None], dict[str, Any]]] = dict(_COMMANDS)
+TOOLS: dict[str, Callable[[dict[str, Any] | None], dict[str, Any]]] = dict(COMMANDS)
 """Every tool, each the same callable the CLI dispatches to.
 
-Taken from the CLI's table rather than re-declared, so a command added there
-cannot silently fail to appear here, and a tool here cannot drift from the
-command it claims to mirror.
+Taken from the application layer's table rather than re-declared, so a
+command added there cannot silently fail to appear here, and a tool here
+cannot drift from the command it claims to mirror. The server depends on
+that table, not on the CLI: the two are sibling adapters.
 """
 
 TOOL_DESCRIPTIONS: dict[str, str] = {

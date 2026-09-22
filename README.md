@@ -33,9 +33,8 @@ from datetime import date, timedelta
 from rates_engine import (
     CurveSet, FuturesNode, OISSwap, RealizedStubNode,
     bootstrap_discount_curve, dv01, imm_date, key_rate_dv01,
-    next_imm_on_or_after, par_rate,
+    next_imm_on_or_after, par_rate, shock_table, strip_hedge,
 )
-from rates_engine.hedging import shock_table, strip_hedge
 
 as_of = date(2026, 1, 15)
 start = imm_date(2026, 3)
@@ -154,7 +153,7 @@ tenor: filling a strike inside a quoted smile is a model fitted to data,
 filling a missing slice is a model fitted to a different slice. An asymptotic
 expansion never returns a negative volatility.
 
-Thirty-one named exceptions, each with an exit code and an entry in
+Thirty-three named exceptions, each with an exit code and an entry in
 [`docs/ERRORS.md`](docs/ERRORS.md) saying whether it is recoverable and what
 to do about it.
 
@@ -168,10 +167,9 @@ from datetime import date, timedelta
 
 from rates_engine import (
     CurveSet, FuturesNode, OISSwap, RealizedStubNode,
-    bootstrap_discount_curve, imm_date, next_imm_on_or_after,
+    bootstrap_discount_curve, imm_date, next_imm_on_or_after, strip_hedge,
 )
-from rates_engine.diagnostics import quality_report
-from rates_engine.hedging import strip_hedge
+from rates_engine.core.diagnostics import quality_report
 
 as_of = date(2026, 1, 15)
 start = imm_date(2026, 3)
@@ -264,7 +262,8 @@ says whether that source was read directly.
 | Refusal contract | `docs/ERRORS.md` |
 | Formula provenance | `docs/RESEARCH.md` |
 | Releasing | `docs/RELEASING.md` |
-| Architecture (phase 1) | `docs/design/2026-09-16-rates-engine-design.md` |
+| Architecture: layers, packages, extension points | `docs/architecture/ARCHITECTURE.md` |
+| Original design (phase 1) | `docs/design/2026-09-16-rates-engine-design.md` |
 | PRD-001 v1 | `docs/forge/prd/001-v1-curves-futures-swaps.md` |
 | Plan-design v1 | `docs/forge/plan/001-v1-plan-design.md` |
 | PRD-002 v2: swaptions, vol cube, MCP | `docs/forge/prd/002-v2-swaptions-vol-mcp.md` |

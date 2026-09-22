@@ -1,37 +1,8 @@
-"""Curve construction and the four views of a curve."""
+"""Term structures: discount curves, their calibration and their views (layer 3).
 
-from rates_engine.curves.bootstrap import (
-    BootstrapResult,
-    CalibrationInstrument,
-    FuturesNode,
-    ParSwapNode,
-    RealizedStubNode,
-    bootstrap_discount_curve,
-)
-from rates_engine.curves.discount import CURVE_TIME_BASIS, CurveSet, DiscountCurve
-from rates_engine.curves.views import (
-    CurveView,
-    CurveViews,
-    all_views,
-    forward_curve,
-    par_curve,
-    zero_curve,
-)
-
-__all__ = [
-    "BootstrapResult",
-    "CURVE_TIME_BASIS",
-    "CalibrationInstrument",
-    "CurveSet",
-    "CurveView",
-    "CurveViews",
-    "DiscountCurve",
-    "FuturesNode",
-    "ParSwapNode",
-    "RealizedStubNode",
-    "all_views",
-    "bootstrap_discount_curve",
-    "forward_curve",
-    "par_curve",
-    "zero_curve",
-]
+Bootstrap and dual-curve calibration, parametric curves, interpolation, and
+the zero, par and forward views. A curve is calibrated from calibration
+nodes that carry dates and year fractions rather than products, so this
+package does not import :mod:`rates_engine.instruments`. Depends on
+:mod:`rates_engine.models`, :mod:`rates_engine.market` and below.
+"""

@@ -9,6 +9,126 @@ claims, so it belongs here too.
 
 ## [Unreleased]
 
+A reorganisation into layers. No number moves, and every name exported from
+`rates_engine` is still exported from it.
+
+### Changed
+
+- **Module paths.** The package is now ten layers of subpackages instead of
+  fourteen loose modules beside seven packages
+  (`docs/architecture/ARCHITECTURE.md`). Import from `rates_engine` or from
+  the module that defines a name; the old deep paths are gone:
+  `errors`, `evidence`, `results`, `money` and `diagnostics` moved to
+  `core`; `pricing` became `pricing.linear`, `optionpricing` became
+  `pricing.options`, `fx.forward` became `pricing.fx_forward`; `risk`
+  became `risk.sensitivities`; `hedging`, `hedging_structures` and
+  `hedge_program` became `hedging.futures_strip`, `hedging.fx_structures`
+  and `hedging.program`. The closed forms moved to `models` (`black`,
+  `bachelier`, `sabr`, `garman_kohlhagen`, `fx_delta`, `convexity`,
+  `gaussian`). `fx.vannavolga` became `volatility.fx_smile`. `Side`,
+  `OptionKind` and `CurrencyPair` moved to `conventions`. The `fx` package
+  no longer exists.
+- **`realized_sofr_sigma`** and `SigmaEstimate` moved from `convexity` to
+  `market.estimators`: measuring sigma from history is market data, and the
+  convexity formula no longer imports a snapshot.
+- **Subpackage `__init__` files re-export nothing.** `from
+  rates_engine.curves import DiscountCurve` now fails; the package root and
+  the defining module are the two homes of a name.
+- **An application layer.** Config loading, the config-to-domain builders
+  and the seven use cases moved out of `cli` into `app.config`,
+  `app.builders` and `app.commands`; `app.commands.COMMANDS` is the table
+  both interfaces dispatch through. `cli` and `mcp_server` are sibling
+  adapters and no longer import each other (`mcp_server` used to import the
+  CLI's private `_COMMANDS`). `rates_engine.cli.load_config` is now
+  `rates_engine.app.config.load_config`. No payload changed in this step;
+  the text changes listed below are the only differences from v0.3.0.
+- **Text that named a module now names where it lives.** The hedge's
+  bucketed-delta note points at `rates_engine.key_rate_dv01` (the stable root
+  name) instead of `rates_engine.risk.key_rate_dv01`; the currency-mismatch
+  refusal points at `rates_engine.pricing.fx_forward` instead of
+  `rates_engine.fx`.
+- **Discounting evidence is derived, not written.** Every pricer used to
+  record `"discounting": "collateral_rate_ois_sofr"` whatever the curve, so a
+  peso swap on a peso curve claimed an OIS-SOFR discount. The fields now come
+  from `conventions.indices.collateral_index(curve.currency)`: dollar
+  payloads are byte-identical, peso ones say `collateral_rate_ois_tiie_fondeo`
+  and carry an `unresolved_convention:mxn_collateral_rate` degradation, which
+  makes their `worst_quality` `assumed`. No number moves.
+- **`OISSwap`'s `float_index` is `compounded_overnight`** (was
+  `compounded_sofr`) in its evidence and in `list-instruments`. The swap
+  floats on the discount curve's own overnight rate in whichever currency
+  that curve is; the `discounting` field beside it names the index.
+- **`UNRESOLVED_MXN`, `TIIE_PERIOD_DAYS` and `TIIE_DAY_COUNT`** moved from
+  `curves.mxn` to `conventions.indices`, and `UNRESOLVED_MXN` gained
+  `mxn_collateral_rate`. `describe` lists it; an MXN curve carries one more
+  `assumed` degradation.
+- **Calendars are typed as `HolidayCalendar`**, not `SIFMAUSCalendar`, on
+  instruments, snapshots, curve views and the FOMC step curve, so a `BMV`
+  calendar is a valid argument rather than a type error. Defaults unchanged.
+- **One bump primitive.** `risk.bumps` (`shift_from_bp`, `tent_shift`,
+  `repriced`, `BUMP_BP`, `tent_weights`) is the only code that moves a curve
+  and reprices; every sensitivity is written on it instead of spelling out
+  `pv(instrument, curve_set.shifted(shift)).value` and discarding the evidence
+  it built. `dv01` moved from `pricing` to `risk.sensitivities` (its payload,
+  `produced_by: "pricing.dv01"` included, is unchanged: `produced_by` is an
+  identifier, not a module path). `option_greeks` and `GreeksResult` moved to
+  `risk.greeks`, typed `Swaption | CapFloor` instead of `Any`. The option
+  greeks and the shock table take their shifted curves from
+  `risk.bumps.shifted`, and `tests/test_layering.py` fails on any other
+  `.shifted(` call outside `curves`. Bit-identical.
+- **`tests/test_layering.py`** checks layers rather than a total order of
+  modules: nothing imports sideways or upward except one declared, dated
+  exception (`instruments -> curves`).
+- **Faster curves and schedules, same bits.** `DiscountCurve` caches its
+  node times, log discount factors and monotone-convex interpolant instead
+  of recomputing them on every `df()`, finds the interval by bisection, and
+  hands those arrays to the curves it derives (`with_node`, `shifted`).
+  `MonotoneConvex` keeps running integrals over whole intervals, summed in
+  the order the per-call loop used. Instruments compute their schedule once.
+  Every output of a 80 kB battery (discount factors, forwards, zeros, PV,
+  par, annuity, DV01, key rates, strip hedge, shock table, both
+  interpolations) is bit-identical to v0.3.0. Against v0.3.0 on
+  `benchmarks/bench_core.py`, with the bump primitive below: repricing a
+  ten-year OIS x10 (x22 on monotone convex), pricing a newly built one x5,
+  DV01 x9, key rate DV01 x5.6, bootstrap x3, shock table x3.3, strip hedge
+  x1.8.
+
+### Fixed
+
+- **Risk numbers inherit their curve's degradations.** In v0.3.0 `pv` and
+  `dv01` carried a curve's provenance, but `key_rate_dv01`,
+  `key_rate_duration`, `money_convexity`, `effective_duration`, the swaption
+  and cap/floor pricers and `option_greeks` did not: on a Treasury-proxied or
+  peso curve they reported `worst_quality: observed`. Every one of them now
+  carries `pricing.collateral.curve_warnings(curve_set)`. Dollar payloads on
+  an unproxied curve are unchanged.
+- **A curve built from lists froze them.** `DiscountCurve` and
+  `MonotoneConvex` convert their inputs to tuples, so the cached arrays
+  cannot outlive a mutation of the caller's list.
+- **`tests/test_layering.py` saw neither relative imports nor a bare
+  `import rates_engine`**, so an upward edge written either way passed. Both
+  are resolved now, relative imports are banned, and the detector has its
+  own test.
+- Documentation counted thirty-one exceptions; there are thirty-two plus the
+  base.
+
+### Added
+
+- `benchmarks/bench_core.py`: hot-path timings through the public API, run
+  before and after a structural change.
+- **`conventions.indices`**: `RateIndex` (currency, tenor, day count,
+  calendar, administrator, unresolved conventions), the `SOFR`,
+  `TIIE_FONDEO` and `TIIE_28` definitions, `COLLATERAL_INDEX` and
+  `collateral_index`. A currency with no entry is refused with
+  `UnsupportedConventionError` rather than defaulted to SOFR.
+- **`pricing.collateral`**: the one home of the discounting evidence.
+- **`pricing.linear.discounted_value`**: present value as a bare float, the
+  same number `pv` returns without the cashflow list and evidence record.
+  **`pricing.linear.valuation_evidence`**, formerly private, so a DV01 in
+  `risk` is described exactly as a price is.
+- `tests/test_curve_cache.py`: a derived curve's handed-down arrays equal a
+  fresh computation exactly, and the cache never enters equality or hashing.
+
 ## [0.3.0] - 2026-09-18
 
 A second currency, FX forwards and options, and a hedge-structure

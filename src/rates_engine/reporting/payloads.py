@@ -12,8 +12,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from rates_engine.errors import RatesEngineError
-from rates_engine.results import SCHEMA_VERSION, EngineResult
+from rates_engine.core.errors import RatesEngineError
+from rates_engine.core.results import SCHEMA_VERSION, EngineResult
 
 __all__ = ["result_payload", "error_payload", "dumps"]
 
@@ -35,7 +35,7 @@ def error_payload(exc: BaseException) -> dict[str, Any]:
     """The payload for a failure that produced no result.
 
     Args:
-        exc: The exception. A :class:`~rates_engine.errors.RatesEngineError`
+        exc: The exception. A :class:`~rates_engine.core.errors.RatesEngineError`
             carries its own exit code; anything else is an unexpected failure
             and gets exit code 1.
 

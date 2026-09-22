@@ -24,7 +24,7 @@ which convention USD/MXN trades on — Banxico, ISDA and CME are all
 unreachable from the build environment — and a default here would be an
 unverified convention silently determining every strike in the smile.
 :class:`DeltaConvention` has no default value and
-:func:`strike_from_delta` raises :class:`~rates_engine.errors.
+:func:`strike_from_delta` raises :class:`~rates_engine.core.errors.
 DeltaConventionError` when asked to guess. That is AC-3.4, and the gap the
 research left is the reason it earns its place rather than being
 box-ticking.
@@ -52,10 +52,10 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
-from rates_engine.errors import DeltaConventionError
-from rates_engine.fx.garman_kohlhagen import d1_d2, forward
-from rates_engine.volatility import standard_normal_cdf
-from rates_engine.volatility.kinds import OptionKind
+from rates_engine.conventions.option_kind import OptionKind
+from rates_engine.core.errors import DeltaConventionError
+from rates_engine.models.garman_kohlhagen import d1_d2, forward
+from rates_engine.models.gaussian import standard_normal_cdf
 
 __all__ = ["DeltaBasis", "PremiumAdjustment", "DeltaConvention", "delta", "strike_from_delta"]
 

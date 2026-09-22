@@ -17,13 +17,13 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
-from rates_engine.conventions.calendar import SIFMA_US, BusinessDayConvention, SIFMAUSCalendar
+from rates_engine.conventions.calendar import SIFMA_US, BusinessDayConvention, HolidayCalendar
 from rates_engine.conventions.daycount import DayCount, year_fraction
 from rates_engine.conventions.schedule import Schedule, add_months
+from rates_engine.core.evidence import Evidence
+from rates_engine.core.money import Currency
+from rates_engine.core.results import EngineResult
 from rates_engine.curves.discount import CURVE_TIME_BASIS, DiscountCurve
-from rates_engine.evidence import Evidence
-from rates_engine.money import Currency
-from rates_engine.results import EngineResult
 
 __all__ = ["CurveView", "CurveViews", "zero_curve", "par_curve", "forward_curve", "all_views"]
 
@@ -139,7 +139,7 @@ def par_curve(
     frequency_months: int = 12,
     day_count: DayCount = DayCount.ACT_360,
     start: date | None = None,
-    calendar: SIFMAUSCalendar = SIFMA_US,
+    calendar: HolidayCalendar = SIFMA_US,
     convention: BusinessDayConvention = BusinessDayConvention.MODIFIED_FOLLOWING,
     payment_lag_days: int = 0,
 ) -> CurveView:

@@ -23,10 +23,10 @@ from datetime import date
 
 import pytest
 
-from rates_engine.errors import ImplausibleInputError
-from rates_engine.fx import garman_kohlhagen as gk
-from rates_engine.fx.quote import USDMXN
-from rates_engine.hedging_structures import (
+from rates_engine.conventions.currency_pair import USDMXN
+from rates_engine.conventions.option_kind import OptionKind
+from rates_engine.core.errors import ImplausibleInputError
+from rates_engine.hedging.fx_structures import (
     TRADE_OFF_FRAME,
     Exposure,
     ExposureDirection,
@@ -34,7 +34,7 @@ from rates_engine.hedging_structures import (
     compare_structures,
     zero_cost_collar_strike,
 )
-from rates_engine.volatility.kinds import OptionKind
+from rates_engine.models import garman_kohlhagen as gk
 
 SETTLEMENT = date(2026, 12, 15)
 QUOTE = StructureQuote(
@@ -412,7 +412,7 @@ class TestItDoesNotRecommend:
 
     def test_no_public_name_contains_recommend(self):
         import rates_engine
-        import rates_engine.hedging_structures as module
+        import rates_engine.hedging.fx_structures as module
 
         for namespace in (module, rates_engine):
             offenders = [
@@ -510,13 +510,9 @@ class TestPricingOnASmile:
         assert result.evidence.fields["volatility"] is None
 
     def test_a_smile_passed_directly_is_named_and_its_evidence_kept(self):
-        from rates_engine.evidence import DataQuality
-        from rates_engine.fx.delta import DeltaBasis, DeltaConvention, PremiumAdjustment
-        from rates_engine.fx.vannavolga import (
-            ATMConvention,
-            SmileQuotes,
-            VannaVolgaSmile,
-        )
+        from rates_engine.core.evidence import DataQuality
+        from rates_engine.models.fx_delta import DeltaBasis, DeltaConvention, PremiumAdjustment
+        from rates_engine.volatility.fx_smile import ATMConvention, SmileQuotes, VannaVolgaSmile
 
         smile = VannaVolgaSmile(
             spot=18.50,

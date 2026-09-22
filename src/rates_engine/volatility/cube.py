@@ -25,15 +25,10 @@ from datetime import date
 from enum import StrEnum
 from typing import Any
 
-from rates_engine.errors import SliceNotQuotedError, VolatilityError
-from rates_engine.evidence import DataQuality, Evidence, Provenance
-from rates_engine.results import EngineResult
-from rates_engine.volatility.sabr import (
-    DEFAULT_BETA,
-    SABRCalibration,
-    calibrate,
-    normal_vol,
-)
+from rates_engine.core.errors import SliceNotQuotedError, VolatilityError
+from rates_engine.core.evidence import DataQuality, Evidence, Provenance
+from rates_engine.core.results import EngineResult
+from rates_engine.models.sabr import DEFAULT_BETA, SABRCalibration, calibrate, normal_vol
 from rates_engine.volatility.units import Volatility, VolUnits
 
 __all__ = ["StrikeConvention", "CubePoint", "VolCube", "CubeQuote"]
@@ -123,7 +118,7 @@ class VolCube:
         units: The quoting convention every point must share.
         strike_convention: How the strikes are written.
         beta: The SABR backbone exponent used when a smile is fitted. Fixed
-            rather than calibrated; see :mod:`rates_engine.volatility.sabr`.
+            rather than calibrated; see :mod:`rates_engine.models.sabr`.
         shift: Shift applied when fitting, for slices whose forward is at or
             below zero.
         provenance: Where the quotes came from.
@@ -190,7 +185,7 @@ class VolCube:
             forward: The forward swap rate for this slice, as a decimal.
 
         Returns:
-            The :class:`~rates_engine.volatility.sabr.SABRCalibration`.
+            The :class:`~rates_engine.models.sabr.SABRCalibration`.
 
         Raises:
             SliceNotQuotedError: No quotes exist for this expiry and tenor.

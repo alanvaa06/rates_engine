@@ -13,14 +13,14 @@ from datetime import timedelta
 
 import pytest
 
-from rates_engine.errors import KeyTenorOutOfRangeError, UndefinedDurationError
-from rates_engine.hedging import strip_hedge
-from rates_engine.pricing import dv01
-from rates_engine.risk import (
+from rates_engine.core.errors import KeyTenorOutOfRangeError, UndefinedDurationError
+from rates_engine.hedging.futures_strip import strip_hedge
+from rates_engine.risk.bumps import tent_weights
+from rates_engine.risk.sensitivities import (
     INTERPOLATION_CAVEAT,
+    dv01,
     key_rate_duration,
     key_rate_dv01,
-    tent_weights,
 )
 
 TENORS = (0.5, 1.0, 1.5, 2.0, 2.4)
@@ -185,7 +185,7 @@ class TestNormalisedRefusal:
     def test_it_is_the_dv01_profile_over_the_price(self, par_swap, curve_set):
         from dataclasses import replace
 
-        from rates_engine.pricing import pv
+        from rates_engine.pricing.linear import pv
 
         rich = replace(par_swap, fixed_rate=par_swap.fixed_rate + 0.01)
         price = pv(rich, curve_set).value

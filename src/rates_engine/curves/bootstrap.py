@@ -22,16 +22,16 @@ from typing import Any, Protocol, runtime_checkable
 from scipy.optimize import brentq
 
 from rates_engine.conventions.daycount import DayCount, year_fraction
-from rates_engine.curves.discount import DiscountCurve
-from rates_engine.errors import (
+from rates_engine.core.errors import (
     BootstrapResidualError,
     CurveArbitrageError,
     ProxySourceNotDeclaredError,
     UnderdeterminedCurveError,
 )
-from rates_engine.evidence import DataQuality, Degradation, Evidence, Provenance
-from rates_engine.money import Currency
-from rates_engine.results import EngineResult
+from rates_engine.core.evidence import DataQuality, Degradation, Evidence, Provenance
+from rates_engine.core.money import Currency
+from rates_engine.core.results import EngineResult
+from rates_engine.curves.discount import DiscountCurve
 
 __all__ = [
     "CalibrationInstrument",

@@ -17,13 +17,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import date
+from functools import cached_property
 from typing import TYPE_CHECKING
 
-from rates_engine.conventions.calendar import SIFMA_US, BusinessDayConvention, SIFMAUSCalendar
+from rates_engine.conventions.calendar import SIFMA_US, BusinessDayConvention, HolidayCalendar
 from rates_engine.conventions.daycount import DayCount, year_fraction
 from rates_engine.conventions.schedule import Schedule
+from rates_engine.conventions.side import Side, fixed_leg_sign
 from rates_engine.instruments.cashflow import Cashflow
-from rates_engine.instruments.side import Side, fixed_leg_sign
 
 if TYPE_CHECKING:  # pragma: no cover - import for typing only, avoids a cycle
     from rates_engine.curves.discount import CurveSet
@@ -59,7 +60,7 @@ class OISSwap:
     frequency_months: int = 12
     fixed_day_count: DayCount = DayCount.ACT_360
     payment_lag_days: int = 2
-    calendar: SIFMAUSCalendar = SIFMA_US
+    calendar: HolidayCalendar = SIFMA_US
     convention: BusinessDayConvention = BusinessDayConvention.MODIFIED_FOLLOWING
 
     @property
@@ -76,7 +77,7 @@ class OISSwap:
     def with_terms(self, **changes: object) -> OISSwap:
         """A copy with some terms changed; the original is untouched.
 
-        Exists so that :mod:`rates_engine.pricing` can build the unit-rate and
+        Exists so that :mod:`rates_engine.pricing.linear` can build the unit-rate and
         single-side variants a par rate needs without reaching for
         ``dataclasses.replace`` on a protocol, which is not something a type
         checker can verify.
@@ -89,7 +90,7 @@ class OISSwap:
         """
         return replace(self, **changes)  # type: ignore[arg-type]
 
-    @property
+    @cached_property
     def schedule(self) -> Schedule:
         """Accrual and payment dates for both legs."""
         return Schedule.generate(
@@ -177,7 +178,7 @@ class OISSwap:
             "frequency_months": self.frequency_months,
             "fixed_day_count": self.fixed_day_count.value,
             "payment_lag_days": self.payment_lag_days,
-            "float_index": "compounded_sofr",
+            "float_index": "compounded_overnight",
         }
 
 
@@ -212,7 +213,7 @@ class IRSwap:
     fixed_day_count: DayCount = DayCount.ACT_360
     float_day_count: DayCount = DayCount.ACT_360
     payment_lag_days: int = 0
-    calendar: SIFMAUSCalendar = SIFMA_US
+    calendar: HolidayCalendar = SIFMA_US
     convention: BusinessDayConvention = BusinessDayConvention.MODIFIED_FOLLOWING
 
     @property
@@ -241,12 +242,12 @@ class IRSwap:
             payment_lag_days=self.payment_lag_days,
         )
 
-    @property
+    @cached_property
     def fixed_schedule(self) -> Schedule:
         """Fixed leg schedule."""
         return self._schedule(self.fixed_frequency_months)
 
-    @property
+    @cached_property
     def float_schedule(self) -> Schedule:
         """Floating leg schedule."""
         return self._schedule(self.float_frequency_months)
@@ -284,7 +285,7 @@ class IRSwap:
 
         This is the whole multi-curve story in four lines. The forward comes
         from ``curve_set.projection``; the discounting, applied in
-        :mod:`rates_engine.pricing`, comes from ``curve_set.discount``. When
+        :mod:`rates_engine.pricing.linear`, comes from ``curve_set.discount``. When
         the two are the same object the basis is zero and the result collapses
         onto the OIS answer.
         """

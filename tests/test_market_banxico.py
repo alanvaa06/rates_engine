@@ -18,8 +18,8 @@ from datetime import date
 
 import pytest
 
-from rates_engine.errors import ConfigurationError, InsufficientDataError
-from rates_engine.evidence import DataQuality
+from rates_engine.core.errors import ConfigurationError, InsufficientDataError
+from rates_engine.core.evidence import DataQuality
 from rates_engine.market.providers import banxico
 
 
@@ -205,7 +205,7 @@ class TestProvenance:
         assert series.provenance.data_quality is DataQuality.OBSERVED
 
     def test_the_percent_assumption_is_recorded_with_the_others(self):
-        from rates_engine.curves.mxn import UNRESOLVED_MXN
+        from rates_engine.conventions.indices import UNRESOLVED_MXN
 
         assert "banxico_quotes_in_percent" in {name for name, _ in UNRESOLVED_MXN}
 

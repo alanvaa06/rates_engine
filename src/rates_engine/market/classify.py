@@ -9,7 +9,7 @@ when someone might forget.
 
 from __future__ import annotations
 
-from rates_engine.evidence import DataQuality
+from rates_engine.core.evidence import DataQuality
 
 __all__ = ["classify_series", "TREASURY_PAR_YIELD", "OVERNIGHT_FIXING", "TREASURY_PROXY_NOTE"]
 
@@ -36,7 +36,7 @@ def classify_series(series_id: str) -> tuple[str, DataQuality, str | None]:
         series_id: Provider identifier, e.g. ``"SOFR"`` or ``"DGS2"``.
 
     Returns:
-        A triple of instrument kind, :class:`~rates_engine.evidence.DataQuality`
+        A triple of instrument kind, :class:`~rates_engine.core.evidence.DataQuality`
         and an optional note. Unrecognised identifiers come back as
         ``("unclassified", OBSERVED, None)`` rather than raising: an unknown
         series is not yet a problem, and becomes one only if a curve tries to

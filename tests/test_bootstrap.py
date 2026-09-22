@@ -7,19 +7,20 @@ from datetime import date, timedelta
 
 import pytest
 
-from rates_engine.conventions import DayCount, imm_date, next_imm_on_or_after
-from rates_engine.curves import (
-    DiscountCurve,
+from rates_engine.conventions.daycount import DayCount
+from rates_engine.conventions.schedule import imm_date, next_imm_on_or_after
+from rates_engine.core.errors import (
+    BootstrapResidualError,
+    CurveArbitrageError,
+    UnderdeterminedCurveError,
+)
+from rates_engine.curves.bootstrap import (
     FuturesNode,
     ParSwapNode,
     RealizedStubNode,
     bootstrap_discount_curve,
 )
-from rates_engine.errors import (
-    BootstrapResidualError,
-    CurveArbitrageError,
-    UnderdeterminedCurveError,
-)
+from rates_engine.curves.discount import DiscountCurve
 
 
 class TestRoundTrip:
@@ -140,7 +141,7 @@ class TestRefusalsAndDrops:
         assert flat_curve.dropped_instruments == ()
 
     def test_an_unsupported_interpolation_refuses(self, as_of, strip):
-        from rates_engine.errors import UnsupportedConventionError
+        from rates_engine.core.errors import UnsupportedConventionError
 
         with pytest.raises(UnsupportedConventionError, match="cubic_spline"):
             bootstrap_discount_curve(as_of, strip, interpolation="cubic_spline")

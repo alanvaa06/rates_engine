@@ -16,10 +16,10 @@ from pathlib import Path
 
 import pytest
 
-from rates_engine.curves import bootstrap_discount_curve
-from rates_engine.hedging import shock_table, strip_hedge
-from rates_engine.pricing import dv01, par_rate, pv
-from rates_engine.risk import key_rate_dv01
+from rates_engine.curves.bootstrap import bootstrap_discount_curve
+from rates_engine.hedging.futures_strip import shock_table, strip_hedge
+from rates_engine.pricing.linear import par_rate, pv
+from rates_engine.risk.sensitivities import dv01, key_rate_dv01
 
 CROSS_VERSION_RTOL = 1e-14
 
@@ -74,7 +74,7 @@ class TestNoRandomness:
         import rates_engine
 
         root = Path(rates_engine.__file__).parent
-        for name in ("curves/bootstrap.py", "curves/discount.py", "risk.py"):
+        for name in ("curves/bootstrap.py", "curves/discount.py", "risk/sensitivities.py"):
             text = (root / name).read_text(encoding="utf-8")
             assert "for " not in text or "in set(" not in text, name
 
@@ -88,8 +88,8 @@ class TestCrossVersionContract:
             "import sys, json\n"
             "sys.path.insert(0, 'tests')\n"
             "from datetime import date, timedelta\n"
-            "from rates_engine.conventions import imm_date, next_imm_on_or_after\n"
-            "from rates_engine.curves import FuturesNode, RealizedStubNode, "
+            "from rates_engine import imm_date, next_imm_on_or_after\n"
+            "from rates_engine import FuturesNode, RealizedStubNode, "
             "bootstrap_discount_curve\n"
             "as_of = date(2026, 1, 15)\n"
             "start = imm_date(2026, 3)\n"
@@ -125,7 +125,7 @@ class TestCalibrationDeterminism:
     """
 
     def test_sabr_calibration_is_bit_exact(self):
-        from rates_engine.volatility.sabr import calibrate
+        from rates_engine.models.sabr import calibrate
 
         strikes = tuple(0.04 + d for d in (-0.01, -0.005, 0.0, 0.005, 0.01))
         vols = (0.0098, 0.0094, 0.0092, 0.0093, 0.0096)
@@ -167,8 +167,8 @@ class TestCalibrationDeterminism:
         assert first.residuals_bp == second.residuals_bp
 
     def test_option_pricing_is_bit_exact(self, atm_swaption, option_curve_set):
-        from rates_engine.optionpricing import swaption_pv
-        from rates_engine.risk import option_greeks
+        from rates_engine.pricing.options import swaption_pv
+        from rates_engine.risk.greeks import option_greeks
         from rates_engine.volatility.units import Volatility, VolUnits
 
         vol = Volatility(90.0, VolUnits.NORMAL_BP)
@@ -205,14 +205,14 @@ class TestCalibrationDeterminism:
         makes is on the fit's *output* — the volatility it produces — not on
         the coordinates it found.
         """
-        from rates_engine.volatility.sabr import calibrate
+        from rates_engine.models.sabr import calibrate
 
         strikes = tuple(0.04 + d for d in (-0.01, -0.005, 0.0, 0.005, 0.01))
         vols = (0.0098, 0.0094, 0.0092, 0.0093, 0.0096)
         reference = calibrate(0.04, 5.0, strikes, vols)
         program = (
             "import json\n"
-            "from rates_engine.volatility.sabr import calibrate\n"
+            "from rates_engine.models.sabr import calibrate\n"
             f"strikes = {strikes!r}\n"
             f"vols = {vols!r}\n"
             "fit = calibrate(0.04, 5.0, strikes, vols)\n"

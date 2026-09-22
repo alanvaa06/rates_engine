@@ -13,9 +13,9 @@ import bisect
 from dataclasses import dataclass
 from datetime import date, timedelta
 
-from rates_engine.conventions.calendar import SIFMA_US, SIFMAUSCalendar
-from rates_engine.errors import MissingFixingError
-from rates_engine.evidence import DataQuality, Provenance
+from rates_engine.conventions.calendar import SIFMA_US, HolidayCalendar
+from rates_engine.core.errors import MissingFixingError
+from rates_engine.core.evidence import DataQuality, Provenance
 
 __all__ = ["Series", "MarketSnapshot", "CompoundedRate"]
 
@@ -183,7 +183,7 @@ class MarketSnapshot:
         start: date,
         end: date,
         *,
-        calendar: SIFMAUSCalendar = SIFMA_US,
+        calendar: HolidayCalendar = SIFMA_US,
     ) -> CompoundedRate:
         """Daily-compound an overnight series over ``[start, end)`` on ACT/360.
 
@@ -220,7 +220,7 @@ class MarketSnapshot:
         start: date,
         end: date,
         *,
-        calendar: SIFMAUSCalendar = SIFMA_US,
+        calendar: HolidayCalendar = SIFMA_US,
     ) -> CompoundedRate:
         """Arithmetic-average an overnight series over ``[start, end)``, ACT/360 weighted.
 
@@ -251,7 +251,7 @@ class MarketSnapshot:
         return CompoundedRate(rate, 1.0 + rate * tau, tau, business_days, repeated, first, last)
 
     def _daily(
-        self, series_id: str, start: date, end: date, calendar: SIFMAUSCalendar
+        self, series_id: str, start: date, end: date, calendar: HolidayCalendar
     ) -> list[tuple[date, float, bool]]:
         """Per-calendar-day rates over ``[start, end)``, flagged when repeated."""
         if end < start:
@@ -284,7 +284,7 @@ class MarketSnapshot:
         return out
 
     def _accrue(
-        self, series_id: str, start: date, end: date, calendar: SIFMAUSCalendar
+        self, series_id: str, start: date, end: date, calendar: HolidayCalendar
     ) -> tuple[float, int, int, date | None, date | None]:
         """Compounded factor and the bookkeeping the evidence needs."""
         daily = self._daily(series_id, start, end, calendar)
@@ -301,7 +301,7 @@ class MarketSnapshot:
         )
 
     def _sum(
-        self, series_id: str, start: date, end: date, calendar: SIFMAUSCalendar
+        self, series_id: str, start: date, end: date, calendar: HolidayCalendar
     ) -> tuple[float, int, int, date | None, date | None]:
         """Day-weighted sum of rates and the same bookkeeping."""
         daily = self._daily(series_id, start, end, calendar)

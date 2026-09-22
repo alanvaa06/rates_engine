@@ -1,6 +1,6 @@
 """Pricing the option instruments, and the model choice that has to be declared.
 
-Kept apart from :mod:`rates_engine.pricing` because the two answer different
+Kept apart from :mod:`rates_engine.pricing.linear` because the two answer different
 questions. A linear instrument has cashflows and a present value; an option
 has a model, a volatility and a set of conventions about what that volatility
 means, and every one of those has to reach the evidence. Folding them
@@ -21,12 +21,13 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
+from rates_engine.core.evidence import Evidence
+from rates_engine.core.results import EngineResult
 from rates_engine.curves.discount import CurveSet
-from rates_engine.evidence import Evidence
 from rates_engine.instruments.capfloor import CapFloor, Caplet
 from rates_engine.instruments.swaption import Swaption
-from rates_engine.results import EngineResult
-from rates_engine.volatility import bachelier, black
+from rates_engine.models import bachelier, black
+from rates_engine.pricing.collateral import curve_warnings, discounting_fields
 from rates_engine.volatility.units import Volatility
 
 __all__ = [
@@ -55,7 +56,7 @@ def forward_swap_rate(swaption: Swaption, curve_set: CurveSet) -> float:
     Returns:
         The par rate of the underlying swap.
     """
-    from rates_engine.pricing import par_rate
+    from rates_engine.pricing.linear import par_rate
 
     return par_rate(swaption.underlying, curve_set).value
 
@@ -70,7 +71,7 @@ def swaption_annuity(swaption: Swaption, curve_set: CurveSet) -> float:
     Returns:
         The annuity in USD per unit of rate.
     """
-    from rates_engine.pricing import annuity as leg_annuity
+    from rates_engine.pricing.linear import annuity as leg_annuity
 
     return leg_annuity(swaption.underlying, curve_set).value * swaption.notional
 
@@ -174,10 +175,11 @@ def _evidence(
             "volatility": volatility.to_dict(),
             "curve_interpolation": curve_set.discount.interpolation,
             "dual_curve": curve_set.is_dual,
-            "discounting": "collateral_rate_ois_sofr",
+            "discounting": discounting_fields(curve_set.currency)["discounting"],
             **extra,
         },
         sources=sources,
+        warnings=curve_warnings(curve_set),
     )
 
 

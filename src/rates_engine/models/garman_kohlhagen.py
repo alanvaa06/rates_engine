@@ -16,15 +16,15 @@ are named rather than positional-by-habit.
 :mod:`rates_engine.volatility`, an FX volatility is unambiguously lognormal
 — the market quotes it in percent and there is no normal-vol convention to
 confuse it with. The ambiguity in FX is the *delta* convention, which is
-:mod:`rates_engine.fx.delta`'s problem, and it is a real one.
+:mod:`rates_engine.models.fx_delta`'s problem, and it is a real one.
 """
 
 from __future__ import annotations
 
 import math
 
-from rates_engine.volatility import standard_normal_cdf, standard_normal_pdf
-from rates_engine.volatility.kinds import OptionKind
+from rates_engine.conventions.option_kind import OptionKind
+from rates_engine.models.gaussian import standard_normal_cdf, standard_normal_pdf
 
 __all__ = [
     "forward",
@@ -148,7 +148,7 @@ def delta_spot(
     """Unadjusted spot delta, ``e^{-r_f T} N(d1)`` for a call.
 
     The plainest of the four conventions, here because the greeks below are
-    written against it. :mod:`rates_engine.fx.delta` has the other three and
+    written against it. :mod:`rates_engine.models.fx_delta` has the other three and
     the refusal that stops one being assumed.
 
     Args:

@@ -17,15 +17,17 @@ from datetime import date, timedelta
 import pytest
 from conftest import require_published
 
-from rates_engine.conventions import SIFMA_US, imm_date, next_imm_on_or_after
-from rates_engine.instruments import SOFRFuture1M, SOFRFuture3M
+from rates_engine.conventions.calendar import SIFMA_US
+from rates_engine.conventions.schedule import imm_date, next_imm_on_or_after
 from rates_engine.instruments.futures import (
     SR1_CONTRACT_TENOR,
     SR1_NOTIONAL,
     SR3_CONTRACT_TENOR,
     SR3_NOTIONAL,
+    SOFRFuture1M,
+    SOFRFuture3M,
 )
-from rates_engine.market import load_series_csv
+from rates_engine.market.providers.file import load_series_csv
 from rates_engine.market.snapshot import MarketSnapshot
 
 
@@ -83,7 +85,7 @@ class TestSR1Settlement:
         settlements, fixings = require_published(
             "sr1_final_settlements.csv", "sofr_fixings.csv", ac="5.1"
         )
-        from rates_engine.market import load_settlements_csv
+        from rates_engine.market.providers.file import load_settlements_csv
 
         snapshot = MarketSnapshot(
             as_of=date.today(), series={"SOFR": load_series_csv(fixings, "SOFR")}
@@ -131,7 +133,7 @@ class TestSR3Settlement:
         settlements, fixings = require_published(
             "sr3_final_settlements.csv", "sofr_fixings.csv", ac="5.2"
         )
-        from rates_engine.market import load_settlements_csv
+        from rates_engine.market.providers.file import load_settlements_csv
 
         snapshot = MarketSnapshot(
             as_of=date.today(), series={"SOFR": load_series_csv(fixings, "SOFR")}

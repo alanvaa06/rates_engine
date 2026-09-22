@@ -8,7 +8,7 @@ Volatility is relative: ``sigma`` is a fraction a year, so 30% is ``0.30``.
 
 **Where it refuses.** A non-positive forward has no logarithm, and neither
 does a negative strike. Both raise
-:class:`~rates_engine.errors.ShiftRequiredError` rather than returning
+:class:`~rates_engine.core.errors.ShiftRequiredError` rather than returning
 something: a lognormal model at a negative rate is not a hard case, it is the
 wrong model, and the answer is a shift or Bachelier. A strike of exactly zero
 is different — the limit exists and is finite, ``V_call = A F``, so it is
@@ -19,9 +19,9 @@ from __future__ import annotations
 
 import math
 
-from rates_engine.errors import ShiftRequiredError
-from rates_engine.volatility._gaussian import standard_normal_cdf, standard_normal_pdf
-from rates_engine.volatility.kinds import OptionKind
+from rates_engine.conventions.option_kind import OptionKind
+from rates_engine.core.errors import ShiftRequiredError
+from rates_engine.models.gaussian import standard_normal_cdf, standard_normal_pdf
 
 __all__ = ["price", "implied_lognormal_vol", "vega", "delta"]
 
@@ -166,7 +166,7 @@ def implied_lognormal_vol(
     """Invert :func:`price` for the relative volatility.
 
     Newton on vega inside a maintained bracket, as in
-    :func:`rates_engine.volatility.bachelier.implied_normal_vol`.
+    :func:`rates_engine.models.bachelier.implied_normal_vol`.
 
     Args:
         target: The price to match, in the same units as ``annuity``.

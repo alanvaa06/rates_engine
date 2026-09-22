@@ -30,19 +30,17 @@ from datetime import date, timedelta
 import pytest
 from conftest import require_published
 
-from rates_engine.conventions import next_imm_on_or_after, year_fraction
-from rates_engine.convexity import ConvexityModel, convexity_adjustment
-from rates_engine.curves import (
-    CurveSet,
-    FuturesNode,
-    RealizedStubNode,
-    bootstrap_discount_curve,
-)
-from rates_engine.curves.discount import CURVE_TIME_BASIS
-from rates_engine.evidence import DataQuality
-from rates_engine.hedging import shock_table, strip_hedge
-from rates_engine.instruments import OISSwap, Side
-from rates_engine.pricing import dv01, par_rate
+from rates_engine.conventions.daycount import year_fraction
+from rates_engine.conventions.schedule import next_imm_on_or_after
+from rates_engine.conventions.side import Side
+from rates_engine.core.evidence import DataQuality
+from rates_engine.curves.bootstrap import FuturesNode, RealizedStubNode, bootstrap_discount_curve
+from rates_engine.curves.discount import CURVE_TIME_BASIS, CurveSet
+from rates_engine.hedging.futures_strip import shock_table, strip_hedge
+from rates_engine.instruments.swaps import OISSwap
+from rates_engine.models.convexity import ConvexityModel, convexity_adjustment
+from rates_engine.pricing.linear import par_rate
+from rates_engine.risk.sensitivities import dv01
 
 WHITEPAPER_CONTRACTS = 779
 WHITEPAPER_CONTRACT_TOLERANCE = 2

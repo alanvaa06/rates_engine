@@ -17,7 +17,7 @@ nothing else.
 
 Two places to look when this file does not answer the question.
 [`docs/ERRORS.md`](docs/ERRORS.md) is the refusal contract: which of the
-thirty-one exception types to catch, which are recoverable, the CLI's exit
+thirty-three exception types to catch, which are recoverable, the CLI's exit
 codes, and the failures that are *reported* rather than raised.
 [`docs/RESEARCH.md`](docs/RESEARCH.md) maps every formula to the paper it came
 from and says whether that paper was read or taken from a secondary source.
@@ -110,7 +110,7 @@ normal vols live at 60-150 bp, which as decimals are 0.006-0.015, so any
 floor below that lets the entire population of "normal passed as lognormal"
 through. `Volatility.unchecked()` exists for the genuinely extreme case.
 
-**The model follows from the units, not from an argument.** `optionpricing`
+**The model follows from the units, not from an argument.** `pricing.options`
 picks Bachelier for a normal volatility and Black for a lognormal one. Pass
 the volatility you have; do not convert it to reach the model you wanted.
 
@@ -165,7 +165,7 @@ point on them.
 is what every v1 and v2 object already was. Discounting a flow on a curve
 of another currency raises `CurrencyMismatchError` before any arithmetic.
 There is no conversion here at all: that needs a spot rate, a date and a
-quoting convention, and `rates_engine.fx` is where those are stated.
+quoting convention, and `rates_engine.pricing.fx_forward` is where those are stated.
 
 **`holidays(year)` returns dates observed *for* that year, not dates *in*
 it.** With New Year's Day on a Saturday, the observed holiday is 31
@@ -196,7 +196,7 @@ whose provenance says `data_quality="proxy"` raises
 **`Evidence` is nested, not flat.** `evidence.sources` holds the evidence of
 the inputs, so `hedge.evidence.sources[0].sources[0]` is the bootstrap. Read
 the summary with `evidence.worst_quality` or
-`rates_engine.diagnostics.quality_report(evidence)` rather than walking it by
+`rates_engine.core.diagnostics.quality_report(evidence)` rather than walking it by
 hand.
 
 **Constructing a curve with rising discount factors is allowed.** Negative
@@ -208,35 +208,53 @@ Call `curve.require_monotone()` when you mean to assert it.
 extra. They are not quite interchangeable in one respect the code handles for
 you: YAML parses `2026-01-15` into a `date`, JSON leaves it a string.
 
+**The discounting evidence comes from the curve's currency.** Every price
+records `discounting: collateral_rate_ois_<index>`, where the index is
+`conventions.indices.collateral_index(curve.currency)`: SOFR for dollars,
+TIIE de Fondeo for pesos. A peso price also carries the
+`unresolved_convention:mxn_collateral_rate` degradation, so its
+`worst_quality` is `assumed` even on a hand-built curve. A new `Currency`
+member needs an entry in `COLLATERAL_INDEX`; `tests/test_indices.py` fails
+until it has one.
+
+**An instrument still takes its currency from the curve it is priced on.**
+`OISSwap` has no currency or index field, so an `OISSwap` priced on a peso
+curve is a peso swap -- but it keeps its own `calendar` (SIFMA by default).
+Pass `calendar=BMV` for peso dates. Whether instruments should carry their
+index is an open decision in `docs/architecture/ARCHITECTURE.md`.
+
 **Nothing here reads the network except `market.providers.fred`,** and that
 imports `urllib` inside the call. Importing `rates_engine` opens no socket and
 installs no warning filter; `tests/test_import_side_effects.py` enforces both.
 
 ## Where things live
 
-| Module | Responsibility |
-| --- | --- |
-| `errors` | Every deliberate refusal, each with an exit code |
-| `money` | `Currency`, and the refusal when two of them meet |
-| `conventions` | Day counts, the SIFMA and BMV calendars, rolls, IMM dates, schedules |
-| `evidence` | `Evidence`, `Provenance`, `Degradation`, `DataQuality` |
-| `results` | `EngineResult`, the base every result serialises through |
-| `market` | Snapshots, the SOFR compounding rules, `file`, `fred` and `banxico` providers |
-| `instruments` | `OISSwap`, `IRSwap`, `FRA`, `SOFRFuture1M`, `SOFRFuture3M` |
-| `volatility` | `Volatility` and its units, Bachelier, Black, SABR, the cube |
-| `curves` | `DiscountCurve`, the bootstrap, the four views, the dual-curve solver, monotone convex, Nelson-Siegel, the FOMC step curve, and the MXN curve with its unresolved conventions |
-| `fx` | The currency pair, Garman-Kohlhagen, four delta conventions, vanna-volga, the CIP forward and its basis |
-| `convexity` | Ho-Lee and Hull-White adjustments, realised sigma |
-| `pricing` | `pv`, `par_rate`, `annuity`, parallel `dv01`, `price_on_parametric` |
-| `optionpricing` | Forward swap rate, swaption annuity, swaption and cap/floor PV |
-| `risk` | Key rate, duration conventions, convexity, option greeks, and the stubs |
-| `hedging` | `strip_hedge`, `shock_table` |
-| `hedging_structures` | `compare_structures`: eight structures, costed side by side |
-| `hedge_program` | The hedging policy as data, loaded strictly and audited |
-| `diagnostics` | Reading an evidence chain |
-| `reporting` | JSON payloads and error payloads |
-| `cli` | `rateng bootstrap / price / hedge / describe / list-instruments / fx-forward / hedge-structures` |
-| `mcp_server` | `rateng-mcp`: the same seven payloads over stdio |
+Packages sit on layers, lowest first; a package imports only from layers
+below its own, and `tests/test_layering.py` enforces it. The design is
+[`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHITECTURE.md).
+
+**Import from `rates_engine` or from the module that defines a name.**
+Subpackage `__init__` files document their layer and re-export nothing, so
+`from rates_engine.curves import DiscountCurve` fails on purpose; write
+`from rates_engine import DiscountCurve` or
+`from rates_engine.curves.discount import DiscountCurve`.
+
+| Package | Layer | Responsibility |
+| --- | --- | --- |
+| `core` | 0 | `errors` (every refusal, each with an exit code), `evidence`, `results` (`EngineResult`), `money` (`Currency`), `diagnostics` (reading an evidence chain) |
+| `conventions` | 1 | Day counts, the SIFMA and BMV calendars, rolls, IMM dates, schedules; `indices` (`RateIndex`, the collateral index of each currency, `UNRESOLVED_MXN`); the shared vocabulary `Side`, `OptionKind`, `CurrencyPair` |
+| `market` | 2 | Snapshots, the SOFR compounding rules, realised sigma (`estimators`), the `file`, `fred` and `banxico` providers |
+| `models` | 2 | Closed forms: Black, Bachelier, Garman-Kohlhagen, SABR, the four FX delta conventions, Ho-Lee and Hull-White convexity |
+| `curves` | 3 | `DiscountCurve`, the bootstrap, the four views, the dual-curve solver, monotone convex, Nelson-Siegel, the FOMC step curve, and the MXN curve with its unresolved conventions |
+| `volatility` | 3 | `Volatility` and its units, the SABR cube, the vanna-volga FX smile |
+| `instruments` | 3 | `OISSwap`, `IRSwap`, `FRA`, `SOFRFuture1M`, `SOFRFuture3M`, `CapFloor`, `Swaption` |
+| `pricing` | 4 | `linear` (`pv`, `par_rate`, `annuity`, `price_on_parametric`, and `discounted_value`, the bare float for callers that reprice many times), `options` (swaptions, caps and floors), `fx_forward` (the CIP forward and its basis), `collateral` (the discounting evidence every pricer writes) |
+| `risk` | 5 | `bumps` (the one shift-and-reprice primitive, `BUMP_BP`, `tent_weights`), `sensitivities` (parallel `dv01`, key rate, duration conventions, convexity, and the stubs), `greeks` (option greeks) |
+| `hedging` | 6 | `futures_strip` (`strip_hedge`, `shock_table`), `fx_structures` (`compare_structures`), `program` (the hedging policy as data) |
+| `reporting` | 7 | JSON payloads and error payloads |
+| `app` | 8 | The use cases: `config` (loading, dates), `builders` (config blocks to domain objects), `commands` (one function per command and `COMMANDS`, the table every interface dispatches through) |
+| `cli` | 9 | `rateng bootstrap / price / hedge / describe / list-instruments / fx-forward / hedge-structures` |
+| `mcp_server` | 9 | `rateng-mcp`: the same seven payloads over stdio, from the same table |
 
 ## The CLI in one line
 

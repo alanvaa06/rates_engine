@@ -13,7 +13,7 @@ from datetime import date, timedelta
 from rates_engine.conventions.calendar import (
     SIFMA_US,
     BusinessDayConvention,
-    SIFMAUSCalendar,
+    HolidayCalendar,
     _nth_weekday,
 )
 
@@ -117,7 +117,7 @@ class Schedule:
         maturity: date,
         *,
         frequency_months: int,
-        calendar: SIFMAUSCalendar = SIFMA_US,
+        calendar: HolidayCalendar = SIFMA_US,
         convention: BusinessDayConvention = BusinessDayConvention.MODIFIED_FOLLOWING,
         payment_lag_days: int = 0,
     ) -> Schedule:
