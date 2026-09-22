@@ -99,6 +99,11 @@ touches, and it is barred from any test that validates a published number. The
 SR1 contract notional is assumed rather than read from the contract spec, and
 the evidence says `notional_source="assumed"`.
 
+In v3: the peso conventions -- the TIIE day count and period, the calendar,
+the rate peso collateral earns -- are assumptions this build could not check
+against Banxico. They are listed in `UNRESOLVED_MXN`, and every peso curve and
+every price discounted on one carries them, so its quality reads `assumed`.
+
 In v2: Hagan's SABR expansion and Hagan-West's interpolation are both
 transcribed from secondary sources, and what stands in for reading them is a
 set of limits the formulas must satisfy plus, for SABR, a Monte Carlo of the
@@ -113,6 +118,7 @@ which is a choice the payload carries.
 
 - Source: https://github.com/alanvaa06/rates_engine
 - Agent notes: AGENTS.md
+- Architecture and layers: docs/architecture/ARCHITECTURE.md
 - Refusal contract: docs/ERRORS.md
 - Formula provenance: docs/RESEARCH.md
 - Changelog: CHANGELOG.md

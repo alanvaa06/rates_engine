@@ -13,35 +13,35 @@ of claim, and a reader deserves to know which one they are getting.
 | SR1 settlement: arithmetic average of daily SOFR, ACT/360 | `instruments/futures.py` | CME contract definition, via the vault note *SOFR Futures — Pricing, Convexity and Hedging Swaps* | Secondary |
 | SR3 settlement: daily compounded SOFR between IMM dates, ACT/360 | `instruments/futures.py` | Same | Secondary |
 | Non-publication days repeat the last published rate | `market/snapshot.py` | CME and New York Fed rule, via the same note | Secondary |
-| Ho-Lee convexity adjustment, `0.5 σ² T₁ T₂` | `convexity.py` | Hull, via *Forward vs Futures and the Eurodollar Convexity Bias* | Secondary |
-| Hull-White convexity adjustment | `convexity.py` | Henrard, transcribed by Skov and Skovmand (eq. 74-75) | **Not read in Henrard** |
-| Convexity material only past two years | `convexity.py`, tested qualitatively | Skov and Skovmand | Secondary |
+| Ho-Lee convexity adjustment, `0.5 σ² T₁ T₂` | `models/convexity.py` | Hull, via *Forward vs Futures and the Eurodollar Convexity Bias* | Secondary |
+| Hull-White convexity adjustment | `models/convexity.py` | Henrard, transcribed by Skov and Skovmand (eq. 74-75) | **Not read in Henrard** |
+| Convexity material only past two years | `models/convexity.py`, tested qualitatively | Skov and Skovmand | Secondary |
 | At-the-money calibration overstates the adjustment by 10-25% | Recorded in the evidence, applies from v2 | Romero, Bermúdez and Turfus | Secondary |
-| Collateralised flows discount at the collateral rate | `pricing.py`, `curves/discount.py` | Fujii, Shimada and Takahashi; Piterbarg, via *Multi-Curve Framework and Collateral Discounting* | Secondary |
+| Collateralised flows discount at the collateral rate | `pricing/collateral.py`, `conventions/indices.py`, `curves/discount.py` | Fujii, Shimada and Takahashi; Piterbarg, via *Multi-Curve Framework and Collateral Discounting* | Secondary |
 | Projection on the tenor curve, discounting on OIS | `instruments/swaps.py` | Mercurio; Bianchetti, via the same note | Secondary |
 | The FRA rate is not the discount curve's forward under a basis | `instruments/fra.py` | Bianchetti | Secondary |
 | Forward basis between tenor and OIS curves (eq. 20) | `curves/dual.py` | Bianchetti | Secondary |
 | Sequential versus simultaneous dual-curve calibration | `curves/dual.py` | Ametrano and Bianchetti | Secondary |
 | Four curve views and the no-arbitrage relations between them | `curves/views.py` | CFA Level I *Fixed Income Valuation*; CFA Level II *Term Structure and Arbitrage-Free Valuation* | Read |
-| Hedging a swap with a futures strip; the convexity residual | `hedging.py` | CFA Level III *Derivatives — Swap Strategies*; CME/Rogerson 2025 whitepaper | Whitepaper **not read** |
-| Key-rate shocks as a partition of unity | `risk.py` | Standard construction; the property is asserted directly rather than cited | Derived here |
-| Duration conventions: money duration, PVBP, effective duration and convexity | `risk.py` | CFA Level I *Fixed Income* | Read |
+| Hedging a swap with a futures strip; the convexity residual | `hedging/futures_strip.py` | CFA Level III *Derivatives — Swap Strategies*; CME/Rogerson 2025 whitepaper | Whitepaper **not read** |
+| Key-rate shocks as a partition of unity | `risk/bumps.py` | Standard construction; the property is asserted directly rather than cited | Derived here |
+| Duration conventions: money duration, PVBP, effective duration and convexity | `risk/sensitivities.py` | CFA Level I *Fixed Income* | Read |
 
 ## Formulas added in v2
 
 | What | Where it lives | Source | Read? |
 | --- | --- | --- | --- |
-| Bachelier (normal) option value, `A[(F-K)N(d) + σ√T n(d)]` | `volatility/bachelier.py` | Standard; the vault note *Volatility, Greeks and Option Strategy Practice (2026)* states it in this form | Secondary |
-| Black (lognormal) option value on a forward | `volatility/black.py` | Black 1976, via *CFA L2 Derivatives — Pricing and Valuation* ·
+| Bachelier (normal) option value, `A[(F-K)N(d) + σ√T n(d)]` | `models/bachelier.py` | Standard; the vault note *Volatility, Greeks and Option Strategy Practice (2026)* states it in this form | Secondary |
+| Black (lognormal) option value on a forward | `models/black.py` | Black 1976, via *CFA L2 Derivatives — Pricing and Valuation* ·
 *CFA Economics — Currency Exchange Rates* ·
 *CFA L3 Derivatives — Forwards, Futures, and Options* ·
 *CFA L3 Asset Allocation — Constraints, Currency, and Benchmarks* | Secondary |
-| The annuity is the numeraire that makes the forward swap rate a martingale | `optionpricing.py` | *Forwards, Multi-Curve and Swaptions (Post-LIBOR)*; Mercurio | Secondary |
-| SABR implied lognormal volatility, Hagan et al. (2002) eq. (2.17a) | `volatility/sabr.py` | Hagan, Kumar, Lesniewski and Woodward, via *Stochastic, Local and Rough Volatility Models* | **Not read in Hagan** |
-| SABR at-the-money expansion, eq. (2.18) | `volatility/sabr.py` | Same | **Not read in Hagan** |
-| SABR implied normal volatility, eq. (A.59a) | `volatility/sabr.py` | Same | **Not read in Hagan** |
-| β fixed rather than calibrated, at a market convention | `volatility/sabr.py` | *Stochastic, Local and Rough Volatility Models*, on the β/ρ identification problem | Secondary |
-| Breeden-Litzenberger: the second strike derivative of the call price is the density | `volatility/sabr.py` diagnostics | Breeden and Litzenberger 1978; standard | Secondary |
+| The annuity is the numeraire that makes the forward swap rate a martingale | `pricing/options.py` | *Forwards, Multi-Curve and Swaptions (Post-LIBOR)*; Mercurio | Secondary |
+| SABR implied lognormal volatility, Hagan et al. (2002) eq. (2.17a) | `models/sabr.py` | Hagan, Kumar, Lesniewski and Woodward, via *Stochastic, Local and Rough Volatility Models* | **Not read in Hagan** |
+| SABR at-the-money expansion, eq. (2.18) | `models/sabr.py` | Same | **Not read in Hagan** |
+| SABR implied normal volatility, eq. (A.59a) | `models/sabr.py` | Same | **Not read in Hagan** |
+| β fixed rather than calibrated, at a market convention | `models/sabr.py` | *Stochastic, Local and Rough Volatility Models*, on the β/ρ identification problem | Secondary |
+| Breeden-Litzenberger: the second strike derivative of the call price is the density | `models/sabr.py` diagnostics | Breeden and Litzenberger 1978; standard | Secondary |
 | Nelson-Siegel zero curve and its three loadings | `curves/parametric.py` | Nelson and Siegel 1987, via *Term Structure Models for Swaps and Swaptions* | Secondary |
 | Concentrated least squares: betas linear given tau | `curves/parametric.py` | Standard result; the reason is argued in the module rather than cited | Derived here |
 | Piecewise-constant policy path fitted to the futures strip | `curves/parametric.py` | Heitfield and Park, via *SOFR Futures — Pricing, Convexity and Hedging Swaps* | Secondary |
@@ -51,14 +51,14 @@ of claim, and a reader deserves to know which one they are getting.
 
 | What | Where it lives | Source | Read? |
 | --- | --- | --- | --- |
-| Garman-Kohlhagen: Black-Scholes with the foreign rate as a yield | `fx/garman_kohlhagen.py` | Garman and Kohlhagen 1983; standard, and derivable from Black-Scholes in a line | Secondary |
-| Covered interest parity, `F = S P_f / P_d` | `fx/forward.py` | *CFA Economics — Currency Exchange Rates*; an arbitrage relation rather than a model | Read |
-| CIP has not held since 2007; the residual is the cross-currency basis | `fx/forward.py` | *Forwards, Multi-Curve and Swaptions (Post-LIBOR)* | Secondary |
-| The four FX delta conventions and the premium adjustment | `fx/delta.py` | *Volatility, Greeks and Option Strategy Practice (2026)*, on the units-and-conventions traps | Secondary |
-| Delta-neutral straddle strike, `F exp(±σ²T/2)` | `fx/vannavolga.py` | Standard; the sign follows from the premium adjustment and is derived in the module | Derived here |
-| Vanna-volga: price at ATM plus the vega, vanna and volga the flat price fails to hedge | `fx/vannavolga.py` | Castagna and Mercurio, via *Forwards, Multi-Curve and Swaptions (Post-LIBOR)* | **Not read in Castagna-Mercurio** |
-| Hedge structures and the cost-versus-protection trade-off | `hedging_structures.py` | CFA Level III Reading 19; *CFA L3 Derivatives — Forwards, Futures, and Options* | Read |
-| `σ²(RDC) = σ²(RFC) + σ²(RFX) + 2ρσσ` | `hedging_structures.py` | *CFA L3 Asset Allocation — Constraints, Currency, and Benchmarks* | Read |
+| Garman-Kohlhagen: Black-Scholes with the foreign rate as a yield | `models/garman_kohlhagen.py` | Garman and Kohlhagen 1983; standard, and derivable from Black-Scholes in a line | Secondary |
+| Covered interest parity, `F = S P_f / P_d` | `pricing/fx_forward.py` | *CFA Economics — Currency Exchange Rates*; an arbitrage relation rather than a model | Read |
+| CIP has not held since 2007; the residual is the cross-currency basis | `pricing/fx_forward.py` | *Forwards, Multi-Curve and Swaptions (Post-LIBOR)* | Secondary |
+| The four FX delta conventions and the premium adjustment | `models/fx_delta.py` | *Volatility, Greeks and Option Strategy Practice (2026)*, on the units-and-conventions traps | Secondary |
+| Delta-neutral straddle strike, `F exp(±σ²T/2)` | `volatility/fx_smile.py` | Standard; the sign follows from the premium adjustment and is derived in the module | Derived here |
+| Vanna-volga: price at ATM plus the vega, vanna and volga the flat price fails to hedge | `volatility/fx_smile.py` | Castagna and Mercurio, via *Forwards, Multi-Curve and Swaptions (Post-LIBOR)* | **Not read in Castagna-Mercurio** |
+| Hedge structures and the cost-versus-protection trade-off | `hedging/fx_structures.py` | CFA Level III Reading 19; *CFA L3 Derivatives — Forwards, Futures, and Options* | Read |
+| `σ²(RDC) = σ²(RFC) + σ²(RFX) + 2ρσσ` | `hedging/fx_structures.py` | *CFA L3 Asset Allocation — Constraints, Currency, and Benchmarks* | Read |
 | The Mexican holiday calendar, thirteen rules | `conventions/calendar.py` | QuantLib `ql/time/calendars/mexico.cpp`, **read directly** | Read — but it is the **BMV** calendar, not Banxico's |
 | TIIE day count, coupon period, benchmark distinction | `curves/mxn.py` | **Nothing reachable.** Recorded in `UNRESOLVED_MXN` | **Not established** |
 
@@ -171,11 +171,11 @@ something it cannot reach by construction.
 | SR1 contract notional is USD 5,000,000 | `instruments/futures.py` | `notional_source="assumed"`; the DV01 of 41.67 is derived from it, not quoted |
 | SIFMA observes a Saturday holiday on the preceding Friday | `conventions/calendar.py` | The fixture's provenance records the manual check as **not done** |
 | Treasury par yields are usable as a stand-in for OIS par | `curves/bootstrap.py` | Opt-in only; marks every node; a `Degradation` names the swap spread as an unquantified bias |
-| SABR's backbone exponent β is 0.5 unless the caller says otherwise | `volatility/sabr.py` | Carried in every `SABRParameters` and every calibration payload; the module says why it is fixed rather than fitted |
+| SABR's backbone exponent β is 0.5 unless the caller says otherwise | `models/sabr.py` | Carried in every `SABRParameters` and every calibration payload; the module says why it is fixed rather than fitted |
 | A term rate read off a futures-fitted curve carries no convexity adjustment | `curves/parametric.py` | `TERM_RATE_CAVEAT` plus a `Degradation` marking the result `assumed`; the evidence sets `convexity_adjustment_applied: false` |
 | Every MXN convention: TIIE day count, coupon period, benchmark distinction, SIE identifiers, and that the calendar is the BMV's | `curves/mxn.py` | `UNRESOLVED_MXN`, one `Degradation` each on every peso result; `strict_conventions=True` refuses |
-| The USD/MXN pip is 1e-4 | `fx/quote.py` | Declared on `CurrencyPair` with no default, and serialised into every payload that reports forward points |
-| A cross-currency basis beyond ±500 bp is not a quote | `fx/forward.py` | `MAX_PLAUSIBLE_BASIS_BP`, a named constant; the refusal says the band is a plausibility check rather than a measurement |
+| The USD/MXN pip is 1e-4 | `conventions/currency_pair.py` | Declared on `CurrencyPair` with no default, and serialised into every payload that reports forward points |
+| A cross-currency basis beyond ±500 bp is not a quote | `pricing/fx_forward.py` | `MAX_PLAUSIBLE_BASIS_BP`, a named constant; the refusal says the band is a plausibility check rather than a measurement |
 
 ## Vault notes behind this package
 

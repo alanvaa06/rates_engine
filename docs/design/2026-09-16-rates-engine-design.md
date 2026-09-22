@@ -4,6 +4,8 @@
 
 > **Método.** Convenciones tomadas de `alanvaa06/optimization_engine` v0.7.0 (pyproject, AGENTS.md, CHANGELOG, tests/, docs/ERRORS.md — leídos vía GitHub). Contenido técnico y tests golden tomados del wiki compilado hoy: [[SOFR Futures — Pricing, Convexity and Hedging Swaps]], [[Multi-Curve Framework and Collateral Discounting]], [[Forward vs Futures and the Eurodollar Convexity Bias]], [[LIBOR Transition, SOFR and Fallbacks]], [[Term Structure Models for Swaps and Swaptions]], [[Forwards, Multi-Curve and Swaptions (Post-LIBOR)]]. Todo número citado abajo tiene esa procedencia; lo que es supuesto mío está marcado **[asumo]**.
 
+> **Nota 2026-09-22.** La estructura de módulos de §3 describe la fase 1 antes de que hubiera código. La arquitectura vigente (capas, paquetes, puntos de extensión) está en [`docs/architecture/ARCHITECTURE.md`](../architecture/ARCHITECTURE.md). El resto de este documento (principio rector, alcance, tests golden, datos) sigue vigente.
+
 ---
 
 ## 0. Qué es y qué no es

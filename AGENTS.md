@@ -110,7 +110,7 @@ normal vols live at 60-150 bp, which as decimals are 0.006-0.015, so any
 floor below that lets the entire population of "normal passed as lognormal"
 through. `Volatility.unchecked()` exists for the genuinely extreme case.
 
-**The model follows from the units, not from an argument.** `optionpricing`
+**The model follows from the units, not from an argument.** `pricing.options`
 picks Bachelier for a normal volatility and Black for a lognormal one. Pass
 the volatility you have; do not convert it to reach the model you wanted.
 
