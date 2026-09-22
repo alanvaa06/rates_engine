@@ -65,6 +65,15 @@ A reorganisation into layers. No number moves, and every name exported from
 - **Calendars are typed as `HolidayCalendar`**, not `SIFMAUSCalendar`, on
   instruments, snapshots, curve views and the FOMC step curve, so a `BMV`
   calendar is a valid argument rather than a type error. Defaults unchanged.
+- **One bump primitive.** `risk.bumps` (`shift_from_bp`, `tent_shift`,
+  `repriced`, `BUMP_BP`, `tent_weights`) is the only code that moves a curve
+  and reprices; every sensitivity is written on it instead of spelling out
+  `pv(instrument, curve_set.shifted(shift)).value` and discarding the evidence
+  it built. `dv01` moved from `pricing` to `risk.sensitivities` (its payload,
+  `produced_by: "pricing.dv01"` included, is unchanged: `produced_by` is an
+  identifier, not a module path). `option_greeks` and `GreeksResult` moved to
+  `risk.greeks`, typed `Swaption | CapFloor` instead of `Any`. Bit-identical;
+  DV01 x9 and the shock table x3.6 against v0.3.0.
 - **`tests/test_layering.py`** checks layers rather than a total order of
   modules: nothing imports sideways or upward except one declared, dated
   exception (`instruments -> curves`).
@@ -90,6 +99,10 @@ A reorganisation into layers. No number moves, and every name exported from
   `collateral_index`. A currency with no entry is refused with
   `UnsupportedConventionError` rather than defaulted to SOFR.
 - **`pricing.collateral`**: the one home of the discounting evidence.
+- **`pricing.linear.discounted_value`**: present value as a bare float, the
+  same number `pv` returns without the cashflow list and evidence record.
+  **`pricing.linear.valuation_evidence`**, formerly private, so a DV01 in
+  `risk` is described exactly as a price is.
 - `tests/test_curve_cache.py`: a derived curve's handed-down arrays equal a
   fresh computation exactly, and the cache never enters equality or hashing.
 

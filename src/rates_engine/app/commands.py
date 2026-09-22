@@ -39,10 +39,15 @@ from rates_engine.hedging.fx_structures import (
 from rates_engine.hedging.program import audit_hedge, load_program
 from rates_engine.models.fx_delta import DeltaBasis, PremiumAdjustment
 from rates_engine.pricing.fx_forward import forward_from_curves
-from rates_engine.pricing.linear import annuity, dv01, par_rate, pv
+from rates_engine.pricing.linear import (
+    annuity,
+    par_rate,
+    pv,
+)
 from rates_engine.reporting.payloads import result_payload
 from rates_engine.risk.sensitivities import (
     INTERPOLATION_CAVEAT,
+    dv01,
     effective_convexity,
     effective_duration,
     key_rate_dv01,

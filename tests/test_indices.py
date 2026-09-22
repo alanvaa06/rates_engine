@@ -27,7 +27,11 @@ from rates_engine.core.evidence import DataQuality
 from rates_engine.core.money import Currency
 from rates_engine.curves.discount import CurveSet, DiscountCurve
 from rates_engine.instruments.swaps import OISSwap
-from rates_engine.pricing.linear import dv01, par_rate, pv
+from rates_engine.pricing.linear import (
+    par_rate,
+    pv,
+)
+from rates_engine.risk.sensitivities import dv01
 
 AS_OF = date(2026, 1, 15)
 

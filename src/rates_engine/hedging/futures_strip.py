@@ -45,9 +45,9 @@ from rates_engine.instruments.futures import (
 )
 from rates_engine.pricing.linear import (
     Priceable,
-    dv01,
-    pv,
+    discounted_value,
 )
+from rates_engine.risk.sensitivities import dv01
 
 __all__ = ["SR3_DV01", "HedgeResult", "ShockTableResult", "strip_hedge", "shock_table", "DEFAULT_SHOCKS_BP"]
 
@@ -275,7 +275,7 @@ def _quote_parallel_dv01(
             _with_quote_shift(i, shift) if id(i) in targets else i for i in instruments
         )
         curve = bootstrap_discount_curve(as_of, bumped, long_end_source=long_end_source).curve
-        return pv(swap, CurveSet(curve)).value
+        return discounted_value(swap, CurveSet(curve))
 
     return (repriced(-BASIS_POINT) - repriced(+BASIS_POINT)) / 2.0
 
@@ -328,7 +328,7 @@ def _reprice_with_quote_bump(
     """Reprice the swap with one futures quote moved and the curve rebuilt."""
     bumped = tuple(_with_quote_shift(i, shift) if i is target else i for i in instruments)
     curve = bootstrap_discount_curve(as_of, bumped, long_end_source=long_end_source).curve
-    return pv(swap, CurveSet(curve)).value
+    return discounted_value(swap, CurveSet(curve))
 
 
 @dataclass(frozen=True)
@@ -386,11 +386,11 @@ def shock_table(
         Currency.USD,
         operation="netting a futures strip P&L against a swap P&L",
     )
-    base_pv = pv(hedge.swap, hedge.curve_set).value
+    base_pv = discounted_value(hedge.swap, hedge.curve_set)
     rows: list[dict[str, float]] = []
     for shock in shocks_bp:
         shifted = hedge.curve_set.shifted(shock * 1e-4)
-        swap_pnl = pv(hedge.swap, shifted).value - base_pv
+        swap_pnl = discounted_value(hedge.swap, shifted) - base_pv
         # A long futures position loses when rates rise, linearly in *its own*
         # forward rate. Using a nominal parallel basis point here instead would
         # leave a first-order residual in the net column and make the swap's

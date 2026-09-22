@@ -18,12 +18,12 @@ from rates_engine.core.errors import (
     UndefinedDurationError,
 )
 from rates_engine.hedging.futures_strip import strip_hedge
-from rates_engine.pricing.linear import dv01
+from rates_engine.risk.bumps import tent_weights
 from rates_engine.risk.sensitivities import (
     INTERPOLATION_CAVEAT,
+    dv01,
     key_rate_duration,
     key_rate_dv01,
-    tent_weights,
 )
 
 TENORS = (0.5, 1.0, 1.5, 2.0, 2.4)

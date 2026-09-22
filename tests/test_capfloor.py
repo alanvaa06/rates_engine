@@ -18,7 +18,7 @@ from rates_engine.pricing.options import (
     cap_floor_pv,
     caplet_pv,
 )
-from rates_engine.risk.sensitivities import option_greeks
+from rates_engine.risk.greeks import option_greeks
 from rates_engine.volatility.units import Volatility
 
 STRIKE = 0.042

@@ -42,7 +42,6 @@ from rates_engine.market.estimators import realized_sofr_sigma
 from rates_engine.models.convexity import convexity_adjustment
 from rates_engine.pricing.linear import (
     annuity,
-    dv01,
     par_rate,
     price_on_parametric,
     pv,
@@ -53,10 +52,11 @@ from rates_engine.reporting.payloads import (
     error_payload,
     result_payload,
 )
+from rates_engine.risk.greeks import option_greeks
 from rates_engine.risk.sensitivities import (
+    dv01,
     key_rate_dv01,
     money_convexity,
-    option_greeks,
     pvbp,
 )
 from rates_engine.volatility.cube import (

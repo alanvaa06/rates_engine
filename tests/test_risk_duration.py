@@ -7,12 +7,10 @@ from dataclasses import replace
 import pytest
 
 from rates_engine.core.errors import UndefinedDurationError
-from rates_engine.pricing.linear import (
-    dv01,
-    pv,
-)
+from rates_engine.pricing.linear import pv
 from rates_engine.risk.sensitivities import (
     ZERO_PRICE_TOLERANCE,
+    dv01,
     effective_convexity,
     effective_duration,
     macaulay_duration,

@@ -21,10 +21,10 @@ from rates_engine.instruments.swaps import (
 )
 from rates_engine.pricing.linear import (
     annuity,
-    dv01,
     par_rate,
     pv,
 )
+from rates_engine.risk.sensitivities import dv01
 
 
 def _flat(as_of: date, rate: float, years: int = 6) -> DiscountCurve:

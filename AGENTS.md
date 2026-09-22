@@ -248,8 +248,8 @@ Subpackage `__init__` files document their layer and re-export nothing, so
 | `curves` | 3 | `DiscountCurve`, the bootstrap, the four views, the dual-curve solver, monotone convex, Nelson-Siegel, the FOMC step curve, and the MXN curve with its unresolved conventions |
 | `volatility` | 3 | `Volatility` and its units, the SABR cube, the vanna-volga FX smile |
 | `instruments` | 3 | `OISSwap`, `IRSwap`, `FRA`, `SOFRFuture1M`, `SOFRFuture3M`, `CapFloor`, `Swaption` |
-| `pricing` | 4 | `linear` (`pv`, `par_rate`, `annuity`, parallel `dv01`, `price_on_parametric`), `options` (swaptions, caps and floors), `fx_forward` (the CIP forward and its basis), `collateral` (the discounting evidence every pricer writes) |
-| `risk` | 5 | Key rate, duration conventions, convexity, option greeks, and the stubs |
+| `pricing` | 4 | `linear` (`pv`, `par_rate`, `annuity`, `price_on_parametric`, and `discounted_value`, the bare float for callers that reprice many times), `options` (swaptions, caps and floors), `fx_forward` (the CIP forward and its basis), `collateral` (the discounting evidence every pricer writes) |
+| `risk` | 5 | `bumps` (the one shift-and-reprice primitive, `BUMP_BP`, `tent_weights`), `sensitivities` (parallel `dv01`, key rate, duration conventions, convexity, and the stubs), `greeks` (option greeks) |
 | `hedging` | 6 | `futures_strip` (`strip_hedge`, `shock_table`), `fx_structures` (`compare_structures`), `program` (the hedging policy as data) |
 | `reporting` | 7 | JSON payloads and error payloads |
 | `app` | 8 | The use cases: `config` (loading, dates), `builders` (config blocks to domain objects), `commands` (one function per command and `COMMANDS`, the table every interface dispatches through) |

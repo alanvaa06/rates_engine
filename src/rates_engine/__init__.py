@@ -216,7 +216,6 @@ from rates_engine.pricing.linear import (
     ParametricComparison,
     PriceResult,
     annuity,
-    dv01,
     par_rate,
     price_on_parametric,
     pv,
@@ -228,10 +227,15 @@ from rates_engine.pricing.options import (
     model_for,
     swaption_pv,
 )
-from rates_engine.risk.sensitivities import (
+from rates_engine.risk.bumps import tent_weights
+from rates_engine.risk.greeks import (
     GreeksResult,
+    option_greeks,
+)
+from rates_engine.risk.sensitivities import (
     KeyRateResult,
     RiskResult,
+    dv01,
     effective_convexity,
     effective_duration,
     key_rate_duration,
@@ -240,9 +244,7 @@ from rates_engine.risk.sensitivities import (
     modified_duration,
     money_convexity,
     money_duration,
-    option_greeks,
     pvbp,
-    tent_weights,
 )
 from rates_engine.volatility.cube import (
     CubePoint,

@@ -22,11 +22,10 @@ from rates_engine.hedging.futures_strip import (
     strip_hedge,
 )
 from rates_engine.pricing.linear import (
-    dv01,
     par_rate,
     pv,
 )
-from rates_engine.risk.sensitivities import key_rate_dv01
+from rates_engine.risk.sensitivities import dv01, key_rate_dv01
 
 CROSS_VERSION_RTOL = 1e-14
 
@@ -175,7 +174,7 @@ class TestCalibrationDeterminism:
 
     def test_option_pricing_is_bit_exact(self, atm_swaption, option_curve_set):
         from rates_engine.pricing.options import swaption_pv
-        from rates_engine.risk.sensitivities import option_greeks
+        from rates_engine.risk.greeks import option_greeks
         from rates_engine.volatility.units import (
             Volatility,
             VolUnits,

@@ -49,10 +49,8 @@ from rates_engine.models.convexity import (
     ConvexityModel,
     convexity_adjustment,
 )
-from rates_engine.pricing.linear import (
-    dv01,
-    par_rate,
-)
+from rates_engine.pricing.linear import par_rate
+from rates_engine.risk.sensitivities import dv01
 
 WHITEPAPER_CONTRACTS = 779
 WHITEPAPER_CONTRACT_TOLERANCE = 2

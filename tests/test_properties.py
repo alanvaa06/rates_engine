@@ -38,14 +38,14 @@ from rates_engine.curves.discount import (
 from rates_engine.curves.views import par_curve
 from rates_engine.instruments.swaps import OISSwap
 from rates_engine.pricing.linear import (
-    dv01,
     par_rate,
     pv,
 )
+from rates_engine.risk.bumps import tent_weights
 from rates_engine.risk.sensitivities import (
+    dv01,
     key_rate_dv01,
     money_convexity,
-    tent_weights,
 )
 
 AS_OF = date(2026, 1, 15)
