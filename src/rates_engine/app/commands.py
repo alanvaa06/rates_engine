@@ -80,7 +80,7 @@ def list_instruments(_config: dict[str, Any] | None) -> dict[str, Any]:
         "schema_version": SCHEMA_VERSION,
         "result_type": "InstrumentCatalogue",
         "linear": [
-            {"name": "OISSwap", "index": "compounded_overnight", "curves": ["discount"]},
+            {"name": "OISSwap", "index": "compounded_sofr", "curves": ["discount"]},
             {"name": "IRSwap", "index": "term_sofr", "curves": ["discount", "tenor"]},
             {"name": "FRA", "index": "term_sofr", "curves": ["discount", "tenor"]},
             {"name": "SOFRFuture1M", "settlement": "arithmetic_average", "dv01_usd": 41.67},
@@ -225,13 +225,18 @@ def price(config: dict[str, Any] | None) -> dict[str, Any]:
     as_of = as_date(config["as_of"])
     instruments = calibration_nodes(config, as_of)
     swap = ois_swap(config)
-    # The curve is in the swap's currency: a TIIE de Fondeo swap is priced on
-    # a peso curve built from the same quotes, not relabelled onto a dollar one.
+    if swap.currency is not Currency.USD:
+        # The curve block quotes a SOFR stub, SR3 futures and SOFR OIS par:
+        # dollar quotes. Building a peso curve from them would be the
+        # relabelling this package refuses everywhere else.
+        raise ConfigurationError(
+            f"the swap floats on {swap.index.name} ({swap.currency.value}), but the "
+            "curve block quotes SOFR instruments, from which only a USD curve can be "
+            "built. Price peso swaps through the library (bootstrap_mxn_curve or "
+            "SwapQuoteNode on TIIE swaps); the CLI has no peso quote block yet."
+        )
     boot = bootstrap_discount_curve(
-        as_of,
-        instruments,
-        long_end_source=(config.get("curve") or {}).get("long_end_source"),
-        currency=swap.currency,
+        as_of, instruments, long_end_source=(config.get("curve") or {}).get("long_end_source")
     )
     curve_set = CurveSet(boot.curve)
     sources = (boot.evidence,)

@@ -222,21 +222,28 @@ until it has one.
 calendar; the default `index=SOFR` is a dollar swap on SIFMA. Pricing a
 swap on a curve in another currency raises `CurrencyMismatchError` -- it is
 not relabelled, which is what v0.3 did. `calendar=None` means "the index's
-calendar"; pass one only to override it. `IRSwap`, `FRA` and `CapFloor`
-default to Term SOFR of their frequency.
+calendar"; pass one only to override it. `IRSwap` and `CapFloor` default to
+Term SOFR of their frequency, and a frequency with no published Term SOFR is
+refused. A `FRA` has no frequency, so it defaults to Term SOFR 3M whatever
+its period: name the index when the period is not three months.
 
 **Instruments do not price themselves.** There is no `swap.cashflows(curve_set)`.
 `rates_engine.project(instrument, curve_set)` gives the flows, `swap.fixed_cashflows()`
 the fixed leg (no curve needed), `pricing.projection.float_leg` the floating
-one. A product of your own prices everywhere once you `project.register` it.
+one. A product of your own prices with `pv` (and so every risk measure and
+hedge) once you `project.register` it; a swap-like one also needs
+`float_leg.register` for `par_rate`, `annuity` and swaptions.
 
 **Calibrate to a swap with `SwapQuoteNode`, not `ParSwapNode`, when you have
 the swap.** `SwapQuoteNode(swap, quote)` fits the pricer's own par rate, so
 the curve reprices the swap exactly. `ParSwapNode` takes dates and accruals
-and assumes the floating leg telescopes to `P(start) - P(end)`, which is only
-true when no payment date rolls: on a 2026-01-15 strip it misprices the
-two-year swap it was fitted to by 1.7 bp. The CLI's `par_swaps` block still
-builds `ParSwapNode`s, because its quotes arrive as dates.
+and assumes the floating leg telescopes to `P(start) - P(end)`. This
+library's schedules leave accrual ends unadjusted and roll payments, so that
+holds only when no payment date rolls: on a 2026-01-15 strip the curve
+misprices the two-year swap it was fitted to by 1.7 bp. The CLI's
+`par_swaps` block still builds `ParSwapNode`s, because its quotes arrive as
+dates, and the CLI's `price` refuses a non-dollar swap because its curve
+block quotes SOFR instruments. `SwapQuoteNode` takes an OIS only.
 
 **Nothing here reads the network except `market.providers.fred`,** and that
 imports `urllib` inside the call. Importing `rates_engine` opens no socket and

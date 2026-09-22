@@ -23,6 +23,7 @@ from typing import Any
 
 from rates_engine.core.errors import MissingForwardError
 from rates_engine.core.evidence import Evidence
+from rates_engine.core.money import require_same_currency
 from rates_engine.core.results import EngineResult
 from rates_engine.curves.discount import CurveSet
 from rates_engine.instruments.capfloor import CapFloor, Caplet
@@ -93,6 +94,9 @@ def caplet_forward_rate(caplet: Caplet, curve_set: CurveSet) -> float:
         MissingForwardError: The period ends past the projection curve's last
             node, where a forward would be extrapolated rather than implied.
     """
+    require_same_currency(
+        caplet.currency, curve_set.currency, operation="projecting a caplet's forward"
+    )
     projection = curve_set.projection
     if caplet.accrual_end > projection.nodes[-1]:
         raise MissingForwardError(
@@ -114,6 +118,9 @@ def caplet_numeraire(caplet: Caplet, curve_set: CurveSet) -> float:
     Returns:
         ``notional * year_fraction * P(payment)``, in the caplet's currency.
     """
+    require_same_currency(
+        caplet.currency, curve_set.currency, operation="discounting a caplet's payoff"
+    )
     return caplet.notional * caplet.year_fraction * curve_set.discount.df(caplet.payment)
 
 

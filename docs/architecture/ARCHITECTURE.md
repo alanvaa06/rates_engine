@@ -127,7 +127,7 @@ De dónde sale la mejora, medida con perfilador antes de tocar nada:
 | Suite completa | 1612 → **1724** tests en verde (los nuevos: capas, caché, índices, degradaciones en riesgo, calibración con swaps, docstrings de la capa `app`) |
 | Criterios de aceptación (`scripts/audit_acceptance.py`) | 109 cubiertos, 0 sin cubrir, 5 parciales (los mismos 5 que dependen de números publicados por CME) |
 | Equivalencia numérica contra v0.3.0 | Bit a bit idéntica tras cada fase |
-| Payloads de la CLI contra v0.3.0 | `bootstrap` idéntico byte a byte. Cambios intencionales, todos en texto de evidencia: `float_index` de `OISSwap` pasa a `compounded_overnight`; la nota del bucketed delta apunta a `rates_engine.key_rate_dv01`; `describe` lista la nueva convención MXN `mxn_collateral_rate` |
+| Payloads de la CLI contra v0.3.0 | `bootstrap` idéntico byte a byte. Tras §8.2, `price` y `list-instruments` vuelven a ser idénticos byte a byte (`compounded_sofr`). Cambios intencionales, todos en texto de evidencia: la nota del bucketed delta apunta a `rates_engine.key_rate_dv01`; `describe` lista la convención MXN `mxn_collateral_rate` y los `rate_indices`; la evidencia de un `FRA` gana la clave `index` |
 | `ruff`, `mypy` | Limpios (72 archivos; `mypy --python-version 3.12`, porque los stubs de numpy instalados localmente no parsean con el objetivo 3.11 del config, igual que en v0.3.0) |
 | Revisión independiente | Un agente revisor comparó 113 328 evaluaciones de curva y 544 payloads de riesgo y opciones contra v0.3.0: todos idénticos. Encontró 6 defectos (test de capas ciego a imports relativos, degradaciones que no llegaban al riesgo, dos bumps por fuera de `risk.bumps`, caché obsoleta con listas mutables, afirmaciones infladas en docs, un literal SOFR). Los seis se corrigieron y cada corrección tiene un test que falla sin ella |
 
@@ -144,7 +144,8 @@ De dónde sale la mejora, medida con perfilador antes de tocar nada:
 | 5 | `b7ca83c` | `risk.bumps` como primitiva única; `dv01` a `risk`; griegas a `risk.greeks` |
 | Revisión | `f577a35` | Correcciones de la revisión independiente (§6) |
 | §8.2 | `d02d013` | Los instrumentos llevan su `RateIndex`; la proyección pasa a `pricing.projection` |
-| §8.1 | (siguiente commit) | `SwapQuoteNode`: nodos de calibración desde swaps reales |
+| §8.1 | `342f6bb` | `SwapQuoteNode`: nodos de calibración desde swaps reales |
+| Revisión 2 | (siguiente commit) | Ocho hallazgos de una segunda revisión independiente (§8.3) |
 
 ---
 
@@ -156,7 +157,7 @@ Las dos revertían o ampliaban decisiones de diseño anteriores, así que se pre
 
 `curves` sigue sin conocer productos. El nodo que envuelve un swap, `SwapQuoteNode`, vive en `pricing.calibration` y cumple el protocolo `CalibrationInstrument` que define `curves`: la dependencia se invierte, en lugar de que la curva importe el instrumento. Su residuo es `par_rate_value`, la misma función que después valúa el swap.
 
-Lo que se descubrió al implementarlo: la duplicación no era inocua. `ParSwapNode` asume que la pata flotante telescopa a `P(start) - P(end)`, lo cual solo es cierto si ninguna fecha de pago se mueve por feriado. En la tira del 2026-01-15, una curva ajustada a `ParSwapNode` valúa mal el swap a 2 años en 1.7 pb, el mismo swap a cuyas cotizaciones fue ajustada. Donde nada se mueve, los dos nodos dan la misma curva al 1e-13 (`tests/test_calibration.py`).
+Lo que se descubrió al implementarlo: la duplicación no era inocua. `ParSwapNode` asume que la pata flotante telescopa a `P(start) - P(end)`. Con la convención de schedule de esta librería (fines de período sin ajustar, pagos movidos por feriado) eso solo es cierto si ninguna fecha de pago se mueve. En la tira del 2026-01-15, una curva ajustada a `ParSwapNode` valúa mal el swap a 2 años en 1.7 pb, el mismo swap a cuyas cotizaciones fue ajustada. Donde nada se mueve, los dos nodos dan la misma curva al 1e-13 (`tests/test_calibration.py`). No es un error de fórmula de `ParSwapNode` sino un desajuste con el schedule; una convención de mercado que ajuste también los fines de período lo cerraría (**asumido**, no verificado aquí). `SwapQuoteNode` solo acepta OIS: una cotización de tasa a plazo calibra la curva de proyección, que es trabajo del solver dual.
 
 ### 8.2 Los instrumentos llevan su índice: opción (a)
 
@@ -165,3 +166,16 @@ Revierte la decisión del deep review de v0.3 ("un instrumento se denomina por l
 Los números en dólares siguen bit a bit idénticos a v0.3.0. El payload de `price` vuelve a ser byte a byte el de v0.3.0 (`float_index: compounded_sofr`), porque ahora el swap sabe su índice en lugar de tenerlo cableado.
 
 **Lo que sigue abierto:** el swap TIIE 28 acumula periodos de 28 días que `Schedule` (en meses) no genera, así que existe como nodo (`tiie_par_swap_node`) pero no como instrumento. `IRSwap(index=TIIE_28)` se rechaza con un mensaje que lo dice.
+
+### 8.3 Segunda revisión independiente
+
+Un agente revisor comparó 112 resultados contra v0.3.0 (OIS, IRS 3M/6M, FRA, caps/floors y swaptions con griegas, key rates, strip hedge) y todos salieron idénticos. Encontró ocho defectos, todos corregidos, cada uno con un test en `tests/test_review_index_branch.py` que falla sin la corrección:
+
+1. `SwapQuoteNode.node_date` fijaba el último pago aunque *modified following* lo moviera antes del fin de período sin ajustar; el ajuste a 3 años de una tira de fin de mes fallaba. Ahora es el máximo de ambos.
+2. Nodos sin etiqueta compartían clave en el dict de residuos y el chequeo estricto leía solo el último: un ajuste fallido pasaba sin verse. Afectaba también a `FuturesNode`. El chequeo ahora es por instrumento y las claves repetidas se desambiguan con la fecha del nodo.
+3. Caps y floors se valuaban sobre una curva de otra moneda sin rechazarlo.
+4. La CLI construía una curva en pesos a partir de futuros SOFR. Ahora `price` rechaza un swap no USD.
+5. Una curva calibrada a swaps TIIE no llevaba sus supuestos. Ahora el bootstrap recoge las `degradations` de los nodos.
+6. Rupturas no documentadas: frecuencias sin Term SOFR publicado y la clave `index` de `FRA`; además `FRA` aceptaba un índice overnight.
+7. Docs y payloads desactualizados (`list-instruments` vuelve a `compounded_sofr`) y una afirmación inflada: un producto propio necesita `float_leg.register` además de `project.register` para `par_rate`.
+8. Tres escrituras del mismo IRS eran distintas para `==` y `hash`. Frecuencia e índice ahora se normalizan en ambos campos.

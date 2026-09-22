@@ -16,8 +16,9 @@ from dataclasses import dataclass
 from datetime import date
 
 from rates_engine.conventions.daycount import DayCount, year_fraction
-from rates_engine.conventions.indices import TERM_SOFR_3M, RateIndex
+from rates_engine.conventions.indices import TERM_SOFR_3M, IndexTenor, RateIndex
 from rates_engine.conventions.side import Side
+from rates_engine.core.errors import UnsupportedConventionError
 from rates_engine.core.money import Currency
 
 __all__ = ["FRA"]
@@ -38,7 +39,12 @@ class FRA:
         side: ``"payer"`` pays the fixed rate and receives the index.
         day_count: Accrual basis for the period.
         index: The term rate the contract settles against; it fixes the
-            currency. Term SOFR 3M by default.
+            currency. Term SOFR 3M by default, whatever the period length:
+            a FRA has no frequency to take a tenor from, so name the index
+            when the period is not three months.
+
+    Raises:
+        UnsupportedConventionError: ``index`` is an overnight rate.
     """
 
     start: date
@@ -48,6 +54,14 @@ class FRA:
     side: str = Side.PAYER
     day_count: DayCount = DayCount.ACT_360
     index: RateIndex = TERM_SOFR_3M
+
+    def __post_init__(self) -> None:
+        if self.index.tenor is IndexTenor.OVERNIGHT:
+            raise UnsupportedConventionError(
+                f"a FRA settles against a term rate known at the period start; "
+                f"{self.index.name} is an overnight rate, compounded in arrears. "
+                "An overnight period is an OISSwap of one period."
+            )
 
     @property
     def rate_index(self) -> RateIndex:

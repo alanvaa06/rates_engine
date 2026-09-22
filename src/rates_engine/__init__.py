@@ -172,11 +172,13 @@ from rates_engine.pricing.linear import (
 from rates_engine.pricing.options import (
     OptionPriceResult,
     cap_floor_pv,
+    caplet_forward_rate,
+    caplet_numeraire,
     caplet_pv,
     model_for,
     swaption_pv,
 )
-from rates_engine.pricing.projection import project
+from rates_engine.pricing.projection import float_leg, fra_fair_rate, project
 from rates_engine.risk.bumps import tent_weights
 from rates_engine.risk.greeks import GreeksResult, option_greeks
 from rates_engine.risk.sensitivities import (
@@ -305,6 +307,10 @@ __all__ = [
     "ParSwapNode",
     "SwapQuoteNode",
     "project",
+    "float_leg",
+    "fra_fair_rate",
+    "caplet_forward_rate",
+    "caplet_numeraire",
     "RateIndex",
     "SOFR",
     "TERM_SOFR_3M",

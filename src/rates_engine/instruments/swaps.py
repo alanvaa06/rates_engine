@@ -256,8 +256,14 @@ class IRSwap:
         ):
             raise UnsupportedConventionError(
                 f"float_frequency_months={self.float_frequency_months} disagrees with "
-                f"{index.name}, a {index.tenor.months}-month rate"
+                f"{index.name}, a {index.tenor.months}-month rate. Set both together, "
+                "or leave float_frequency_months unset to take it from the index."
             )
+        # Resolved into both fields, so that the three spellings of one
+        # trade -- neither given, the frequency, or the index -- are equal and
+        # hash alike. Changing one later with ``replace`` must change both.
+        object.__setattr__(self, "index", index)
+        object.__setattr__(self, "float_frequency_months", index.tenor.months)
 
     @property
     def float_index(self) -> RateIndex:
