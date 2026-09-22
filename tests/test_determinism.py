@@ -17,14 +17,8 @@ from pathlib import Path
 import pytest
 
 from rates_engine.curves.bootstrap import bootstrap_discount_curve
-from rates_engine.hedging.futures_strip import (
-    shock_table,
-    strip_hedge,
-)
-from rates_engine.pricing.linear import (
-    par_rate,
-    pv,
-)
+from rates_engine.hedging.futures_strip import shock_table, strip_hedge
+from rates_engine.pricing.linear import par_rate, pv
 from rates_engine.risk.sensitivities import dv01, key_rate_dv01
 
 CROSS_VERSION_RTOL = 1e-14
@@ -175,10 +169,7 @@ class TestCalibrationDeterminism:
     def test_option_pricing_is_bit_exact(self, atm_swaption, option_curve_set):
         from rates_engine.pricing.options import swaption_pv
         from rates_engine.risk.greeks import option_greeks
-        from rates_engine.volatility.units import (
-            Volatility,
-            VolUnits,
-        )
+        from rates_engine.volatility.units import Volatility, VolUnits
 
         vol = Volatility(90.0, VolUnits.NORMAL_BP)
         assert (

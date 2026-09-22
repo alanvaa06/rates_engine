@@ -27,10 +27,7 @@ import pandas as pd
 
 from rates_engine.core.errors import IncompleteStripError
 from rates_engine.core.evidence import Evidence
-from rates_engine.core.money import (
-    Currency,
-    require_same_currency,
-)
+from rates_engine.core.money import Currency, require_same_currency
 from rates_engine.core.results import EngineResult
 from rates_engine.curves.bootstrap import (
     CalibrationInstrument,
@@ -38,15 +35,8 @@ from rates_engine.curves.bootstrap import (
     bootstrap_discount_curve,
 )
 from rates_engine.curves.discount import CurveSet
-from rates_engine.instruments.futures import (
-    BASIS_POINT,
-    SR3_CONTRACT_TENOR,
-    SR3_NOTIONAL,
-)
-from rates_engine.pricing.linear import (
-    Priceable,
-    discounted_value,
-)
+from rates_engine.instruments.futures import BASIS_POINT, SR3_CONTRACT_TENOR, SR3_NOTIONAL
+from rates_engine.pricing.linear import Priceable, discounted_value
 from rates_engine.risk.sensitivities import dv01
 
 __all__ = ["SR3_DV01", "HedgeResult", "ShockTableResult", "strip_hedge", "shock_table", "DEFAULT_SHOCKS_BP"]

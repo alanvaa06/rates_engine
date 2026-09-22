@@ -11,22 +11,12 @@ from pathlib import Path
 
 import pytest
 
-from rates_engine.conventions.schedule import (
-    imm_date,
-    next_imm_on_or_after,
-)
+from rates_engine.conventions.schedule import imm_date, next_imm_on_or_after
 from rates_engine.conventions.side import Side
-from rates_engine.curves.bootstrap import (
-    FuturesNode,
-    RealizedStubNode,
-    bootstrap_discount_curve,
-)
+from rates_engine.curves.bootstrap import FuturesNode, RealizedStubNode, bootstrap_discount_curve
 from rates_engine.curves.discount import CurveSet
 from rates_engine.instruments.swaps import OISSwap
-from rates_engine.market.providers.file import (
-    load_series_csv,
-    load_snapshot_csv,
-)
+from rates_engine.market.providers.file import load_series_csv, load_snapshot_csv
 from rates_engine.market.snapshot import MarketSnapshot
 from rates_engine.pricing.linear import par_rate
 

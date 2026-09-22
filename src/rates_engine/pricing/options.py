@@ -24,15 +24,9 @@ from typing import Any
 from rates_engine.core.evidence import Evidence
 from rates_engine.core.results import EngineResult
 from rates_engine.curves.discount import CurveSet
-from rates_engine.instruments.capfloor import (
-    CapFloor,
-    Caplet,
-)
+from rates_engine.instruments.capfloor import CapFloor, Caplet
 from rates_engine.instruments.swaption import Swaption
-from rates_engine.models import (
-    bachelier,
-    black,
-)
+from rates_engine.models import bachelier, black
 from rates_engine.pricing.collateral import collateral_warnings, discounting_fields
 from rates_engine.volatility.units import Volatility
 

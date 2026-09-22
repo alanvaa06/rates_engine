@@ -18,10 +18,7 @@ import math
 import pytest
 
 from rates_engine.conventions.option_kind import OptionKind
-from rates_engine.core.errors import (
-    DeltaConventionError,
-    RatesEngineError,
-)
+from rates_engine.core.errors import DeltaConventionError, RatesEngineError
 from rates_engine.models import garman_kohlhagen as gk
 from rates_engine.models.fx_delta import (
     DeltaBasis,

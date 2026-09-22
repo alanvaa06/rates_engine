@@ -10,10 +10,7 @@ from datetime import timedelta
 import pytest
 
 from rates_engine.cli import main
-from rates_engine.conventions.schedule import (
-    imm_date,
-    next_imm_on_or_after,
-)
+from rates_engine.conventions.schedule import imm_date, next_imm_on_or_after
 
 
 def _config(as_of, *, price: float = 96.0, long_end_source=None, key_tenors=None) -> dict:

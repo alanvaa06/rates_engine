@@ -36,10 +36,7 @@ from rates_engine.core.errors import (
     MissingDependencyError,
     RatesEngineError,
 )
-from rates_engine.reporting.payloads import (
-    dumps,
-    error_payload,
-)
+from rates_engine.reporting.payloads import dumps, error_payload
 
 __all__ = ["TOOLS", "TOOL_DESCRIPTIONS", "call_tool", "build_server", "main"]
 

@@ -23,11 +23,7 @@ from rates_engine.core.money import require_same_currency
 from rates_engine.core.results import EngineResult
 from rates_engine.curves.discount import CurveSet
 from rates_engine.instruments.cashflow import Cashflow
-from rates_engine.pricing.collateral import (
-    collateral_warnings,
-    discounting_fields,
-    merge_warnings,
-)
+from rates_engine.pricing.collateral import collateral_warnings, discounting_fields, merge_warnings
 
 __all__ = [
     "Priceable",

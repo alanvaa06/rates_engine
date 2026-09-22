@@ -22,22 +22,11 @@ from rates_engine.conventions.side import Side
 from rates_engine.core.errors import ShiftRequiredError
 from rates_engine.instruments.swaps import OISSwap
 from rates_engine.instruments.swaption import Swaption
-from rates_engine.models import (
-    bachelier,
-    black,
-)
-from rates_engine.pricing.options import (
-    forward_swap_rate,
-    model_for,
-    swaption_annuity,
-    swaption_pv,
-)
+from rates_engine.models import bachelier, black
+from rates_engine.pricing.options import forward_swap_rate, model_for, swaption_annuity, swaption_pv
 from rates_engine.risk.greeks import option_greeks
 from rates_engine.risk.sensitivities import dv01, money_convexity
-from rates_engine.volatility.units import (
-    Volatility,
-    VolUnits,
-)
+from rates_engine.volatility.units import Volatility, VolUnits
 
 # Twenty cases: five strikes across two expiries across two volatilities.
 CASES = [

@@ -25,20 +25,11 @@ from pathlib import Path
 import pytest
 
 import rates_engine
-from rates_engine.conventions.daycount import (
-    DayCount,
-    year_fraction,
-)
+from rates_engine.conventions.daycount import DayCount, year_fraction
 from rates_engine.conventions.side import Side
-from rates_engine.core.errors import (
-    CalibrationError,
-    UnderdeterminedCurveError,
-)
+from rates_engine.core.errors import CalibrationError, UnderdeterminedCurveError
 from rates_engine.core.evidence import DataQuality
-from rates_engine.curves.discount import (
-    CurveSet,
-    DiscountCurve,
-)
+from rates_engine.curves.discount import CurveSet, DiscountCurve
 from rates_engine.curves.parametric import (
     TERM_RATE_CAVEAT,
     FOMCStepCurve,
@@ -47,11 +38,7 @@ from rates_engine.curves.parametric import (
     fit_nelson_siegel,
 )
 from rates_engine.instruments.swaps import OISSwap
-from rates_engine.pricing.linear import (
-    ParametricComparison,
-    price_on_parametric,
-    pv,
-)
+from rates_engine.pricing.linear import ParametricComparison, price_on_parametric, pv
 
 FIXTURES = Path(__file__).parent / "fixtures"
 AS_OF = date(2026, 9, 16)

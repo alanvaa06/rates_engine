@@ -6,20 +6,11 @@ import csv
 
 import pytest
 
-from rates_engine.core.errors import (
-    InsufficientDataError,
-    UnsupportedConventionError,
-)
+from rates_engine.core.errors import InsufficientDataError, UnsupportedConventionError
 from rates_engine.core.evidence import DataQuality
-from rates_engine.market.estimators import (
-    MIN_REALIZED_OBSERVATIONS,
-    realized_sofr_sigma,
-)
+from rates_engine.market.estimators import MIN_REALIZED_OBSERVATIONS, realized_sofr_sigma
 from rates_engine.market.snapshot import MarketSnapshot, Series
-from rates_engine.models.convexity import (
-    ConvexityModel,
-    convexity_adjustment,
-)
+from rates_engine.models.convexity import ConvexityModel, convexity_adjustment
 
 
 class TestHoLee:

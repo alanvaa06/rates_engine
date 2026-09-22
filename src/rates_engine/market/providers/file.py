@@ -12,15 +12,9 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
 
-from rates_engine.core.evidence import (
-    DataQuality,
-    Provenance,
-)
+from rates_engine.core.evidence import DataQuality, Provenance
 from rates_engine.market.classify import classify_series
-from rates_engine.market.snapshot import (
-    MarketSnapshot,
-    Series,
-)
+from rates_engine.market.snapshot import MarketSnapshot, Series
 
 __all__ = ["load_series_csv", "load_snapshot_csv", "FuturesSettlement", "load_settlements_csv"]
 

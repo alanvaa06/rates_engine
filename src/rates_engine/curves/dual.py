@@ -28,25 +28,12 @@ from typing import Any, Protocol, runtime_checkable
 import numpy as np
 from scipy.optimize import least_squares
 
-from rates_engine.conventions.daycount import (
-    DayCount,
-    year_fraction,
-)
-from rates_engine.core.errors import (
-    NoTenorQuoteSourceError,
-    UnderdeterminedCurveError,
-)
-from rates_engine.core.evidence import (
-    DataQuality,
-    Evidence,
-    Provenance,
-)
+from rates_engine.conventions.daycount import DayCount, year_fraction
+from rates_engine.core.errors import NoTenorQuoteSourceError, UnderdeterminedCurveError
+from rates_engine.core.evidence import DataQuality, Evidence, Provenance
 from rates_engine.core.money import Currency
 from rates_engine.core.results import EngineResult
-from rates_engine.curves.bootstrap import (
-    CalibrationInstrument,
-    bootstrap_discount_curve,
-)
+from rates_engine.curves.bootstrap import CalibrationInstrument, bootstrap_discount_curve
 from rates_engine.curves.discount import DiscountCurve
 
 __all__ = [

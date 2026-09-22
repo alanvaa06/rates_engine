@@ -38,28 +38,12 @@ from datetime import date
 from typing import Any, NoReturn
 
 from rates_engine.conventions.daycount import year_fraction
-from rates_engine.core.errors import (
-    KeyTenorOutOfRangeError,
-    UndefinedDurationError,
-)
+from rates_engine.core.errors import KeyTenorOutOfRangeError, UndefinedDurationError
 from rates_engine.core.evidence import Evidence
 from rates_engine.core.results import EngineResult
-from rates_engine.curves.discount import (
-    CURVE_TIME_BASIS,
-    CurveSet,
-)
-from rates_engine.pricing.linear import (
-    Priceable,
-    PriceResult,
-    discounted_value,
-    valuation_evidence,
-)
-from rates_engine.risk.bumps import (
-    BUMP_BP,
-    repriced,
-    shift_from_bp,
-    tent_shift,
-)
+from rates_engine.curves.discount import CURVE_TIME_BASIS, CurveSet
+from rates_engine.pricing.linear import Priceable, PriceResult, discounted_value, valuation_evidence
+from rates_engine.risk.bumps import BUMP_BP, repriced, shift_from_bp, tent_shift
 
 __all__ = [
     "RiskResult",

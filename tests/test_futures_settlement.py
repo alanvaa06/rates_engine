@@ -18,10 +18,7 @@ import pytest
 from conftest import require_published
 
 from rates_engine.conventions.calendar import SIFMA_US
-from rates_engine.conventions.schedule import (
-    imm_date,
-    next_imm_on_or_after,
-)
+from rates_engine.conventions.schedule import imm_date, next_imm_on_or_after
 from rates_engine.instruments.futures import (
     SR1_CONTRACT_TENOR,
     SR1_NOTIONAL,

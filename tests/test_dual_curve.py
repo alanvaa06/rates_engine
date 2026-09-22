@@ -13,23 +13,12 @@ from datetime import date
 
 import pytest
 
-from rates_engine.conventions.daycount import (
-    DayCount,
-    year_fraction,
-)
-from rates_engine.core.errors import (
-    NoTenorQuoteSourceError,
-    UnderdeterminedCurveError,
-)
+from rates_engine.conventions.daycount import DayCount, year_fraction
+from rates_engine.core.errors import NoTenorQuoteSourceError, UnderdeterminedCurveError
 from rates_engine.core.evidence import DataQuality
 from rates_engine.curves.bootstrap import RealizedStubNode
 from rates_engine.curves.discount import DiscountCurve
-from rates_engine.curves.dual import (
-    SYNTHETIC,
-    BasisSwapNode,
-    TenorParSwapNode,
-    solve_dual_curve,
-)
+from rates_engine.curves.dual import SYNTHETIC, BasisSwapNode, TenorParSwapNode, solve_dual_curve
 
 AS_OF = date(2026, 1, 15)
 MATURITIES = tuple(date(2026 + k, 1, 15) for k in range(1, 5))

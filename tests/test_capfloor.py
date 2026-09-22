@@ -14,10 +14,7 @@ from rates_engine.core.errors import MissingForwardError
 from rates_engine.instruments.capfloor import CapFloor
 from rates_engine.instruments.swaps import IRSwap
 from rates_engine.pricing.linear import pv
-from rates_engine.pricing.options import (
-    cap_floor_pv,
-    caplet_pv,
-)
+from rates_engine.pricing.options import cap_floor_pv, caplet_pv
 from rates_engine.risk.greeks import option_greeks
 from rates_engine.volatility.units import Volatility
 

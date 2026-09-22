@@ -15,58 +15,22 @@ from pathlib import Path
 
 import pytest
 
-from rates_engine.core.results import (
-    SCHEMA_VERSION,
-    EngineResult,
-)
+from rates_engine.core.results import SCHEMA_VERSION, EngineResult
 from rates_engine.curves.comparison import compare_interpolations
-from rates_engine.curves.discount import (
-    CurveSet,
-    DiscountCurve,
-)
-from rates_engine.curves.dual import (
-    BasisSwapNode,
-    TenorParSwapNode,
-    solve_dual_curve,
-)
-from rates_engine.curves.parametric import (
-    fit_fomc_step_curve,
-    fit_nelson_siegel,
-)
+from rates_engine.curves.discount import CurveSet, DiscountCurve
+from rates_engine.curves.dual import BasisSwapNode, TenorParSwapNode, solve_dual_curve
+from rates_engine.curves.parametric import fit_fomc_step_curve, fit_nelson_siegel
 from rates_engine.curves.views import all_views
-from rates_engine.hedging.futures_strip import (
-    shock_table,
-    strip_hedge,
-)
+from rates_engine.hedging.futures_strip import shock_table, strip_hedge
 from rates_engine.market.estimators import realized_sofr_sigma
 from rates_engine.models.convexity import convexity_adjustment
-from rates_engine.pricing.linear import (
-    annuity,
-    par_rate,
-    price_on_parametric,
-    pv,
-)
+from rates_engine.pricing.linear import annuity, par_rate, price_on_parametric, pv
 from rates_engine.pricing.options import swaption_pv
-from rates_engine.reporting.payloads import (
-    dumps,
-    error_payload,
-    result_payload,
-)
+from rates_engine.reporting.payloads import dumps, error_payload, result_payload
 from rates_engine.risk.greeks import option_greeks
-from rates_engine.risk.sensitivities import (
-    dv01,
-    key_rate_dv01,
-    money_convexity,
-    pvbp,
-)
-from rates_engine.volatility.cube import (
-    CubePoint,
-    VolCube,
-)
-from rates_engine.volatility.units import (
-    Volatility,
-    VolUnits,
-)
+from rates_engine.risk.sensitivities import dv01, key_rate_dv01, money_convexity, pvbp
+from rates_engine.volatility.cube import CubePoint, VolCube
+from rates_engine.volatility.units import Volatility, VolUnits
 
 NS_TIMES = (0.5, 1.0, 2.0, 3.0, 5.0, 10.0)
 NS_RATES = (0.0445, 0.0432, 0.0417, 0.0413, 0.0413, 0.0422)
@@ -85,11 +49,7 @@ def _parametric(as_of, par_swap):
 
 def _program_audit():
     """A non-compliant audit, so the violations list is populated."""
-    from rates_engine.hedging.program import (
-        HedgeProgram,
-        RebalanceFrequency,
-        audit_hedge,
-    )
+    from rates_engine.hedging.program import HedgeProgram, RebalanceFrequency, audit_hedge
 
     program = HedgeProgram(0.80, 0.10, RebalanceFrequency.MONTHLY, frozenset({"forward"}))
     return audit_hedge(program, 0.30, proposed_instrument="seagull")
@@ -117,10 +77,7 @@ def _mxn():
     """A peso curve and a benchmark comparison, as test_mxn_curve.py builds them."""
     from rates_engine.conventions.daycount import year_fraction
     from rates_engine.conventions.indices import TIIE_DAY_COUNT
-    from rates_engine.curves.bootstrap import (
-        ParSwapNode,
-        RealizedStubNode,
-    )
+    from rates_engine.curves.bootstrap import ParSwapNode, RealizedStubNode
     from rates_engine.curves.mxn import (
         TIIEBenchmark,
         bootstrap_mxn_curve,
@@ -176,16 +133,8 @@ def _fx_forward(as_of):
 
 def _fx_smile():
     """A vanna-volga reading, as `test_fx_smile.py` builds the smile."""
-    from rates_engine.models.fx_delta import (
-        DeltaBasis,
-        DeltaConvention,
-        PremiumAdjustment,
-    )
-    from rates_engine.volatility.fx_smile import (
-        ATMConvention,
-        SmileQuotes,
-        VannaVolgaSmile,
-    )
+    from rates_engine.models.fx_delta import DeltaBasis, DeltaConvention, PremiumAdjustment
+    from rates_engine.volatility.fx_smile import ATMConvention, SmileQuotes, VannaVolgaSmile
 
     smile = VannaVolgaSmile(
         spot=18.50,
@@ -222,14 +171,8 @@ def _volatility(option_curve_set, atm_swaption, forward_swap_rate):
 
 def _dual_curve(as_of):
     """A dual-curve solve on constructed inputs, as `TestDualCurvePayload` builds it."""
-    from rates_engine.conventions.daycount import (
-        DayCount,
-        year_fraction,
-    )
-    from rates_engine.curves.bootstrap import (
-        ParSwapNode,
-        RealizedStubNode,
-    )
+    from rates_engine.conventions.daycount import DayCount, year_fraction
+    from rates_engine.curves.bootstrap import ParSwapNode, RealizedStubNode
 
     maturities = (date(2027, 1, 15), date(2028, 1, 17))
     ois = (
@@ -471,14 +414,8 @@ class TestDualCurvePayload:
     def test_it_serialises_with_both_curves(self, as_of):
         from datetime import date
 
-        from rates_engine.conventions.daycount import (
-            DayCount,
-            year_fraction,
-        )
-        from rates_engine.curves.bootstrap import (
-            ParSwapNode,
-            RealizedStubNode,
-        )
+        from rates_engine.conventions.daycount import DayCount, year_fraction
+        from rates_engine.curves.bootstrap import ParSwapNode, RealizedStubNode
 
         maturities = (date(2027, 1, 15), date(2028, 1, 17))
         ois = (

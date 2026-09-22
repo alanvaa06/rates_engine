@@ -44,11 +44,7 @@ import numpy as np
 from scipy.optimize import least_squares
 
 from rates_engine.conventions.option_kind import OptionKind
-from rates_engine.core.errors import (
-    CalibrationError,
-    ExpansionBreakdownError,
-    ShiftRequiredError,
-)
+from rates_engine.core.errors import CalibrationError, ExpansionBreakdownError, ShiftRequiredError
 from rates_engine.core.evidence import Evidence
 from rates_engine.core.results import EngineResult
 

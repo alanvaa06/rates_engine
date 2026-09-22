@@ -21,10 +21,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
-from rates_engine.conventions.calendar import (
-    BMV,
-    SIFMA_US,
-)  # noqa: E402
+from rates_engine.conventions.calendar import BMV, SIFMA_US  # noqa: E402
 from rates_engine.conventions.schedule import (
     add_months,  # noqa: E402
     imm_date,

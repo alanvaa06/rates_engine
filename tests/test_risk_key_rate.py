@@ -13,10 +13,7 @@ from datetime import timedelta
 
 import pytest
 
-from rates_engine.core.errors import (
-    KeyTenorOutOfRangeError,
-    UndefinedDurationError,
-)
+from rates_engine.core.errors import KeyTenorOutOfRangeError, UndefinedDurationError
 from rates_engine.hedging.futures_strip import strip_hedge
 from rates_engine.risk.bumps import tent_weights
 from rates_engine.risk.sensitivities import (

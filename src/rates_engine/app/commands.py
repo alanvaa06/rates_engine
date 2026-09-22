@@ -24,12 +24,7 @@ from rates_engine.core.results import SCHEMA_VERSION
 from rates_engine.curves.bootstrap import bootstrap_discount_curve
 from rates_engine.curves.discount import CurveSet
 from rates_engine.curves.views import all_views
-from rates_engine.hedging.futures_strip import (
-    DEFAULT_SHOCKS_BP,
-    SR3_DV01,
-    shock_table,
-    strip_hedge,
-)
+from rates_engine.hedging.futures_strip import DEFAULT_SHOCKS_BP, SR3_DV01, shock_table, strip_hedge
 from rates_engine.hedging.fx_structures import (
     Exposure,
     ExposureDirection,
@@ -39,11 +34,7 @@ from rates_engine.hedging.fx_structures import (
 from rates_engine.hedging.program import audit_hedge, load_program
 from rates_engine.models.fx_delta import DeltaBasis, PremiumAdjustment
 from rates_engine.pricing.fx_forward import forward_from_curves
-from rates_engine.pricing.linear import (
-    annuity,
-    par_rate,
-    pv,
-)
+from rates_engine.pricing.linear import annuity, par_rate, pv
 from rates_engine.reporting.payloads import result_payload
 from rates_engine.risk.sensitivities import (
     INTERPOLATION_CAVEAT,

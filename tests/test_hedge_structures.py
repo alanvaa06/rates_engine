@@ -511,16 +511,8 @@ class TestPricingOnASmile:
 
     def test_a_smile_passed_directly_is_named_and_its_evidence_kept(self):
         from rates_engine.core.evidence import DataQuality
-        from rates_engine.models.fx_delta import (
-            DeltaBasis,
-            DeltaConvention,
-            PremiumAdjustment,
-        )
-        from rates_engine.volatility.fx_smile import (
-            ATMConvention,
-            SmileQuotes,
-            VannaVolgaSmile,
-        )
+        from rates_engine.models.fx_delta import DeltaBasis, DeltaConvention, PremiumAdjustment
+        from rates_engine.volatility.fx_smile import ATMConvention, SmileQuotes, VannaVolgaSmile
 
         smile = VannaVolgaSmile(
             spot=18.50,

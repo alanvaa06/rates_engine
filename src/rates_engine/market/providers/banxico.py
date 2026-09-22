@@ -32,18 +32,9 @@ import os
 from datetime import UTC, date, datetime
 from typing import Any
 
-from rates_engine.core.errors import (
-    ConfigurationError,
-    InsufficientDataError,
-)
-from rates_engine.core.evidence import (
-    DataQuality,
-    Provenance,
-)
-from rates_engine.market.snapshot import (
-    MarketSnapshot,
-    Series,
-)
+from rates_engine.core.errors import ConfigurationError, InsufficientDataError
+from rates_engine.core.evidence import DataQuality, Provenance
+from rates_engine.market.snapshot import MarketSnapshot, Series
 
 __all__ = [
     "BANXICO_SIE_URL",

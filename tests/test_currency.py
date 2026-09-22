@@ -24,18 +24,9 @@ from datetime import date, timedelta
 
 import pytest
 
-from rates_engine.core.errors import (
-    CurrencyMismatchError,
-    RatesEngineError,
-)
-from rates_engine.core.money import (
-    Currency,
-    require_same_currency,
-)
-from rates_engine.curves.discount import (
-    CurveSet,
-    DiscountCurve,
-)
+from rates_engine.core.errors import CurrencyMismatchError, RatesEngineError
+from rates_engine.core.money import Currency, require_same_currency
+from rates_engine.curves.discount import CurveSet, DiscountCurve
 from rates_engine.instruments.cashflow import Cashflow
 from rates_engine.pricing.linear import pv
 
@@ -112,18 +103,9 @@ def _dual_inputs(basis: float = 0.0005, rate: float = 0.04):
     an installed package, so a cross-module import passes locally and
     raises `ModuleNotFoundError` under CI's installed-package run.
     """
-    from rates_engine.conventions.daycount import (
-        DayCount,
-        year_fraction,
-    )
-    from rates_engine.curves.bootstrap import (
-        ParSwapNode,
-        RealizedStubNode,
-    )
-    from rates_engine.curves.dual import (
-        BasisSwapNode,
-        TenorParSwapNode,
-    )
+    from rates_engine.conventions.daycount import DayCount, year_fraction
+    from rates_engine.curves.bootstrap import ParSwapNode, RealizedStubNode
+    from rates_engine.curves.dual import BasisSwapNode, TenorParSwapNode
 
     maturities = tuple(date(AS_OF.year + k, AS_OF.month, AS_OF.day) for k in range(1, 5))
 
@@ -179,10 +161,7 @@ def _dual_inputs(basis: float = 0.0005, rate: float = 0.04):
 def _futures_strip():
     """A quarterly SR3 strip on a curve that is not flat, so the two
     interpolations actually disagree and the comparison has work to do."""
-    from rates_engine.curves.bootstrap import (
-        FuturesNode,
-        RealizedStubNode,
-    )
+    from rates_engine.curves.bootstrap import FuturesNode, RealizedStubNode
 
     start = AS_OF + timedelta(days=14)
     nodes: list[object] = [
@@ -295,10 +274,7 @@ class TestItSurvivesEveryTransformation:
         assert replaced.currency is Currency.MXN
 
     def test_the_bootstrap_produces_the_currency_it_was_asked_for(self):
-        from rates_engine.curves.bootstrap import (
-            RealizedStubNode,
-            bootstrap_discount_curve,
-        )
+        from rates_engine.curves.bootstrap import RealizedStubNode, bootstrap_discount_curve
 
         end = AS_OF + timedelta(days=28)
         result = bootstrap_discount_curve(
@@ -309,10 +285,7 @@ class TestItSurvivesEveryTransformation:
         assert result.curve.currency is Currency.MXN
 
     def test_the_bootstrap_still_defaults_to_dollars(self):
-        from rates_engine.curves.bootstrap import (
-            RealizedStubNode,
-            bootstrap_discount_curve,
-        )
+        from rates_engine.curves.bootstrap import RealizedStubNode, bootstrap_discount_curve
 
         end = AS_OF + timedelta(days=28)
         result = bootstrap_discount_curve(
@@ -444,10 +417,7 @@ class TestAddingTwoPresentValues:
     def test_an_assumed_leg_degrades_the_total(self):
         """The reason the sum composes evidence instead of picking one side:
         adding a marked result to a clean one must not launder the mark."""
-        from rates_engine.core.evidence import (
-            DataQuality,
-            Degradation,
-        )
+        from rates_engine.core.evidence import DataQuality, Degradation
 
         clean = self._priced(Currency.USD)
         marked = replace(

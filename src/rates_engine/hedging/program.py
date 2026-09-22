@@ -27,15 +27,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
-from rates_engine.core.errors import (
-    ConfigurationError,
-    PolicyBreachError,
-)
-from rates_engine.core.evidence import (
-    DataQuality,
-    Degradation,
-    Evidence,
-)
+from rates_engine.core.errors import ConfigurationError, PolicyBreachError
+from rates_engine.core.evidence import DataQuality, Degradation, Evidence
 from rates_engine.core.results import EngineResult
 from rates_engine.hedging.fx_structures import STRUCTURE_NAMES
 

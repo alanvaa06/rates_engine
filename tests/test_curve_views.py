@@ -7,17 +7,10 @@ from datetime import date, timedelta
 
 import pytest
 
-from rates_engine.conventions.daycount import (
-    DayCount,
-    year_fraction,
-)
+from rates_engine.conventions.daycount import DayCount, year_fraction
 from rates_engine.core.errors import UnsupportedConventionError
 from rates_engine.curves.discount import CURVE_TIME_BASIS, DiscountCurve
-from rates_engine.curves.views import (
-    all_views,
-    par_curve,
-    zero_curve,
-)
+from rates_engine.curves.views import all_views, par_curve, zero_curve
 
 
 class TestZeroCurve:

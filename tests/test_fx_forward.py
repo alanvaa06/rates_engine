@@ -19,14 +19,8 @@ from datetime import date, timedelta
 
 import pytest
 
-from rates_engine.conventions.currency_pair import (
-    USDMXN,
-    CurrencyPair,
-)
-from rates_engine.core.errors import (
-    CurrencyMismatchError,
-    ImplausibleInputError,
-)
+from rates_engine.conventions.currency_pair import USDMXN, CurrencyPair
+from rates_engine.core.errors import CurrencyMismatchError, ImplausibleInputError
 from rates_engine.core.money import Currency
 from rates_engine.curves.discount import DiscountCurve
 from rates_engine.pricing.fx_forward import (

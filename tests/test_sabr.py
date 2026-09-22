@@ -14,11 +14,7 @@ import math
 
 import pytest
 
-from rates_engine.core.errors import (
-    CalibrationError,
-    ExpansionBreakdownError,
-    ShiftRequiredError,
-)
+from rates_engine.core.errors import CalibrationError, ExpansionBreakdownError, ShiftRequiredError
 from rates_engine.models import bachelier
 from rates_engine.models.sabr import (
     SABRParameters,
@@ -125,10 +121,7 @@ class TestClosedFormLimits:
 
     @pytest.mark.parametrize("rho", [-0.8, -0.3, 0.0, 0.3, 0.8])
     def test_the_branches_join_within_the_ratio_s_own_precision(self, rho):
-        from rates_engine.models.sabr import (
-            Z_SERIES_THRESHOLD,
-            _z_over_x,
-        )
+        from rates_engine.models.sabr import Z_SERIES_THRESHOLD, _z_over_x
 
         below = _z_over_x(Z_SERIES_THRESHOLD * 0.999, rho)
         above = _z_over_x(Z_SERIES_THRESHOLD * 1.001, rho)

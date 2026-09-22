@@ -22,11 +22,7 @@ from rates_engine.conventions.option_kind import OptionKind
 from rates_engine.core.errors import CalibrationError
 from rates_engine.core.evidence import DataQuality
 from rates_engine.models import garman_kohlhagen as gk
-from rates_engine.models.fx_delta import (
-    DeltaBasis,
-    DeltaConvention,
-    PremiumAdjustment,
-)
+from rates_engine.models.fx_delta import DeltaBasis, DeltaConvention, PremiumAdjustment
 from rates_engine.volatility.fx_smile import (
     NOT_ARBITRAGE_FREE,
     ATMConvention,

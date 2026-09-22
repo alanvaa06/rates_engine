@@ -26,10 +26,7 @@ import pytest
 
 from rates_engine import mcp_server
 from rates_engine.app import commands
-from rates_engine.conventions.schedule import (
-    imm_date,
-    next_imm_on_or_after,
-)
+from rates_engine.conventions.schedule import imm_date, next_imm_on_or_after
 from rates_engine.core.errors import (
     ConfigurationError,
     CurveArbitrageError,

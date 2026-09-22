@@ -13,10 +13,7 @@ import json
 from typing import Any
 
 from rates_engine.core.errors import RatesEngineError
-from rates_engine.core.results import (
-    SCHEMA_VERSION,
-    EngineResult,
-)
+from rates_engine.core.results import SCHEMA_VERSION, EngineResult
 
 __all__ = ["result_payload", "error_payload", "dumps"]
 

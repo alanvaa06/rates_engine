@@ -21,10 +21,7 @@ import math
 
 from rates_engine.conventions.option_kind import OptionKind
 from rates_engine.core.errors import ShiftRequiredError
-from rates_engine.models.gaussian import (
-    standard_normal_cdf,
-    standard_normal_pdf,
-)
+from rates_engine.models.gaussian import standard_normal_cdf, standard_normal_pdf
 
 __all__ = ["price", "implied_lognormal_vol", "vega", "delta"]
 

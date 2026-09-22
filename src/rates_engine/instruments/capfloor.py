@@ -23,15 +23,8 @@ from datetime import date
 from functools import cached_property
 from typing import TYPE_CHECKING, Any
 
-from rates_engine.conventions.calendar import (
-    SIFMA_US,
-    BusinessDayConvention,
-    HolidayCalendar,
-)
-from rates_engine.conventions.daycount import (
-    DayCount,
-    year_fraction,
-)
+from rates_engine.conventions.calendar import SIFMA_US, BusinessDayConvention, HolidayCalendar
+from rates_engine.conventions.daycount import DayCount, year_fraction
 from rates_engine.conventions.option_kind import OptionKind
 from rates_engine.conventions.schedule import Schedule
 from rates_engine.core.errors import MissingForwardError

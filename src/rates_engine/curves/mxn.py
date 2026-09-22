@@ -34,24 +34,11 @@ from datetime import date, timedelta
 from enum import StrEnum
 from typing import Any
 
-from rates_engine.conventions.calendar import (
-    BMV,
-    BusinessDayConvention,
-)
-from rates_engine.conventions.daycount import (
-    year_fraction,
-)
-from rates_engine.conventions.indices import (
-    TIIE_DAY_COUNT,
-    TIIE_PERIOD_DAYS,
-    UNRESOLVED_MXN,
-)
+from rates_engine.conventions.calendar import BMV, BusinessDayConvention
+from rates_engine.conventions.daycount import year_fraction
+from rates_engine.conventions.indices import TIIE_DAY_COUNT, TIIE_PERIOD_DAYS, UNRESOLVED_MXN
 from rates_engine.core.errors import UnresolvedConventionError
-from rates_engine.core.evidence import (
-    DataQuality,
-    Degradation,
-    Evidence,
-)
+from rates_engine.core.evidence import DataQuality, Degradation, Evidence
 from rates_engine.core.money import Currency
 from rates_engine.core.results import EngineResult
 from rates_engine.curves.bootstrap import (

@@ -26,14 +26,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, timedelta
 
-from rates_engine.conventions.schedule import (
-    imm_date,
-    next_imm_on_or_after,
-)
-from rates_engine.market.snapshot import (
-    CompoundedRate,
-    MarketSnapshot,
-)
+from rates_engine.conventions.schedule import imm_date, next_imm_on_or_after
+from rates_engine.market.snapshot import CompoundedRate, MarketSnapshot
 
 __all__ = [
     "SOFRFuture1M",

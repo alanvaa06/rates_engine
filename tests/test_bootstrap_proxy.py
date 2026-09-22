@@ -13,19 +13,9 @@ from datetime import date
 import pytest
 
 from rates_engine.core.errors import ProxySourceNotDeclaredError
-from rates_engine.core.evidence import (
-    DataQuality,
-    Provenance,
-)
-from rates_engine.curves.bootstrap import (
-    TREASURY_PROXY,
-    ParSwapNode,
-    bootstrap_discount_curve,
-)
-from rates_engine.market.classify import (
-    TREASURY_PAR_YIELD,
-    TREASURY_PROXY_NOTE,
-)
+from rates_engine.core.evidence import DataQuality, Provenance
+from rates_engine.curves.bootstrap import TREASURY_PROXY, ParSwapNode, bootstrap_discount_curve
+from rates_engine.market.classify import TREASURY_PAR_YIELD, TREASURY_PROXY_NOTE
 
 
 def _treasury_node(as_of: date, label: str = "DGS2", rate: float = 0.0405) -> ParSwapNode:

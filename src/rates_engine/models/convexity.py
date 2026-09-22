@@ -39,11 +39,7 @@ from enum import StrEnum
 from typing import Any
 
 from rates_engine.core.errors import UnsupportedConventionError
-from rates_engine.core.evidence import (
-    DataQuality,
-    Evidence,
-    Provenance,
-)
+from rates_engine.core.evidence import DataQuality, Evidence, Provenance
 from rates_engine.core.results import EngineResult
 
 __all__ = [

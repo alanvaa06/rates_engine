@@ -18,10 +18,7 @@ from __future__ import annotations
 import math
 
 from rates_engine.conventions.option_kind import OptionKind
-from rates_engine.models.gaussian import (
-    standard_normal_cdf,
-    standard_normal_pdf,
-)
+from rates_engine.models.gaussian import standard_normal_cdf, standard_normal_pdf
 
 __all__ = ["price", "implied_normal_vol", "vega", "delta"]
 

@@ -54,10 +54,7 @@ from typing import Any
 
 from rates_engine.conventions.option_kind import OptionKind
 from rates_engine.core.errors import DeltaConventionError
-from rates_engine.models.garman_kohlhagen import (
-    d1_d2,
-    forward,
-)
+from rates_engine.models.garman_kohlhagen import d1_d2, forward
 from rates_engine.models.gaussian import standard_normal_cdf
 
 __all__ = ["DeltaBasis", "PremiumAdjustment", "DeltaConvention", "delta", "strike_from_delta"]

@@ -39,17 +39,10 @@ import numpy as np
 
 from rates_engine.conventions.option_kind import OptionKind
 from rates_engine.core.errors import CalibrationError
-from rates_engine.core.evidence import (
-    DataQuality,
-    Degradation,
-    Evidence,
-)
+from rates_engine.core.evidence import DataQuality, Degradation, Evidence
 from rates_engine.core.results import EngineResult
 from rates_engine.models import garman_kohlhagen as gk
-from rates_engine.models.fx_delta import (
-    DeltaConvention,
-    strike_from_delta,
-)
+from rates_engine.models.fx_delta import DeltaConvention, strike_from_delta
 
 __all__ = [
     "ATMConvention",

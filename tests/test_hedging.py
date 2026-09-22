@@ -8,11 +8,7 @@ import pytest
 
 from rates_engine.core.errors import IncompleteStripError
 from rates_engine.curves.bootstrap import FuturesNode
-from rates_engine.hedging.futures_strip import (
-    SR3_DV01,
-    shock_table,
-    strip_hedge,
-)
+from rates_engine.hedging.futures_strip import SR3_DV01, shock_table, strip_hedge
 from rates_engine.risk.sensitivities import money_convexity
 
 

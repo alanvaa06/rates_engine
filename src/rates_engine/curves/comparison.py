@@ -17,10 +17,7 @@ from typing import Any
 from rates_engine.core.evidence import Evidence
 from rates_engine.core.money import Currency
 from rates_engine.core.results import EngineResult
-from rates_engine.curves.bootstrap import (
-    CalibrationInstrument,
-    bootstrap_discount_curve,
-)
+from rates_engine.curves.bootstrap import CalibrationInstrument, bootstrap_discount_curve
 from rates_engine.curves.discount import DiscountCurve
 
 __all__ = ["InterpolationComparison", "compare_interpolations"]

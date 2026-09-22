@@ -26,17 +26,11 @@ from dataclasses import dataclass
 from datetime import date
 from typing import TYPE_CHECKING, Any
 
-from rates_engine.conventions.daycount import (
-    DayCount,
-    year_fraction,
-)
+from rates_engine.conventions.daycount import DayCount, year_fraction
 from rates_engine.conventions.option_kind import OptionKind
 from rates_engine.conventions.side import Side
 from rates_engine.curves.discount import CURVE_TIME_BASIS
-from rates_engine.instruments.swaps import (
-    IRSwap,
-    OISSwap,
-)
+from rates_engine.instruments.swaps import IRSwap, OISSwap
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     pass

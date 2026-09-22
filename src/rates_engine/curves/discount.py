@@ -24,19 +24,10 @@ from dataclasses import dataclass
 from datetime import date
 from functools import cached_property
 
-from rates_engine.conventions.daycount import (
-    DayCount,
-    year_fraction,
-)
-from rates_engine.core.errors import (
-    CurveArbitrageError,
-    UnsupportedConventionError,
-)
+from rates_engine.conventions.daycount import DayCount, year_fraction
+from rates_engine.core.errors import CurveArbitrageError, UnsupportedConventionError
 from rates_engine.core.evidence import Degradation
-from rates_engine.core.money import (
-    Currency,
-    require_same_currency,
-)
+from rates_engine.core.money import Currency, require_same_currency
 from rates_engine.curves.interpolation import MonotoneConvex
 
 __all__ = ["DiscountCurve", "CurveSet", "CURVE_TIME_BASIS"]

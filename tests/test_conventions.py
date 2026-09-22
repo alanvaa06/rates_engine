@@ -6,22 +6,9 @@ from datetime import date, timedelta
 
 import pytest
 
-from rates_engine.conventions.calendar import (
-    SIFMA_US,
-    BusinessDayConvention,
-    easter_sunday,
-)
-from rates_engine.conventions.daycount import (
-    DayCount,
-    day_count_from_name,
-    year_fraction,
-)
-from rates_engine.conventions.schedule import (
-    Schedule,
-    imm_date,
-    imm_dates,
-    next_imm_on_or_after,
-)
+from rates_engine.conventions.calendar import SIFMA_US, BusinessDayConvention, easter_sunday
+from rates_engine.conventions.daycount import DayCount, day_count_from_name, year_fraction
+from rates_engine.conventions.schedule import Schedule, imm_date, imm_dates, next_imm_on_or_after
 from rates_engine.core.errors import UnsupportedConventionError
 
 

@@ -11,17 +11,8 @@ import json
 
 import pytest
 
-from rates_engine.core.diagnostics import (
-    all_warnings,
-    quality_report,
-    walk,
-)
-from rates_engine.core.evidence import (
-    DataQuality,
-    Degradation,
-    Evidence,
-    Provenance,
-)
+from rates_engine.core.diagnostics import all_warnings, quality_report, walk
+from rates_engine.core.evidence import DataQuality, Degradation, Evidence, Provenance
 
 
 def _chain() -> tuple[Evidence, Evidence, Evidence]:
