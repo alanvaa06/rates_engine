@@ -237,8 +237,9 @@ Subpackage `__init__` files document their layer and re-export nothing, so
 | `risk` | 5 | Key rate, duration conventions, convexity, option greeks, and the stubs |
 | `hedging` | 6 | `futures_strip` (`strip_hedge`, `shock_table`), `fx_structures` (`compare_structures`), `program` (the hedging policy as data) |
 | `reporting` | 7 | JSON payloads and error payloads |
-| `cli` | 8 | `rateng bootstrap / price / hedge / describe / list-instruments / fx-forward / hedge-structures` |
-| `mcp_server` | 8 | `rateng-mcp`: the same seven payloads over stdio |
+| `app` | 8 | The use cases: `config` (loading, dates), `builders` (config blocks to domain objects), `commands` (one function per command and `COMMANDS`, the table every interface dispatches through) |
+| `cli` | 9 | `rateng bootstrap / price / hedge / describe / list-instruments / fx-forward / hedge-structures` |
+| `mcp_server` | 9 | `rateng-mcp`: the same seven payloads over stdio, from the same table |
 
 ## The CLI in one line
 

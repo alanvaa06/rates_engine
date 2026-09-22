@@ -96,7 +96,7 @@ def test_the_quickstart_prints_what_the_readme_claims(readme, tmp_path):
 def test_every_bash_command_in_the_readme_is_one_this_package_offers(readme):
     # Read the command set from the CLI's own table rather than repeating it
     # here, so adding a command cannot leave this test asserting the old one.
-    from rates_engine.cli import _COMMANDS
+    from rates_engine.app.commands import COMMANDS as _COMMANDS
 
     commands = re.findall(r"^rateng ([\w-]+)", readme, flags=re.MULTILINE)
     assert commands, "the README shows no CLI usage"

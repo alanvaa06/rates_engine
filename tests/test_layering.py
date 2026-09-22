@@ -39,6 +39,7 @@ LAYERS: tuple[frozenset[str], ...] = (
     frozenset({"risk"}),
     frozenset({"hedging"}),
     frozenset({"reporting"}),
+    frozenset({"app"}),
     frozenset({"cli", "mcp_server"}),
 )
 
@@ -50,10 +51,6 @@ SAME_LAYER_EXCEPTIONS: dict[tuple[str, str], str] = {
         "Linear instruments project their own floating cashflows from a CurveSet. "
         "Removed when projection moves into rates_engine.pricing "
         "(ARCHITECTURE.md §7, decision 2)."
-    ),
-    ("mcp_server", "cli"): (
-        "The MCP server reuses the CLI's command table. Removed when the use cases "
-        "move into an application layer both adapters call (ARCHITECTURE.md §6, phase 3)."
     ),
 }
 

@@ -34,9 +34,22 @@ A reorganisation into layers. No number moves, and every name exported from
 - **Subpackage `__init__` files re-export nothing.** `from
   rates_engine.curves import DiscountCurve` now fails; the package root and
   the defining module are the two homes of a name.
+- **An application layer.** Config loading, the config-to-domain builders
+  and the seven use cases moved out of `cli` into `app.config`,
+  `app.builders` and `app.commands`; `app.commands.COMMANDS` is the table
+  both interfaces dispatch through. `cli` and `mcp_server` are sibling
+  adapters and no longer import each other (`mcp_server` used to import the
+  CLI's private `_COMMANDS`). `rates_engine.cli.load_config` is now
+  `rates_engine.app.config.load_config`. Every command's payload is
+  byte-identical to v0.3.0 except one evidence note, below.
+- **Text that named a module now names where it lives.** The hedge's
+  bucketed-delta note points at `rates_engine.key_rate_dv01` (the stable root
+  name) instead of `rates_engine.risk.key_rate_dv01`; the currency-mismatch
+  refusal points at `rates_engine.pricing.fx_forward` instead of
+  `rates_engine.fx`.
 - **`tests/test_layering.py`** checks layers rather than a total order of
-  modules: nothing imports sideways or upward except two declared, dated
-  exceptions (`instruments -> curves`, `mcp_server -> cli`).
+  modules: nothing imports sideways or upward except one declared, dated
+  exception (`instruments -> curves`).
 
 - **Faster curves and schedules, same bits.** `DiscountCurve` caches its
   node times, log discount factors and monotone-convex interpolant instead

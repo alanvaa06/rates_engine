@@ -86,7 +86,7 @@ class TestStdoutIsOneDocument:
         assert done.returncode == 0
         # Read the list from the CLI's own table rather than repeating it,
         # so adding a command cannot leave this asserting the old set.
-        from rates_engine.cli import _COMMANDS
+        from rates_engine.app.commands import COMMANDS as _COMMANDS
 
         assert set(json.loads(done.stdout)["commands"]) == set(_COMMANDS)
 
@@ -212,7 +212,7 @@ class TestConfigFormats:
         path = tmp_path / "config.yaml"
         path.write_text("as_of: 2026-01-15\n", encoding="utf-8")
         monkeypatch.setitem(sys.modules, "yaml", None)
-        from rates_engine.cli import load_config
+        from rates_engine.app.config import load_config
         from rates_engine.core.errors import MissingDependencyError
 
         with pytest.raises(MissingDependencyError, match=r"finport-ratesengine\[config\]"):
@@ -220,7 +220,7 @@ class TestConfigFormats:
 
     def test_yaml_works_when_pyyaml_is_installed(self, tmp_path):
         pytest.importorskip("yaml")
-        from rates_engine.cli import load_config
+        from rates_engine.app.config import load_config
 
         path = tmp_path / "config.yaml"
         path.write_text("as_of: 2026-01-15\n", encoding="utf-8")
@@ -228,14 +228,14 @@ class TestConfigFormats:
         # have to reach the same valuation date.
         from datetime import date as date_type
 
-        from rates_engine.cli import _as_date
+        from rates_engine.app.config import as_date as _as_date
 
         assert load_config(path)["as_of"] == date_type(2026, 1, 15)
         assert _as_date(load_config(path)["as_of"]) == date_type(2026, 1, 15)
         assert _as_date("2026-01-15") == date_type(2026, 1, 15)
 
     def test_a_config_that_is_not_a_mapping_refuses(self, tmp_path):
-        from rates_engine.cli import load_config
+        from rates_engine.app.config import load_config
 
         path = tmp_path / "list.json"
         path.write_text("[1, 2, 3]", encoding="utf-8")

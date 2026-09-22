@@ -24,7 +24,8 @@ from pathlib import Path
 
 import pytest
 
-from rates_engine import cli, mcp_server
+from rates_engine import mcp_server
+from rates_engine.app import commands
 from rates_engine.conventions.schedule import (
     imm_date,
     next_imm_on_or_after,
@@ -98,7 +99,7 @@ class TestTheToolTableMirrorsTheCLI:
     """A tool that drifts from its command is the failure mode this prevents."""
 
     def test_the_tools_are_the_commands(self):
-        assert set(mcp_server.TOOLS) == set(cli._COMMANDS)
+        assert set(mcp_server.TOOLS) == set(commands.COMMANDS)
 
     def test_this_file_accounts_for_every_tool(self):
         """Adding a command must not quietly leave it untested here."""
@@ -108,7 +109,7 @@ class TestTheToolTableMirrorsTheCLI:
 
     def test_each_tool_is_the_command_itself(self):
         for name, handler in mcp_server.TOOLS.items():
-            assert handler is cli._COMMANDS[name]
+            assert handler is commands.COMMANDS[name]
 
     def test_every_tool_is_described(self):
         assert set(mcp_server.TOOL_DESCRIPTIONS) == set(mcp_server.TOOLS)
@@ -125,11 +126,11 @@ class TestByteEqualityWithTheCLI:
 
     @pytest.mark.parametrize("name", NEEDS_CONFIG)
     def test_it_matches_the_in_process_command(self, name, config):
-        assert mcp_server.call_tool(name, config) == dumps(cli._COMMANDS[name](config))
+        assert mcp_server.call_tool(name, config) == dumps(commands.COMMANDS[name](config))
 
     @pytest.mark.parametrize("name", CONFIGLESS)
     def test_a_configless_tool_matches_too(self, name):
-        assert mcp_server.call_tool(name) == dumps(cli._COMMANDS[name](None))
+        assert mcp_server.call_tool(name) == dumps(commands.COMMANDS[name](None))
 
     @pytest.mark.parametrize("name", NEEDS_CONFIG + CONFIGLESS)
     def test_it_matches_the_subprocess_byte_for_byte(self, name, config_path):
@@ -376,7 +377,7 @@ class TestTransportWiring:
         result = anyio.run(lambda: server.call_tool("bootstrap", {"config": config}))
         assert result.is_error is False
         text = result.content[0].text
-        assert json.loads(text) == json.loads(dumps(cli._COMMANDS["bootstrap"](config)))
+        assert json.loads(text) == json.loads(dumps(commands.COMMANDS["bootstrap"](config)))
 
     def test_a_refusal_reaches_the_caller_named(self, server, config):
         """PRD-002 AC-6.2 through the transport, which is where it can be lost.

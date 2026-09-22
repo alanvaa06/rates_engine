@@ -188,7 +188,7 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
-          from rates_engine.cli import load_config
+          from rates_engine.app.config import load_config
           from rates_engine import MissingDependencyError
 
           Path("c.yaml").write_text("as_of: 2026-01-15\n", encoding="utf-8")
@@ -206,7 +206,7 @@ jobs:
         run: |
           python - <<'PY'
           from rates_engine import mcp_server
-          from rates_engine.cli import _COMMANDS
+          from rates_engine.app.commands import COMMANDS as _COMMANDS
           from rates_engine import MissingDependencyError
 
           # Derived from the CLI's own table rather than a list written here,

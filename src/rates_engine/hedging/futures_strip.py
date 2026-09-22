@@ -231,7 +231,7 @@ def strip_hedge(
             "note": (
                 "Bucketed delta by instrument quote, not a key-rate profile by curve "
                 "node. The two sum to the same parallel DV01 and answer different "
-                "questions; see rates_engine.risk.sensitivities.key_rate_dv01."
+                "questions; see rates_engine.key_rate_dv01."
             ),
         },
         sources=(base.evidence,),
