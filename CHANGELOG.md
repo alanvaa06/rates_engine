@@ -38,10 +38,24 @@ A reorganisation into layers. No number moves, and every name exported from
   modules: nothing imports sideways or upward except two declared, dated
   exceptions (`instruments -> curves`, `mcp_server -> cli`).
 
+- **Faster curves and schedules, same bits.** `DiscountCurve` caches its
+  node times, log discount factors and monotone-convex interpolant instead
+  of recomputing them on every `df()`, finds the interval by bisection, and
+  hands those arrays to the curves it derives (`with_node`, `shifted`).
+  `MonotoneConvex` keeps running integrals over whole intervals, summed in
+  the order the per-call loop used. Instruments compute their schedule once.
+  Every output of a 80 kB battery (discount factors, forwards, zeros, PV,
+  par, annuity, DV01, key rates, strip hedge, shock table, both
+  interpolations) is bit-identical to v0.3.0. Against v0.3.0 on
+  `benchmarks/bench_core.py`: PV of a ten-year OIS x10 (x21 on monotone
+  convex), DV01 x7, key rate DV01 x5, bootstrap x3, strip hedge x1.8.
+
 ### Added
 
 - `benchmarks/bench_core.py`: hot-path timings through the public API, run
   before and after a structural change.
+- `tests/test_curve_cache.py`: a derived curve's handed-down arrays equal a
+  fresh computation exactly, and the cache never enters equality or hashing.
 
 ## [0.3.0] - 2026-09-18
 

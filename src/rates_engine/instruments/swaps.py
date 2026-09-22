@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import date
+from functools import cached_property
 from typing import TYPE_CHECKING
 
 from rates_engine.conventions.calendar import (
@@ -99,7 +100,7 @@ class OISSwap:
         """
         return replace(self, **changes)  # type: ignore[arg-type]
 
-    @property
+    @cached_property
     def schedule(self) -> Schedule:
         """Accrual and payment dates for both legs."""
         return Schedule.generate(
@@ -251,12 +252,12 @@ class IRSwap:
             payment_lag_days=self.payment_lag_days,
         )
 
-    @property
+    @cached_property
     def fixed_schedule(self) -> Schedule:
         """Fixed leg schedule."""
         return self._schedule(self.fixed_frequency_months)
 
-    @property
+    @cached_property
     def float_schedule(self) -> Schedule:
         """Floating leg schedule."""
         return self._schedule(self.float_frequency_months)

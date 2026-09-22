@@ -18,9 +18,11 @@ silently disagree about what a basis point is.
 from __future__ import annotations
 
 import math
+from bisect import bisect_left, bisect_right
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
+from functools import cached_property
 
 from rates_engine.conventions.daycount import (
     DayCount,
@@ -151,9 +153,15 @@ class DiscountCurve:
                 "segment implies a negative zero rate the inputs do not support"
             )
 
-    @property
+    @cached_property
     def node_times(self) -> tuple[float, ...]:
-        """Node dates as year fractions from ``as_of`` on :data:`CURVE_TIME_BASIS`."""
+        """Node dates as year fractions from ``as_of`` on :data:`CURVE_TIME_BASIS`.
+
+        Computed once per curve. The curve is frozen, so the answer cannot go
+        stale, and every ``df`` call used to recompute it -- one
+        ``year_fraction`` per node per discount factor, which was most of the
+        time spent pricing and bumping.
+        """
         return tuple(year_fraction(self.as_of, n, CURVE_TIME_BASIS) for n in self.nodes)
 
     def time(self, day: date) -> float:
@@ -186,20 +194,22 @@ class DiscountCurve:
                 return math.exp(logs[-1] * target / times[-1])
             slope = (logs[-1] - logs[-2]) / (times[-1] - times[-2])
             return math.exp(logs[-1] + slope * (target - times[-1]))
-        for left in range(len(times) - 1):
-            if times[left] <= target <= times[left + 1]:
-                span = times[left + 1] - times[left]
-                weight = (target - times[left]) / span
-                return math.exp(logs[left] * (1.0 - weight) + logs[left + 1] * weight)
-        raise AssertionError("unreachable: target lies inside the node range")  # pragma: no cover
+        # The first interval with times[left] <= target <= times[left + 1]: at a
+        # node that is the interval ending there, as the linear scan this
+        # replaced chose, so the arithmetic -- and every bit of the result --
+        # is unchanged.
+        left = bisect_left(times, target) - 1
+        span = times[left + 1] - times[left]
+        weight = (target - times[left]) / span
+        return math.exp(logs[left] * (1.0 - weight) + logs[left + 1] * weight)
 
-    @property
+    @cached_property
     def _log_dfs(self) -> tuple[float, ...]:
         return tuple(math.log(df) for df in self.dfs)
 
-    @property
+    @cached_property
     def _monotone_convex(self) -> MonotoneConvex:
-        """The Hagan-West interpolant over this curve's nodes."""
+        """The Hagan-West interpolant over this curve's nodes, built once per curve."""
         return MonotoneConvex(self.node_times, self._log_dfs)
 
     def instantaneous_forward(self, day: date) -> float:
@@ -222,9 +232,11 @@ class DiscountCurve:
         times, logs = self.node_times, self._log_dfs
         if target <= times[0]:
             return -logs[0] / times[0]
-        for left in range(len(times) - 1):
-            if times[left] <= target < times[left + 1]:
-                return -(logs[left + 1] - logs[left]) / (times[left + 1] - times[left])
+        # The interval with times[left] <= target < times[left + 1], so a node
+        # belongs to the interval it starts, exactly as the scan it replaced.
+        left = bisect_right(times, target) - 1
+        if left < len(times) - 1:
+            return -(logs[left + 1] - logs[left]) / (times[left + 1] - times[left])
         if len(times) == 1:
             return -logs[0] / times[0]
         return -(logs[-1] - logs[-2]) / (times[-1] - times[-2])
@@ -331,7 +343,7 @@ class DiscountCurve:
                 return constant
 
         times = self.node_times
-        return DiscountCurve(
+        bumped = DiscountCurve(
             as_of=self.as_of,
             nodes=self.nodes,
             dfs=tuple(
@@ -341,6 +353,7 @@ class DiscountCurve:
             currency=self.currency,
             provenance=self.provenance,
         )
+        return bumped._seeded(times)
 
     def with_node(self, node: date, df: float) -> DiscountCurve:
         """A copy with one node appended or replaced.
@@ -363,7 +376,7 @@ class DiscountCurve:
                 "bootstrap instruments must be solved in maturity order"
             )
         if self.nodes and node == self.nodes[-1]:
-            return DiscountCurve(
+            replaced = DiscountCurve(
                 self.as_of,
                 self.nodes,
                 self.dfs[:-1] + (df,),
@@ -371,7 +384,8 @@ class DiscountCurve:
                 currency=self.currency,
                 provenance=self.provenance,
             )
-        return DiscountCurve(
+            return replaced._seeded(self.node_times, self._log_dfs[:-1] + (math.log(df),))
+        extended = DiscountCurve(
             self.as_of,
             self.nodes + (node,),
             self.dfs + (df,),
@@ -379,6 +393,29 @@ class DiscountCurve:
             currency=self.currency,
             provenance=self.provenance,
         )
+        return extended._seeded(
+            self.node_times + (self.time(node),),
+            self._log_dfs + (math.log(df),),
+        )
+
+    def _seeded(
+        self,
+        node_times: tuple[float, ...],
+        log_dfs: tuple[float, ...] | None = None,
+    ) -> DiscountCurve:
+        """This curve with its derived arrays filled in from a curve it was built from.
+
+        The bootstrap's root solver builds one curve per trial discount factor,
+        and a risk bump one per shock. Each shares its node dates -- and, when
+        only the last factor changed, all but one log factor -- with the curve
+        it came from. Filling the caches here is the same arithmetic the
+        cached properties would do, on the same inputs, so nothing changes
+        but the time spent.
+        """
+        self.__dict__["node_times"] = node_times
+        if log_dfs is not None:
+            self.__dict__["_log_dfs"] = log_dfs
+        return self
 
     def to_dict(self) -> dict[str, object]:
         """Serialise nodes, factors and the interpolation that joins them."""
