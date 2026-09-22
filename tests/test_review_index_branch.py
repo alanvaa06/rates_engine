@@ -48,14 +48,17 @@ def _month_end_nodes(**swap_terms) -> tuple[SwapQuoteNode, ...]:
 
 
 class TestTheNodeDate:
-    def test_a_payment_rolled_back_before_maturity_still_fits(self):
-        """Modified following rolls 2029-03-31 (a Saturday) back to the 29th,
-        while the floating leg still reads the discount factor at the 31st.
-        The node pinned the 29th and the three-year fit came undone."""
+    def test_a_month_end_strip_fits(self):
+        """Found on unadjusted schedules: Modified Following rolled 2029-03-31
+        (a Saturday) back to the 29th while the floating leg read the 31st,
+        and a node pinned at the payment left the three-year fit undone. The
+        node now pins the later of the two; since v0.4 the period end is
+        adjusted too, so both are the 29th, and the fit holds either way."""
         nodes = _month_end_nodes()
         three_year = nodes[2]
-        assert three_year.swap.schedule.payment[-1] < three_year.swap.maturity
-        assert three_year.node_date == three_year.swap.maturity
+        schedule = three_year.swap.schedule
+        assert schedule.accrual_end[-1] == schedule.payment[-1] == date(2029, 3, 29)
+        assert three_year.node_date == max(schedule.payment[-1], schedule.accrual_end[-1])
         curve = CurveSet(bootstrap_discount_curve(MONTH_END, nodes).curve)
         for node in nodes:
             assert par_rate(node.swap, curve).value == pytest.approx(node.quoted_rate, abs=1e-12)

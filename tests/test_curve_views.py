@@ -132,21 +132,24 @@ class TestRoundTrip:
         maturities = tuple(date(2026 + k, 1, 15) for k in range(1, 8))
         target = 0.04
 
-        # Bootstrap discount factors from a flat 4% par curve, annual.
+        # Bootstrap discount factors from a flat 4% par curve, annual, on the
+        # period ends the swaps actually use: anniversaries adjusted Modified
+        # Following (2028-01-15 is a Saturday, so that period ends on the 18th).
+        from rates_engine.conventions.calendar import SIFMA_US, BusinessDayConvention
+
+        ends = tuple(
+            SIFMA_US.adjust(m, BusinessDayConvention.MODIFIED_FOLLOWING) for m in maturities
+        )
         dfs: list[float] = []
-        for index, maturity in enumerate(maturities):
+        for index, end in enumerate(ends):
             annuity = sum(
-                year_fraction(
-                    as_of if k == 0 else maturities[k - 1], maturities[k], DayCount.ACT_360
-                )
+                year_fraction(as_of if k == 0 else ends[k - 1], ends[k], DayCount.ACT_360)
                 * dfs[k]
                 for k in range(index)
             )
-            tau = year_fraction(
-                as_of if index == 0 else maturities[index - 1], maturity, DayCount.ACT_360
-            )
+            tau = year_fraction(as_of if index == 0 else ends[index - 1], end, DayCount.ACT_360)
             dfs.append((1.0 - target * annuity) / (1.0 + target * tau))
-        curve = DiscountCurve(as_of, maturities, tuple(dfs))
+        curve = DiscountCurve(as_of, ends, tuple(dfs))
 
         recovered = par_curve(curve, maturities, frequency_months=12)
         for value in recovered.values:

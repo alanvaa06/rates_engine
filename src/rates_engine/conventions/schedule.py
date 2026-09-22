@@ -97,9 +97,13 @@ class Schedule:
     """Accrual periods and payment dates for one leg.
 
     Attributes:
-        accrual_start: Unadjusted start of each period.
-        accrual_end: Unadjusted end of each period.
-        payment: Adjusted payment date of each period, after the payment lag.
+        accrual_start: Start of each period: the effective date, then each
+            previous period's end.
+        accrual_end: End of each period, adjusted by the roll convention
+            unless the schedule was generated with
+            ``adjust_accrual_ends=False``.
+        payment: Payment date of each period: the payment lag in business
+            days after the (adjusted) accrual end.
     """
 
     accrual_start: tuple[date, ...]
@@ -120,12 +124,25 @@ class Schedule:
         calendar: HolidayCalendar = SIFMA_US,
         convention: BusinessDayConvention = BusinessDayConvention.MODIFIED_FOLLOWING,
         payment_lag_days: int = 0,
+        adjust_accrual_ends: bool = True,
     ) -> Schedule:
         """Build a schedule backwards from maturity, the market convention.
 
         Generating backwards means any short period lands at the front, where
         a stub belongs, rather than at the back where it would shorten the
         final coupon nobody expects to be short.
+
+        **Adjusted period ends.** Each period ends on its roll date adjusted
+        by ``convention``, and is paid ``payment_lag_days`` business days
+        later. That is the USD SOFR OIS convention (period ends Modified
+        Following, payment two business days after -- CME's Eris SOFR
+        contract terms) and the 2006 ISDA Definitions default, under which
+        period end dates adjust with the payment dates. Until v0.4 the ends
+        were left unadjusted while the payments rolled, so an accrual period
+        and its payment disagreed whenever a roll date fell on a holiday or a
+        weekend: interest accrued to a Saturday was paid on the Monday. The
+        roll dates themselves are still counted from the unadjusted maturity,
+        so an adjustment never drifts into the next period.
 
         Args:
             effective: Start of the first accrual period.
@@ -134,6 +151,8 @@ class Schedule:
             calendar: Calendar the payment roll uses.
             convention: Roll rule for payment dates.
             payment_lag_days: Business days between accrual end and payment.
+            adjust_accrual_ends: ``False`` reproduces the pre-v0.4 schedule,
+                with unadjusted period ends and only the payments rolled.
 
         Returns:
             The schedule.
@@ -153,6 +172,8 @@ class Schedule:
             ends.append(cursor)
             cursor = add_months(maturity, -frequency_months * (len(ends)))
         ends.reverse()
+        if adjust_accrual_ends:
+            ends = [calendar.adjust(end, convention) for end in ends]
         starts = [effective, *ends[:-1]]
 
         payments = tuple(

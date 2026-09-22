@@ -16,6 +16,27 @@ instrument is valued, not to what it is worth.
 
 ### Changed (breaking)
 
+- **Accrual period ends are adjusted, and dollar numbers move.**
+  `Schedule.generate` now rolls each period end by the same business-day
+  convention as the payment (Modified Following by default) and pays
+  `payment_lag_days` business days after the adjusted end. That is the USD
+  SOFR OIS convention (CME's Eris SOFR contract terms: periods end on the
+  roll date "subject to adjustment in accordance with the Modified Following
+  Business Day Convention", payment two business days later) and the 2006
+  ISDA Definitions default, under which period end dates adjust with the
+  payment dates. v0.3 left period ends unadjusted while payments rolled, so
+  whenever a roll date fell on a weekend or holiday the period accrued to a
+  day that was not paid, and the floating leg stopped telescoping. This is
+  the one change in this release that moves a dollar number, and only where
+  a roll date is not a business day. On the README quickstart (a two-year
+  IMM-dated OIS) the par rate moves from 4.0539% to 4.0537% and DV01 from
+  -21,870.88 to -21,870.07 USD/bp. IMM dates are Wednesdays and rarely roll,
+  so futures-strip hedges barely move. The CME golden tests are skipped
+  without the published fixture, as before, so they give no signal here.
+  `adjust_accrual_ends=False` reproduces the v0.3 schedule. It also closes
+  a 1.7 bp gap on rolled dates between a curve fitted to `SwapQuoteNode`s
+  and one fitted to `ParSwapNode`s; what remains between them is the payment
+  lag, under Added.
 - **Instruments carry their rate index, and it fixes their currency.**
   `OISSwap`, `IRSwap`, `FRA`, `CapFloor` and `Caplet` take an `index`
   (`SOFR`, and Term SOFR of the frequency, by default). v0.3 took an
@@ -150,12 +171,12 @@ instrument is valued, not to what it is worth.
   swap, whose residual is `pricing.linear.par_rate_value` itself. The curve
   layer receives it through the `CalibrationInstrument` protocol and still
   imports no product. A curve fitted to it reprices its swaps to 1e-12.
-  Fitted instead to `ParSwapNode`s built from the same swaps' dates, the
-  2026-01-15 strip misprices its two-year swap by 1.7 bp. That is a mismatch
-  between `ParSwapNode`'s assumption -- the floating leg telescopes to
-  `P(start) - P(end)` -- and this library's schedule convention, which leaves
-  accrual ends unadjusted while payments roll; where nothing rolls the two
-  give the same curve. `ParSwapNode` stays for quotes that arrive as dates.
+  `ParSwapNode` prices the floating leg as `P(start) - P(last payment)`,
+  exact only when each period is paid the day it ends: fitted to
+  `ParSwapNode`s built from SOFR OIS payment dates (a two-business-day lag),
+  the 2026-01-15 strip misprices its one-year swap by 5.5 bp. With no lag
+  the two nodes agree exactly. `ParSwapNode` stays for quotes that arrive as
+  dates.
   `SwapQuoteNode` takes an OIS only: a term-rate quote calibrates a
   projection curve, which is the dual-curve solver's job.
 - **Term SOFR indices** (`TERM_SOFR_1M/3M/6M/12M`), `INDICES`,

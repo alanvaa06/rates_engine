@@ -20,10 +20,11 @@ match.
 
 ``ParSwapNode`` remains for quotes that arrive as a date schedule rather
 than a trade -- the CLI's ``par_swaps`` block, the dual-curve tests. It
-assumes the floating leg telescopes to ``P(start) - P(end)``, which holds
-under this library's schedule convention (accrual ends unadjusted, payments
-rolled) only when no payment date rolls; there the two nodes give the same
-curve, and ``tests/test_calibration.py`` checks both that and where they part.
+prices the floating leg as ``P(start) - P(last payment)``, which is exact
+only when each period is paid the day it ends. For a swap with no payment
+lag the two nodes give the same curve; for a SOFR OIS, paid two business
+days after each period, a curve fitted to ``ParSwapNode``s misprices the
+one-year swap by about 5.5 bp. ``tests/test_calibration.py`` checks both.
 
 **OIS only.** A term-rate swap quote (``IRSwap``) calibrates a projection
 curve against a known discount curve -- that is the dual-curve solver's job
