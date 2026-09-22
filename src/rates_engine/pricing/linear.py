@@ -13,8 +13,7 @@ they move the curve and call back into :func:`discounted_value`.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
-from typing import Any, Protocol, runtime_checkable
+from typing import Any
 
 from rates_engine.conventions.side import Side
 from rates_engine.core.errors import CurrencyMismatchError
@@ -23,73 +22,27 @@ from rates_engine.core.money import require_same_currency
 from rates_engine.core.results import EngineResult
 from rates_engine.curves.discount import CurveSet
 from rates_engine.instruments.cashflow import Cashflow
-from rates_engine.pricing.collateral import collateral_warnings, curve_warnings, discounting_fields
+from rates_engine.pricing.collateral import (
+    collateral_warnings,
+    discounting_fields,
+    instrument_warnings,
+    merge_warnings,
+    valuation_warnings,
+)
+from rates_engine.pricing.projection import Priceable, Swappable, float_leg, project
 
 __all__ = [
-    "Priceable",
-    "Swappable",
     "PriceResult",
     "ParametricComparison",
     "pv",
     "discounted_value",
+    "annuity_value",
+    "par_rate_value",
     "valuation_evidence",
     "par_rate",
     "annuity",
     "price_on_parametric",
 ]
-
-
-@runtime_checkable
-class Priceable(Protocol):
-    """Anything with dated cashflows that depend on a curve set."""
-
-    @property
-    def span(self) -> tuple[date, date]:
-        """First and last date the instrument touches, as a half-open interval."""
-        ...
-
-    def cashflows(self, curve_set: CurveSet) -> tuple[Cashflow, ...]:
-        """The instrument's cashflows under ``curve_set``, signed for its side."""
-        ...
-
-    def describe(self) -> dict[str, Any]:
-        """Instrument terms for the evidence record."""
-        ...
-
-
-@runtime_checkable
-class Swappable(Priceable, Protocol):
-    """A two-legged instrument, which is what a par rate and an annuity need.
-
-    ``notional`` and ``side`` are declared as read-only properties rather than
-    attributes, because every instrument in this package is a frozen
-    dataclass and a mutable attribute in the protocol would exclude all of
-    them. ``with_terms`` is here for the same reason: a par rate is computed
-    from variants of the swap, and ``dataclasses.replace`` on a protocol is
-    not something a type checker can verify.
-    """
-
-    @property
-    def notional(self) -> float:
-        """Notional in USD."""
-        ...
-
-    @property
-    def side(self) -> str:
-        """``"payer"`` or ``"receiver"``."""
-        ...
-
-    def with_terms(self, **changes: object) -> Swappable:
-        """A copy with some terms changed."""
-        ...
-
-    def fixed_cashflows(self, curve_set: CurveSet) -> tuple[Cashflow, ...]:
-        """The fixed leg alone."""
-        ...
-
-    def float_cashflows(self, curve_set: CurveSet) -> tuple[Cashflow, ...]:
-        """The floating leg alone."""
-        ...
 
 
 @dataclass(frozen=True)
@@ -241,7 +194,7 @@ def valuation_evidence(
         # conventions are assumed inherits that without the caller having
         # to remember to pass source_evidence. That forgetting is what made
         # the marking decorative.
-        warnings=curve_warnings(curve_set),
+        warnings=valuation_warnings(instrument, curve_set),
     )
 
 
@@ -254,7 +207,7 @@ def discounted_value(instrument: Priceable, curve_set: CurveSet) -> float:
     calls instead.
 
     Args:
-        instrument: Anything with :meth:`cashflows`.
+        instrument: Anything :func:`~rates_engine.pricing.projection.project` handles.
         curve_set: Discount and projection curves.
 
     Returns:
@@ -263,7 +216,43 @@ def discounted_value(instrument: Priceable, curve_set: CurveSet) -> float:
     Raises:
         CurrencyMismatchError: A flow is in another currency than the curve.
     """
-    return _pv_of(instrument.cashflows(curve_set), curve_set)
+    return _pv_of(project(instrument, curve_set), curve_set)
+
+
+def annuity_value(swap: Swappable, curve_set: CurveSet) -> float:
+    """Fixed-leg annuity per unit notional as a bare float; see :func:`annuity`.
+
+    Args:
+        swap: A two-legged instrument.
+        curve_set: Discount and projection curves.
+
+    Returns:
+        The annuity in years of discounted accrual.
+    """
+    unit_swap = swap.with_terms(fixed_rate=1.0, side=Side.RECEIVER)
+    return _pv_of(unit_swap.fixed_cashflows(), curve_set) / swap.notional
+
+
+def _float_leg_pv(swap: Swappable, curve_set: CurveSet) -> float:
+    payer = swap.with_terms(side=Side.PAYER)
+    return _pv_of(float_leg(payer, curve_set), curve_set)
+
+
+def par_rate_value(swap: Swappable, curve_set: CurveSet) -> float:
+    """The par rate as a bare float: exactly :func:`par_rate`'s value.
+
+    For callers that evaluate it many times -- a root solver calibrating a
+    curve node to the swap, above all -- and would otherwise build and
+    discard an evidence record per trial.
+
+    Args:
+        swap: A two-legged instrument.
+        curve_set: Discount and projection curves.
+
+    Returns:
+        The par rate as a decimal.
+    """
+    return _float_leg_pv(swap, curve_set) / (swap.notional * annuity_value(swap, curve_set))
 
 
 def pv(
@@ -275,7 +264,7 @@ def pv(
     """Present value in USD, signed from the holder's point of view.
 
     Args:
-        instrument: Anything with :meth:`cashflows`.
+        instrument: Anything :func:`~rates_engine.pricing.projection.project` handles.
         curve_set: Discount and projection curves.
         source_evidence: Evidence of the curves, chained in so that a proxied
             curve stays visibly proxied in the price.
@@ -284,7 +273,7 @@ def pv(
         A :class:`PriceResult` with ``measure="pv"`` and the discount
         curve's currency as its unit.
     """
-    flows = instrument.cashflows(curve_set)
+    flows = project(instrument, curve_set)
     value = _pv_of(flows, curve_set)
     return PriceResult(
         evidence=valuation_evidence("pricing.pv", instrument, curve_set, {"cashflows": len(flows)}, source_evidence),
@@ -311,8 +300,7 @@ def annuity(
     Returns:
         A :class:`PriceResult` with ``measure="annuity"`` and ``unit="years"``.
     """
-    unit_swap = swap.with_terms(fixed_rate=1.0, side=Side.RECEIVER)
-    value = _pv_of(unit_swap.fixed_cashflows(curve_set), curve_set) / swap.notional
+    value = annuity_value(swap, curve_set)
     return PriceResult(
         evidence=valuation_evidence("pricing.annuity", swap, curve_set, {}, source_evidence),
         value=value,
@@ -347,16 +335,15 @@ def par_rate(
         ZeroDivisionError: The annuity is zero, which means the fixed leg has
             no periods left to discount.
     """
-    payer = swap.with_terms(side=Side.PAYER)
-    float_pv = _pv_of(payer.float_cashflows(curve_set), curve_set)
-    annuity_value = annuity(swap, curve_set).value
-    value = float_pv / (swap.notional * annuity_value)
+    float_pv = _float_leg_pv(swap, curve_set)
+    years = annuity_value(swap, curve_set)
+    value = float_pv / (swap.notional * years)
     return PriceResult(
         evidence=valuation_evidence(
             "pricing.par_rate",
             swap,
             curve_set,
-            {"annuity_years": annuity_value, "float_leg_pv": float_pv},
+            {"annuity_years": years, "float_leg_pv": float_pv},
             source_evidence,
         ),
         value=value,
@@ -418,7 +405,7 @@ def price_on_parametric(
     """Price on a fitted curve and report the gap against the bootstrapped one.
 
     Args:
-        instrument: Anything with :meth:`cashflows`.
+        instrument: Anything :func:`~rates_engine.pricing.projection.project` handles.
         parametric: Curves sampled from the fitted model.
         bootstrapped: The curves the model was fitted to.
         fit: The fit that produced ``parametric``. Its payload must declare
@@ -450,8 +437,8 @@ def price_on_parametric(
         )
     model = str(fields.get("model", type(fit).__name__))
 
-    parametric_pv = _pv_of(instrument.cashflows(parametric), parametric)
-    bootstrap_pv = _pv_of(instrument.cashflows(bootstrapped), bootstrapped)
+    parametric_pv = _pv_of(project(instrument, parametric), parametric)
+    bootstrap_pv = _pv_of(project(instrument, bootstrapped), bootstrapped)
     difference = parametric_pv - bootstrap_pv
     notional = instrument.describe().get("notional")
     per_bp = (
@@ -479,7 +466,7 @@ def price_on_parametric(
             ),
         },
         sources=(fit.evidence,),
-        warnings=collateral_warnings(currency),
+        warnings=merge_warnings(collateral_warnings(currency), instrument_warnings(instrument)),
     )
     return ParametricComparison(
         evidence=evidence,

@@ -15,7 +15,7 @@ evidence chain into whatever consumes the curve.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from typing import Any, Protocol, runtime_checkable
 
@@ -349,10 +349,14 @@ def bootstrap_discount_curve(
     # DiscountCurve constructor.
     curve.require_monotone("bootstrap_discount_curve")
 
-    residuals = {inst.label: inst.residual_bp(curve) for inst in ordered}
+    # One residual per instrument, checked per instrument. The dict below is
+    # keyed by label for the payload, and two unlabelled nodes share a
+    # default label: keying the strict check by label once let the last of
+    # them stand for all, so a node that failed its fit passed unseen.
+    residual_list = [inst.residual_bp(curve) for inst in ordered]
+    residuals = dict(zip(_residual_keys(ordered), residual_list, strict=True))
     dropped: list[dict[str, Any]] = []
-    for instrument in ordered:
-        residual = residuals[instrument.label]
+    for instrument, residual in zip(ordered, residual_list, strict=True):
         if abs(residual) <= tolerance_bp:
             continue
         reason = (
@@ -364,7 +368,16 @@ def bootstrap_discount_curve(
         dropped.append({"label": instrument.label, "reason": reason, "residual_bp": residual})
 
     node_quality = tuple(inst.provenance.data_quality for inst in ordered)
-    warnings: list[Degradation] = []
+    # Degradations a node carries about what it quotes -- a TIIE swap's
+    # unverified conventions -- belong to the curve it pins, so that the
+    # curve does not read "observed" while resting on assumptions.
+    carried: dict[str, Degradation] = {}
+    for inst in ordered:
+        for item in getattr(inst, "degradations", ()):
+            carried.setdefault(item.code, item)
+    if carried:
+        curve = replace(curve, provenance=curve.provenance + tuple(carried.values()))
+    warnings: list[Degradation] = list(carried.values())
     if long_end_source == TREASURY_PROXY and proxies:
         warnings.append(
             Degradation(
@@ -389,12 +402,12 @@ def bootstrap_discount_curve(
             "strict": strict,
             "long_end_source": long_end_source,
             "instruments_used": [
-                {"label": i.label, **i.describe(), "residual_bp": residuals[i.label]}
-                for i in ordered
+                {"label": i.label, **i.describe(), "residual_bp": r}
+                for i, r in zip(ordered, residual_list, strict=True)
             ],
             "fit_residuals_bp": dict(residuals),
             "dropped_instruments": [dict(d) for d in dropped] or None,
-            "max_abs_residual_bp": max((abs(r) for r in residuals.values()), default=0.0),
+            "max_abs_residual_bp": max((abs(r) for r in residual_list), default=0.0),
             "nodes": [n.isoformat() for n in curve.nodes],
             "convexity_models": sorted(_convexity_models(ordered)) or None,
         },
@@ -408,6 +421,23 @@ def bootstrap_discount_curve(
         dropped_instruments=tuple(dropped),
         long_end_source=long_end_source,
     )
+
+
+def _residual_keys(instruments: Sequence[CalibrationInstrument]) -> list[str]:
+    """Each instrument's label, made unique with its node date where two collide.
+
+    A label that appears once is its own key, which keeps every labelled
+    payload as it was. Colliding defaults -- two unlabelled futures are both
+    ``"future"`` -- become ``"future@2026-06-17"`` and so on, so no residual
+    overwrites another.
+    """
+    counts: dict[str, int] = {}
+    for inst in instruments:
+        counts[inst.label] = counts.get(inst.label, 0) + 1
+    return [
+        inst.label if counts[inst.label] == 1 else f"{inst.label}@{inst.node_date.isoformat()}"
+        for inst in instruments
+    ]
 
 
 def _convexity_models(instruments: Sequence[CalibrationInstrument]) -> set[str]:

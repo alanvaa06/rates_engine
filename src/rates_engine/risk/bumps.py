@@ -25,7 +25,8 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from rates_engine.curves.discount import CurveSet
-from rates_engine.pricing.linear import Priceable, discounted_value
+from rates_engine.pricing.linear import discounted_value
+from rates_engine.pricing.projection import Priceable
 
 __all__ = ["BUMP_BP", "Shift", "shift_from_bp", "tent_weights", "tent_shift", "shifted", "repriced"]
 

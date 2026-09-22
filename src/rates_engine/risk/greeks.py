@@ -17,8 +17,14 @@ from rates_engine.core.results import EngineResult
 from rates_engine.curves.discount import CurveSet
 from rates_engine.instruments.capfloor import CapFloor
 from rates_engine.instruments.swaption import Swaption
-from rates_engine.pricing.collateral import curve_warnings
-from rates_engine.pricing.options import cap_floor_pv, forward_swap_rate, model_for, swaption_pv
+from rates_engine.pricing.collateral import valuation_warnings
+from rates_engine.pricing.options import (
+    cap_floor_pv,
+    caplet_forward_rate,
+    forward_swap_rate,
+    model_for,
+    swaption_pv,
+)
 from rates_engine.risk.bumps import BUMP_BP, shifted
 from rates_engine.volatility.units import Volatility, VolUnits
 
@@ -148,7 +154,7 @@ def option_greeks(
         forward = (
             forward_swap_rate(option, curve_set)
             if isinstance(option, Swaption)
-            else option.caplets[-1].forward_rate(curve_set)
+            else caplet_forward_rate(option.caplets[-1], curve_set)
         )
         equivalent = volatility.atm_equivalent_normal(forward).as_normal_bp()
         bumped_vol = Volatility.unchecked(
@@ -179,7 +185,7 @@ def option_greeks(
                 "base_value": base,
             },
             sources=source_evidence,
-            warnings=curve_warnings(curve_set),
+            warnings=valuation_warnings(option, curve_set),
         ),
         delta=delta,
         gamma=gamma,

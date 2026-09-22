@@ -45,6 +45,7 @@ from rates_engine.conventions.calendar import (
     SIFMAUSCalendar,
 )
 from rates_engine.conventions.daycount import DayCount, day_count_from_name, year_fraction
+from rates_engine.conventions.indices import SOFR, TERM_SOFR_3M, TIIE_28, TIIE_FONDEO, RateIndex
 from rates_engine.conventions.option_kind import OptionKind
 from rates_engine.conventions.schedule import Schedule, imm_date, imm_dates, next_imm_on_or_after
 from rates_engine.conventions.side import Side
@@ -159,6 +160,7 @@ from rates_engine.models import bachelier, black
 from rates_engine.models.convexity import ConvexityModel, ConvexityResult, convexity_adjustment
 from rates_engine.models.sabr import SABRCalibration, SABRParameters, density_diagnostics
 from rates_engine.models.sabr import calibrate as calibrate_sabr
+from rates_engine.pricing.calibration import SwapQuoteNode
 from rates_engine.pricing.linear import (
     ParametricComparison,
     PriceResult,
@@ -170,10 +172,13 @@ from rates_engine.pricing.linear import (
 from rates_engine.pricing.options import (
     OptionPriceResult,
     cap_floor_pv,
+    caplet_forward_rate,
+    caplet_numeraire,
     caplet_pv,
     model_for,
     swaption_pv,
 )
+from rates_engine.pricing.projection import float_leg, fra_fair_rate, project
 from rates_engine.risk.bumps import tent_weights
 from rates_engine.risk.greeks import GreeksResult, option_greeks
 from rates_engine.risk.sensitivities import (
@@ -300,6 +305,17 @@ __all__ = [
     "par_rate",
     "ParametricComparison",
     "ParSwapNode",
+    "SwapQuoteNode",
+    "project",
+    "float_leg",
+    "fra_fair_rate",
+    "caplet_forward_rate",
+    "caplet_numeraire",
+    "RateIndex",
+    "SOFR",
+    "TERM_SOFR_3M",
+    "TIIE_FONDEO",
+    "TIIE_28",
     "price_on_parametric",
     "PriceResult",
     "ProgramAudit",

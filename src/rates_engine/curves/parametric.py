@@ -35,12 +35,12 @@ import numpy as np
 from scipy.optimize import minimize_scalar
 
 from rates_engine.conventions.calendar import SIFMA_US, HolidayCalendar
-from rates_engine.conventions.daycount import year_fraction
+from rates_engine.conventions.daycount import CURVE_TIME_BASIS, year_fraction
 from rates_engine.core.errors import CalibrationError, UnderdeterminedCurveError
 from rates_engine.core.evidence import DataQuality, Degradation, Evidence
 from rates_engine.core.money import Currency
 from rates_engine.core.results import EngineResult
-from rates_engine.curves.discount import CURVE_TIME_BASIS, DiscountCurve
+from rates_engine.curves.discount import DiscountCurve
 
 __all__ = [
     "NelsonSiegel",

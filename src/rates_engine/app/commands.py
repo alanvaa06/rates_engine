@@ -16,7 +16,7 @@ from typing import Any
 from rates_engine.app.builders import calibration_nodes, flat_curve, fx_inputs, ois_swap
 from rates_engine.app.config import as_date, require_config
 from rates_engine.conventions.currency_pair import USDMXN
-from rates_engine.conventions.indices import UNRESOLVED_MXN
+from rates_engine.conventions.indices import INDICES, UNRESOLVED_MXN
 from rates_engine.core.errors import ConfigurationError, UndefinedDurationError
 from rates_engine.core.errors import __all__ as EXCEPTION_NAMES
 from rates_engine.core.money import Currency
@@ -80,7 +80,7 @@ def list_instruments(_config: dict[str, Any] | None) -> dict[str, Any]:
         "schema_version": SCHEMA_VERSION,
         "result_type": "InstrumentCatalogue",
         "linear": [
-            {"name": "OISSwap", "index": "compounded_overnight", "curves": ["discount"]},
+            {"name": "OISSwap", "index": "compounded_sofr", "curves": ["discount"]},
             {"name": "IRSwap", "index": "term_sofr", "curves": ["discount", "tenor"]},
             {"name": "FRA", "index": "term_sofr", "curves": ["discount", "tenor"]},
             {"name": "SOFRFuture1M", "settlement": "arithmetic_average", "dv01_usd": 41.67},
@@ -131,6 +131,7 @@ def describe(_config: dict[str, Any] | None) -> dict[str, Any]:
         "currencies": [c.value for c in Currency],
         "day_counts": ["ACT/360", "ACT/365F", "30/360"],
         "calendars": ["SIFMA_US"],
+        "rate_indices": sorted(INDICES),
         "interpolation": ["log_linear_df", "monotone_convex"],
         "convexity_models": ["none", "ho_lee", "hull_white"],
         "option_models": ["bachelier", "black"],
@@ -223,11 +224,21 @@ def price(config: dict[str, Any] | None) -> dict[str, Any]:
     config = require_config(config, "price")
     as_of = as_date(config["as_of"])
     instruments = calibration_nodes(config, as_of)
+    swap = ois_swap(config)
+    if swap.currency is not Currency.USD:
+        # The curve block quotes a SOFR stub, SR3 futures and SOFR OIS par:
+        # dollar quotes. Building a peso curve from them would be the
+        # relabelling this package refuses everywhere else.
+        raise ConfigurationError(
+            f"the swap floats on {swap.index.name} ({swap.currency.value}), but the "
+            "curve block quotes SOFR instruments, from which only a USD curve can be "
+            "built. Price peso swaps through the library (bootstrap_mxn_curve or "
+            "SwapQuoteNode on TIIE swaps); the CLI has no peso quote block yet."
+        )
     boot = bootstrap_discount_curve(
         as_of, instruments, long_end_source=(config.get("curve") or {}).get("long_end_source")
     )
     curve_set = CurveSet(boot.curve)
-    swap = ois_swap(config)
     sources = (boot.evidence,)
 
     value = pv(swap, curve_set, source_evidence=sources)

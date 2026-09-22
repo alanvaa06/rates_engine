@@ -16,8 +16,8 @@ from datetime import date, timedelta
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from rates_engine.conventions.daycount import year_fraction
-from rates_engine.curves.discount import CURVE_TIME_BASIS, DiscountCurve
+from rates_engine.conventions.daycount import CURVE_TIME_BASIS, year_fraction
+from rates_engine.curves.discount import DiscountCurve
 
 AS_OF = date(2026, 1, 15)
 

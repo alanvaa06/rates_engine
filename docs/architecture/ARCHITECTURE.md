@@ -1,6 +1,6 @@
 # Arquitectura de `rates_engine` (reorganización v0.4)
 
-*Escrito 2026-09-22 sobre `main` @ `cf3c2f1` (v0.3.0: 59 archivos `.py`, 14.9k líneas, 1612 tests). Rama `refactor/architecture`. Estado: **fases 1-5 implementadas y verificadas**; quedan dos decisiones abiertas para Alan (§8).*
+*Escrito 2026-09-22 sobre `main` @ `cf3c2f1` (v0.3.0: 59 archivos `.py`, 14.9k líneas, 1612 tests). Rama `refactor/architecture`. Estado: **fases 1-5 implementadas y verificadas; las dos decisiones de §8 se tomaron (1a, 2a) y están implementadas.***
 
 Este documento reemplaza la sección de módulos de `docs/design/2026-09-16-rates-engine-design.md`, que describía la fase 1 antes de que existiera código. Los PRDs siguen vigentes: la reorganización no cambia ningún número ni ninguna refusal documentada.
 
@@ -13,9 +13,9 @@ La calidad por función era alta: evidencia encadenada, refusals nombradas, 1612
 | # | Problema | Evidencia en v0.3.0 | Estado |
 |---|---|---|---|
 | D1 | No hay capas, solo un orden topológico | `test_layering.py` ordenaba 21 módulos en una lista total: `fx` quedaba *debajo* de `instruments` sin que eso significara nada. 14 módulos sueltos en la raíz junto a 7 paquetes | **Resuelto** (fase 1): 10 capas con significado; `test_layering` prohíbe aristas laterales y hacia arriba |
-| D2 | La moneda es una etiqueta; índice y calendario están cableados a USD | `calendar: SIFMAUSCalendar` (tipo concreto) en 5 módulos. `pricing` y `optionpricing` escribían `"collateral_rate_ois_sofr"` en la evidencia de **cualquier** curva | **Resuelto en la evidencia** (fase 4): `conventions.indices` + `pricing.collateral`; un precio MXN dice TIIE de Fondeo y queda `assumed`. **Abierto en los instrumentos** (§8.2) |
-| D3 | Dos vocabularios de instrumentos | `OISSwap` (para valuar) frente a `ParSwapNode` (para calibrar), con su propia `annuity`/`par_rate`. El swap TIIE solo existe como nodo | **Abierto** (§8.1) |
-| D4 | Los instrumentos valúan y recalculan | `OISSwap.float_cashflows(curve_set)` proyecta desde la curva. `Schedule.generate` corría en **cada** `cashflows()` | **Recálculo resuelto** (fase 2: el schedule se calcula una vez). **Proyección abierta** (§8.2) |
+| D2 | La moneda es una etiqueta; índice y calendario están cableados a USD | `calendar: SIFMAUSCalendar` (tipo concreto) en 5 módulos. `pricing` y `optionpricing` escribían `"collateral_rate_ois_sofr"` en la evidencia de **cualquier** curva | **Resuelto** (fase 4 y §8.2): la evidencia se deriva del índice, y cada instrumento lleva su `RateIndex`, que fija moneda y calendario |
+| D3 | Dos vocabularios de instrumentos | `OISSwap` (para valuar) frente a `ParSwapNode` (para calibrar), con su propia `annuity`/`par_rate`. El swap TIIE solo existe como nodo | **Resuelto** (§8.1): `pricing.calibration.SwapQuoteNode` calibra con el pricer real; `ParSwapNode` queda para cotizaciones que llegan como fechas |
+| D4 | Los instrumentos valúan y recalculan | `OISSwap.float_cashflows(curve_set)` proyecta desde la curva. `Schedule.generate` corría en **cada** `cashflows()` | **Resuelto** (fase 2 y §8.2): el schedule se calcula una vez y la proyección vive en `pricing.projection` |
 | D5 | Valuación y riesgo fragmentados | `dv01` en `pricing`, el resto en `risk`; seis medidas escribían `pv(instrument, curve_set.shifted(s)).value` por su cuenta | **Resuelto** (fase 5 y revisión): `risk.bumps.shifted` es la única llamada que mueve una curva fuera de `curves`, y `test_layering` lo exige; `dv01` vive en `risk` |
 | D6 | Fórmulas mezcladas con objetos de mercado | `volatility/` tenía fórmulas, objetos y un enum de producto; Garman-Kohlhagen en `fx/`; `convexity.py` estimaba σ desde un snapshot | **Resuelto** (fase 1): `models/` = solo fórmulas; σ realizada en `market.estimators` |
 | D7 | No hay capa de aplicación | `cli.py` (595 líneas) parseaba, construía y ejecutaba; `mcp_server` importaba el `_COMMANDS` **privado** de `cli` | **Resuelto** (fase 3): `app.config`, `app.builders`, `app.commands.COMMANDS`; `cli` y `mcp_server` son adaptadores hermanos |
@@ -73,7 +73,7 @@ La calidad por función era alta: evidencia encadenada, refusals nombradas, 1612
 
 **Por qué ya no hay paquete `fx`.** Cada pieza fue a la capa de su pregunta: el par a `conventions`, Garman-Kohlhagen y las convenciones de delta a `models`, el smile a `volatility`, el forward a `pricing`, las estructuras a `hedging`. La separación que `fx/__init__` defendía (que una convención de tasas no se aplique a FX) la siguen garantizando módulos distintos (`models.black` frente a `models.fx_delta`), no un paquete.
 
-**La única excepción declarada:** `instruments -> curves` (misma capa). Los instrumentos lineales proyectan sus flujos desde un `CurveSet`. `test_layering` exige que la excepción siga siendo necesaria, así que desaparece de la lista en el mismo commit que la resuelve (§8.2).
+**Sin excepciones.** La última, `instruments -> curves`, desapareció cuando la proyección de flujos pasó a `pricing.projection` (§8.2). `test_layering` exige que toda excepción futura siga siendo necesaria, así que no puede quedarse olvidada.
 
 ---
 
@@ -81,9 +81,9 @@ La calidad por función era alta: evidencia encadenada, refusals nombradas, 1612
 
 | Para añadir… | Se toca | No se toca |
 |---|---|---|
-| Una moneda (EUR) | `Currency` en `core.money`, su `RateIndex` y su entrada en `COLLATERAL_INDEX` (`conventions/indices.py`), un calendario si es nuevo. `tests/test_indices.py` falla hasta que la moneda dice a qué tasa descuenta | `curves` (`bootstrap_discount_curve(currency=...)` ya es genérico), `pricing`, `risk`, `app` |
+| Una moneda (EUR) | `Currency` en `core.money`, sus `RateIndex` y su entrada en `COLLATERAL_INDEX` (`conventions/indices.py`), un calendario si es nuevo. `tests/test_indices.py` falla hasta que la moneda dice a qué tasa descuenta. Un `OISSwap(index=ESTR)` ya rueda en su calendario y se niega a valuarse en otra moneda | `curves`, `instruments`, `pricing`, `risk`, `app` |
 | Una convención no verificada | Una entrada en el `unresolved` del índice y su porqué | Nada: `pricing.collateral.curve_warnings` la lleva a cada precio, cada sensibilidad y cada griega |
-| Un producto lineal | Un dataclass en `instruments` con `cashflows(curve_set)` | `risk` (bumpea curvas, no productos), `hedging` |
+| Un producto lineal | Un dataclass en `instruments` con `currency` y `rate_index`, y su proyección con `pricing.projection.project.register` | `pricing.linear`, `risk` (bumpea curvas, no productos), `hedging` |
 | Una fórmula de opción | Un módulo de funciones en `models` | `volatility`, `instruments` |
 | Una medida de riesgo | Una función sobre `risk.bumps.repriced` | `pricing`, `curves` |
 | Una interfaz (HTTP, notebook) | Un adaptador que llama a `app.commands.COMMANDS` | `cli`, `mcp_server` |
@@ -124,10 +124,10 @@ De dónde sale la mejora, medida con perfilador antes de tocar nada:
 
 | Chequeo | Resultado |
 |---|---|
-| Suite completa | 1612 → **1690** tests en verde (los nuevos: capas, caché, índices, degradaciones en riesgo, docstrings de la capa `app`) |
+| Suite completa | 1612 → **1724** tests en verde (los nuevos: capas, caché, índices, degradaciones en riesgo, calibración con swaps, docstrings de la capa `app`) |
 | Criterios de aceptación (`scripts/audit_acceptance.py`) | 109 cubiertos, 0 sin cubrir, 5 parciales (los mismos 5 que dependen de números publicados por CME) |
 | Equivalencia numérica contra v0.3.0 | Bit a bit idéntica tras cada fase |
-| Payloads de la CLI contra v0.3.0 | `bootstrap` idéntico byte a byte. Cambios intencionales, todos en texto de evidencia: `float_index` de `OISSwap` pasa a `compounded_overnight`; la nota del bucketed delta apunta a `rates_engine.key_rate_dv01`; `describe` lista la nueva convención MXN `mxn_collateral_rate` |
+| Payloads de la CLI contra v0.3.0 | `bootstrap` idéntico byte a byte. Tras §8.2, `price` y `list-instruments` vuelven a ser idénticos byte a byte (`compounded_sofr`). Cambios intencionales, todos en texto de evidencia: la nota del bucketed delta apunta a `rates_engine.key_rate_dv01`; `describe` lista la convención MXN `mxn_collateral_rate` y los `rate_indices`; la evidencia de un `FRA` gana la clave `index` |
 | `ruff`, `mypy` | Limpios (72 archivos; `mypy --python-version 3.12`, porque los stubs de numpy instalados localmente no parsean con el objetivo 3.11 del config, igual que en v0.3.0) |
 | Revisión independiente | Un agente revisor comparó 113 328 evaluaciones de curva y 544 payloads de riesgo y opciones contra v0.3.0: todos idénticos. Encontró 6 defectos (test de capas ciego a imports relativos, degradaciones que no llegaban al riesgo, dos bumps por fuera de `risk.bumps`, caché obsoleta con listas mutables, afirmaciones infladas en docs, un literal SOFR). Los seis se corrigieron y cada corrección tiene un test que falla sin ella |
 
@@ -142,28 +142,40 @@ De dónde sale la mejora, medida con perfilador antes de tocar nada:
 | 3 | `311bcfb` | Capa `app`; `mcp_server` deja de importar `cli` |
 | 4 | `fc79148` | `conventions.indices`, `pricing.collateral`; la evidencia MXN deja de decir SOFR |
 | 5 | `b7ca83c` | `risk.bumps` como primitiva única; `dv01` a `risk`; griegas a `risk.greeks` |
-| Revisión | (este commit) | Correcciones de la revisión independiente (§6) |
+| Revisión | `f577a35` | Correcciones de la revisión independiente (§6) |
+| §8.2 | `d02d013` | Los instrumentos llevan su `RateIndex`; la proyección pasa a `pricing.projection` |
+| §8.1 | `342f6bb` | `SwapQuoteNode`: nodos de calibración desde swaps reales |
+| Revisión 2 | (siguiente commit) | Ocho hallazgos de una segunda revisión independiente (§8.3) |
 
 ---
 
-## 8. Decisiones abiertas
+## 8. Decisiones (tomadas por Alan el 2026-09-22)
 
-Las dos revierten o amplían decisiones de diseño que tomó Alan, y por eso no se ejecutaron.
+Las dos revertían o ampliaban decisiones de diseño anteriores, así que se presentaron como opciones antes de implementarse.
 
-### 8.1 ¿`curves` puede construir sus nodos desde instrumentos (D3)?
+### 8.1 Nodos de calibración desde instrumentos: opción (a)
 
-Hoy `ParSwapNode` repite la matemática de anualidad y par de `OISSwap`, y un swap TIIE solo existe como nodo de calibración. El diseño original prohíbe a propósito que `curves` conozca productos (`test_the_curve_layer_does_not_know_about_products`).
+`curves` sigue sin conocer productos. El nodo que envuelve un swap, `SwapQuoteNode`, vive en `pricing.calibration` y cumple el protocolo `CalibrationInstrument` que define `curves`: la dependencia se invierte, en lugar de que la curva importe el instrumento. Su residuo es `par_rate_value`, la misma función que después valúa el swap.
 
-a) No. Los nodos se construyen desde instrumentos en `pricing` (`pricing.calibration.node_for(swap, quote)`), así que `curves` sigue sin conocer productos y la duplicación desaparece igual. **Recomendado**: conserva la regla original y elimina la duplicación.
-b) Sí, al estilo QuantLib (`RateHelper` con referencia al instrumento). Menos código, pero la curva queda acoplada a los productos.
+Lo que se descubrió al implementarlo: la duplicación no era inocua. `ParSwapNode` asume que la pata flotante telescopa a `P(start) - P(end)`. Con la convención de schedule de esta librería (fines de período sin ajustar, pagos movidos por feriado) eso solo es cierto si ninguna fecha de pago se mueve. En la tira del 2026-01-15, una curva ajustada a `ParSwapNode` valúa mal el swap a 2 años en 1.7 pb, el mismo swap a cuyas cotizaciones fue ajustada. Donde nada se mueve, los dos nodos dan la misma curva al 1e-13 (`tests/test_calibration.py`). No es un error de fórmula de `ParSwapNode` sino un desajuste con el schedule; una convención de mercado que ajuste también los fines de período lo cerraría (**asumido**, no verificado aquí). `SwapQuoteNode` solo acepta OIS: una cotización de tasa a plazo calibra la curva de proyección, que es trabajo del solver dual.
 
-Lo que decide: si alguna vez se calibrará una curva sin tener la capa de instrumentos disponible. Si la respuesta es no, (b) es más simple.
+### 8.2 Los instrumentos llevan su índice: opción (a)
 
-### 8.2 ¿Los instrumentos llevan su índice (D2 y D4)?
+Revierte la decisión del deep review de v0.3 ("un instrumento se denomina por la curva en la que se valúa"). Cada instrumento lleva un `RateIndex` que fija su moneda y, salvo que se indique otro, su calendario; valuarlo sobre una curva de otra moneda lanza `CurrencyMismatchError`. La proyección de flujos pasó a `pricing.projection` (`project`, `float_leg`, registrables con `singledispatch`), y con ella desapareció la última excepción de capas. Las convenciones no verificadas del índice del instrumento llegan a cada precio, sensibilidad y griega.
 
-Hoy un `OISSwap` toma su moneda de la curva donde se valúa, por decisión explícita del deep review de v0.3 (`TestARealInstrumentNotJustAProbe`). La consecuencia es que conserva su propio calendario: un `OISSwap` valuado sobre una curva MXN rueda con feriados SIFMA salvo que se pase `calendar=BMV`. La evidencia ya no miente (fase 4), pero el calendario puede estar mal sin que nada lo diga.
+Los números en dólares siguen bit a bit idénticos a v0.3.0. El payload de `price` vuelve a ser byte a byte el de v0.3.0 (`float_index: compounded_sofr`), porque ahora el swap sabe su índice en lugar de tenerlo cableado.
 
-a) Sí. `OISSwap(index=TIIE_FONDEO, ...)` toma moneda, calendario y day count del índice; `pricing` proyecta los flujos (`pricing.project(instrument, curve_set)`) y valuar un instrumento sobre una curva de otra moneda se rechaza. Desaparece la excepción `instruments -> curves`. Es un cambio **Changed** de API y revierte la decisión del deep review. **Recomendado**: es lo que hace que agregar EUR no deje ninguna convención cableada.
-b) No. Se documenta que el calendario de un instrumento no-USD se pasa a mano, y se añade una degradación cuando el calendario del instrumento no coincide con el del índice de colateral de la curva. Menos cambio, pero el acoplamiento se queda.
+**Lo que sigue abierto:** el swap TIIE 28 acumula periodos de 28 días que `Schedule` (en meses) no genera, así que existe como nodo (`tiie_par_swap_node`) pero no como instrumento. `IRSwap(index=TIIE_28)` se rechaza con un mensaje que lo dice.
 
-Lo que decide: si habrá una tercera moneda. Con solo USD y MXN (los Non-Goals del PRD-003), (b) basta.
+### 8.3 Segunda revisión independiente
+
+Un agente revisor comparó 112 resultados contra v0.3.0 (OIS, IRS 3M/6M, FRA, caps/floors y swaptions con griegas, key rates, strip hedge) y todos salieron idénticos. Encontró ocho defectos, todos corregidos, cada uno con un test en `tests/test_review_index_branch.py` que falla sin la corrección:
+
+1. `SwapQuoteNode.node_date` fijaba el último pago aunque *modified following* lo moviera antes del fin de período sin ajustar; el ajuste a 3 años de una tira de fin de mes fallaba. Ahora es el máximo de ambos.
+2. Nodos sin etiqueta compartían clave en el dict de residuos y el chequeo estricto leía solo el último: un ajuste fallido pasaba sin verse. Afectaba también a `FuturesNode`. El chequeo ahora es por instrumento y las claves repetidas se desambiguan con la fecha del nodo.
+3. Caps y floors se valuaban sobre una curva de otra moneda sin rechazarlo.
+4. La CLI construía una curva en pesos a partir de futuros SOFR. Ahora `price` rechaza un swap no USD.
+5. Una curva calibrada a swaps TIIE no llevaba sus supuestos. Ahora el bootstrap recoge las `degradations` de los nodos.
+6. Rupturas no documentadas: frecuencias sin Term SOFR publicado y la clave `index` de `FRA`; además `FRA` aceptaba un índice overnight.
+7. Docs y payloads desactualizados (`list-instruments` vuelve a `compounded_sofr`) y una afirmación inflada: un producto propio necesita `float_leg.register` además de `project.register` para `par_rate`.
+8. Tres escrituras del mismo IRS eran distintas para `==` y `hash`. Frecuencia e índice ahora se normalizan en ambos campos.

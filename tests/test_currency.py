@@ -29,6 +29,7 @@ from rates_engine.core.money import Currency, require_same_currency
 from rates_engine.curves.discount import CurveSet, DiscountCurve
 from rates_engine.instruments.cashflow import Cashflow
 from rates_engine.pricing.linear import pv
+from rates_engine.pricing.projection import project
 
 AS_OF = date(2026, 9, 16)
 
@@ -53,7 +54,11 @@ def _flow(currency: Currency, amount: float = 1_000_000.0) -> Cashflow:
 
 
 class _OneFlow:
-    """The smallest thing `pv` will price: one cashflow, no instrument."""
+    """The smallest thing `pv` will price: one cashflow, no instrument.
+
+    Registered with `project` below, which is also how a caller adds a
+    product of their own -- so this probe exercises the extension point too.
+    """
 
     def __init__(self, flow: Cashflow) -> None:
         self._flow = flow
@@ -62,12 +67,18 @@ class _OneFlow:
     def span(self) -> tuple[date, date]:
         return self._flow.accrual_start, self._flow.payment_date
 
-    def cashflows(self, curve_set: CurveSet) -> tuple[Cashflow, ...]:
-        del curve_set
-        return (self._flow,)
+    @property
+    def currency(self) -> Currency:
+        return self._flow.currency
 
     def describe(self) -> dict[str, object]:
         return {"kind": "single_cashflow", "currency": self._flow.currency.value}
+
+
+@project.register
+def _project_one_flow(instrument: _OneFlow, curve_set: CurveSet) -> tuple[Cashflow, ...]:
+    del curve_set
+    return (instrument._flow,)
 
 
 class TestTheDefaultKeepsEverythingWorking:
@@ -243,9 +254,12 @@ class TestMixingRefuses:
         flows = (_flow(Currency.USD), _flow(Currency.MXN))
 
         class _Two(_OneFlow):
-            def cashflows(self, curve_set):
-                del curve_set
-                return flows
+            pass
+
+        @project.register(_Two)
+        def _(instrument: _Two, curve_set: CurveSet) -> tuple[Cashflow, ...]:
+            del instrument, curve_set
+            return flows
 
         with pytest.raises(CurrencyMismatchError):
             pv(_Two(flows[0]), CurveSet(_curve()))
@@ -317,12 +331,17 @@ class TestItSurvivesEveryTransformation:
 
 class TestARealInstrumentNotJustAProbe:
     """Everything above prices a hand-built flow through a shim. The guard
-    has to hold for something with real cashflow-generation logic, and for
-    a long time it did not: no instrument set a currency at all, so the
-    check had no true positives and fired on every peso valuation."""
+    has to hold for something with real cashflow-generation logic.
+
+    v0.3 took a swap's currency from the curve it was priced on, so a SOFR
+    swap priced on a peso curve came back as a peso swap rolling on SIFMA
+    holidays. Since v0.4 the swap carries its index: the index fixes the
+    currency and the calendar, and a curve in another currency refuses.
+    """
 
     @staticmethod
-    def _swap(notional: float = 1_000_000.0) -> object:
+    def _swap(notional: float = 1_000_000.0, index=None) -> object:
+        from rates_engine.conventions.indices import SOFR
         from rates_engine.conventions.side import Side
         from rates_engine.instruments.swaps import OISSwap
 
@@ -332,22 +351,42 @@ class TestARealInstrumentNotJustAProbe:
             fixed_rate=0.05,
             notional=notional,
             side=Side.PAYER,
+            index=index or SOFR,
         )
 
-    def test_a_real_swap_takes_its_currency_from_the_curve(self):
-        curves = CurveSet(_curve(Currency.MXN, 0.09))
-        assert {c.currency for c in self._swap().cashflows(curves)} == {Currency.MXN}
+    @staticmethod
+    def _peso_swap(notional: float = 1_000_000.0) -> object:
+        from rates_engine.conventions.indices import TIIE_FONDEO
 
-    def test_and_prices_on_it_rather_than_refusing_its_own_output(self):
-        """The bug this closes: `bootstrap_mxn_curve` produced a curve that
-        `pv` then refused, because the flows were hardcoded USD."""
-        curves = CurveSet(_curve(Currency.MXN, 0.09))
-        assert pv(self._swap(), curves).value != 0.0
+        return TestARealInstrumentNotJustAProbe._swap(notional, TIIE_FONDEO)
 
-    def test_the_price_is_labelled_in_the_curves_currency(self):
+    def test_a_swap_takes_its_currency_from_its_index(self):
         curves = CurveSet(_curve(Currency.MXN, 0.09))
-        assert pv(self._swap(), curves).unit == "MXN"
-        assert pv(self._swap(), curves).to_dict()["unit"] == "MXN"
+        flows = project(self._peso_swap(), curves)
+        assert {c.currency for c in flows} == {Currency.MXN}
+
+    def test_a_peso_swap_prices_on_a_peso_curve(self):
+        curves = CurveSet(_curve(Currency.MXN, 0.09))
+        result = pv(self._peso_swap(), curves)
+        assert result.value != 0.0
+        assert result.unit == "MXN"
+        assert result.to_dict()["unit"] == "MXN"
+
+    def test_a_dollar_swap_on_a_peso_curve_refuses(self):
+        """The v0.3 behaviour this replaces: the dollar swap was silently
+        relabelled a peso one."""
+        with pytest.raises(CurrencyMismatchError) as caught:
+            pv(self._swap(), CurveSet(_curve(Currency.MXN, 0.09)))
+        assert "USD" in str(caught.value) and "MXN" in str(caught.value)
+
+    def test_a_peso_swap_on_a_dollar_curve_refuses(self):
+        with pytest.raises(CurrencyMismatchError):
+            pv(self._peso_swap(), CurveSet(_curve(Currency.USD)))
+
+    def test_a_peso_swap_rolls_on_the_peso_calendar(self):
+        from rates_engine.conventions.calendar import BMV
+
+        assert self._peso_swap().roll_calendar is BMV
 
     def test_a_dollar_swap_on_a_dollar_curve_is_unchanged(self):
         curves = CurveSet(_curve(Currency.USD))
@@ -370,7 +409,8 @@ class TestAddingTwoPresentValues:
 
     @staticmethod
     def _priced(currency: Currency, rate: float = 0.04):
-        swap = TestARealInstrumentNotJustAProbe._swap()
+        probe = TestARealInstrumentNotJustAProbe
+        swap = probe._peso_swap() if currency is Currency.MXN else probe._swap()
         return pv(swap, CurveSet(_curve(currency, rate)))
 
     def test_two_dollar_present_values_add(self):

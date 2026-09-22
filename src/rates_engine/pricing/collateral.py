@@ -21,7 +21,14 @@ from rates_engine.core.evidence import DataQuality, Degradation
 from rates_engine.core.money import Currency
 from rates_engine.curves.discount import CurveSet
 
-__all__ = ["discounting_fields", "collateral_warnings", "merge_warnings", "curve_warnings"]
+__all__ = [
+    "discounting_fields",
+    "collateral_warnings",
+    "merge_warnings",
+    "curve_warnings",
+    "instrument_warnings",
+    "valuation_warnings",
+]
 
 _WHY = dict(UNRESOLVED_MXN)
 
@@ -110,3 +117,46 @@ def curve_warnings(curve_set: CurveSet) -> tuple[Degradation, ...]:
         The merged degradations.
     """
     return merge_warnings(curve_set.provenance, collateral_warnings(curve_set.currency))
+
+
+def instrument_warnings(instrument: object) -> tuple[Degradation, ...]:
+    """Degradations for the conventions an instrument's own index assumes.
+
+    A peso swap on TIIE de Fondeo accrues on a day count and rolls on a
+    calendar this build could not verify, whatever curve it is priced on.
+    Instruments without a ``rate_index`` -- a hand-built cashflow, a futures
+    contract -- contribute nothing.
+
+    Args:
+        instrument: Anything priced.
+
+    Returns:
+        One ``ASSUMED`` degradation per unresolved convention of its index.
+    """
+    index = getattr(instrument, "rate_index", None)
+    if index is None:
+        return ()
+    return tuple(
+        Degradation(
+            code=f"unresolved_convention:{name}",
+            message=_WHY[name],
+            data_quality=DataQuality.ASSUMED,
+        )
+        for name in index.unresolved
+    )
+
+
+def valuation_warnings(instrument: object, curve_set: CurveSet) -> tuple[Degradation, ...]:
+    """Everything a number computed for ``instrument`` on ``curve_set`` must carry.
+
+    The curves' degradations, their collateral assumption and the
+    instrument's own index assumptions, each code once.
+
+    Args:
+        instrument: What was valued.
+        curve_set: The curves it was valued on.
+
+    Returns:
+        The merged degradations.
+    """
+    return merge_warnings(curve_warnings(curve_set), instrument_warnings(instrument))

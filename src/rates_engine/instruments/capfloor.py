@@ -8,6 +8,9 @@ present value of a payer swap struck at ``K``. PRD-002 AC-2.1 is that
 identity, and it only holds when the cap's periods are the swap's periods, so
 the test builds both from one schedule.
 
+**Terms only.** The forward and the numeraire of each caplet come from
+:mod:`rates_engine.pricing.options`, which is where a curve is read.
+
 **Where it refuses.** A period whose forward the projection curve does not
 reach raises :class:`~rates_engine.core.errors.MissingForwardError`. The curve
 will happily extrapolate a flat forward past its last node, and for a
@@ -21,16 +24,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 from functools import cached_property
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-from rates_engine.conventions.calendar import SIFMA_US, BusinessDayConvention, HolidayCalendar
+from rates_engine.conventions.calendar import BusinessDayConvention, HolidayCalendar
 from rates_engine.conventions.daycount import DayCount, year_fraction
+from rates_engine.conventions.indices import TERM_SOFR_3M, RateIndex, term_sofr
 from rates_engine.conventions.option_kind import OptionKind
 from rates_engine.conventions.schedule import Schedule
-from rates_engine.core.errors import MissingForwardError
-
-if TYPE_CHECKING:  # pragma: no cover - typing only
-    from rates_engine.curves.discount import CurveSet
+from rates_engine.core.errors import UnsupportedConventionError
+from rates_engine.core.money import Currency
 
 __all__ = ["Caplet", "CapFloor"]
 
@@ -44,9 +46,10 @@ class Caplet:
         accrual_end: End of it, and the rate's maturity.
         payment: When the settlement is paid.
         strike: Strike as a decimal.
-        notional: Notional in USD.
+        notional: Notional in the index's currency.
         kind: ``CALL`` for a caplet, ``PUT`` for a floorlet.
         day_count: Accrual basis.
+        index: The term rate observed; it fixes the currency.
     """
 
     accrual_start: date
@@ -56,39 +59,22 @@ class Caplet:
     notional: float
     kind: OptionKind
     day_count: DayCount = DayCount.ACT_360
+    index: RateIndex = TERM_SOFR_3M
 
     @property
     def year_fraction(self) -> float:
         """Accrual length in years, on :attr:`day_count`."""
         return year_fraction(self.accrual_start, self.accrual_end, self.day_count)
 
-    def forward_rate(self, curve_set: CurveSet) -> float:
-        """The projected rate for this period, as a decimal.
+    @property
+    def rate_index(self) -> RateIndex:
+        """The index observed; every instrument answers this alike."""
+        return self.index
 
-        Args:
-            curve_set: Discount and projection curves.
-
-        Returns:
-            The forward from the projection curve.
-
-        Raises:
-            MissingForwardError: The period ends past the projection curve's
-                last node, where a forward would be extrapolated rather than
-                implied.
-        """
-        projection = curve_set.projection
-        if self.accrual_end > projection.nodes[-1]:
-            raise MissingForwardError(
-                f"the caplet over {self.accrual_start} to {self.accrual_end} ends past the "
-                f"projection curve's last node {projection.nodes[-1]}. The curve would "
-                "extrapolate a flat forward there; for a discount factor that is a "
-                "convention, for an option it is a rate the market never quoted."
-            )
-        return projection.forward(self.accrual_start, self.accrual_end, day_count=self.day_count)
-
-    def numeraire(self, curve_set: CurveSet) -> float:
-        """The discounted accrual this caplet's payoff is scaled by, in USD."""
-        return self.notional * self.year_fraction * curve_set.discount.df(self.payment)
+    @property
+    def currency(self) -> Currency:
+        """The settlement currency, from :attr:`index`."""
+        return self.index.currency
 
     def describe(self) -> dict[str, Any]:
         """Terms of the caplet, for the evidence record."""
@@ -111,18 +97,21 @@ class CapFloor:
         effective: Start of the first period.
         maturity: End of the last.
         strike: Strike as a decimal, the same for every period.
-        notional: Notional in USD.
+        notional: Notional in the index's currency.
         product: ``"cap"`` or ``"floor"``.
         frequency_months: Period length, which is also the index tenor.
+            ``None`` takes it from :attr:`index`; with neither, three months.
         day_count: Accrual basis.
         payment_lag_days: Business days from accrual end to payment.
-        calendar: Calendar for payment rolls.
+        calendar: Calendar for payment rolls; ``None`` rolls on the index's.
         convention: Roll rule.
         include_first_period: Whether the first period is an option. A cap
             written today on a rate that has already fixed has nothing
             optional about that period, and market caps omit it. Kept
             explicit because the parity in AC-2.1 needs both legs to span the
             same periods.
+        index: The term rate every caplet observes; ``None`` means Term SOFR
+            of :attr:`frequency_months`.
     """
 
     effective: date
@@ -130,12 +119,51 @@ class CapFloor:
     strike: float
     notional: float = 1_000_000.0
     product: str = "cap"
-    frequency_months: int = 3
+    frequency_months: int | None = None
     day_count: DayCount = DayCount.ACT_360
     payment_lag_days: int = 0
-    calendar: HolidayCalendar = SIFMA_US
+    calendar: HolidayCalendar | None = None
     convention: BusinessDayConvention = BusinessDayConvention.MODIFIED_FOLLOWING
     include_first_period: bool = True
+    index: RateIndex | None = None
+
+    def __post_init__(self) -> None:
+        index = self.rate_index
+        if index.tenor.months is None:
+            raise UnsupportedConventionError(
+                f"a CapFloor schedules its periods in whole months; {index.name} "
+                f"accrues {index.tenor.value} periods and has no instrument here yet"
+            )
+        if self.frequency_months is not None and self.frequency_months != index.tenor.months:
+            raise UnsupportedConventionError(
+                f"frequency_months={self.frequency_months} disagrees with "
+                f"{index.name}, a {index.tenor.months}-month rate. Set both together, "
+                "or leave frequency_months unset to take it from the index."
+            )
+        # Resolved into both fields, so that the three spellings of one
+        # trade -- neither given, the frequency, or the index -- are equal and
+        # hash alike. Changing one later with ``replace`` must change both.
+        object.__setattr__(self, "index", index)
+        object.__setattr__(self, "frequency_months", index.tenor.months)
+
+    @property
+    def rate_index(self) -> RateIndex:
+        """The index each caplet observes: :attr:`index`, else Term SOFR of the frequency."""
+        if self.index is not None:
+            return self.index
+        return term_sofr(self.frequency_months or 3)
+
+    @property
+    def period_months(self) -> int:
+        """Period length in months: the index tenor."""
+        months = self.rate_index.tenor.months
+        assert months is not None  # enforced in __post_init__
+        return months
+
+    @property
+    def currency(self) -> Currency:
+        """The settlement currency, from the index."""
+        return self.rate_index.currency
 
     @property
     def kind(self) -> OptionKind:
@@ -153,8 +181,8 @@ class CapFloor:
         return Schedule.generate(
             self.effective,
             self.maturity,
-            frequency_months=self.frequency_months,
-            calendar=self.calendar,
+            frequency_months=self.period_months,
+            calendar=self.calendar if self.calendar is not None else self.rate_index.calendar,
             convention=self.convention,
             payment_lag_days=self.payment_lag_days,
         )
@@ -177,6 +205,7 @@ class CapFloor:
                 notional=self.notional,
                 kind=self.kind,
                 day_count=self.day_count,
+                index=self.rate_index,
             )
             for start, end, pay in periods
         )
@@ -190,7 +219,7 @@ class CapFloor:
             "maturity": self.maturity.isoformat(),
             "strike": self.strike,
             "notional": self.notional,
-            "frequency_months": self.frequency_months,
+            "frequency_months": self.period_months,
             "day_count": self.day_count.value,
             "periods": len(self.caplets),
             "include_first_period": self.include_first_period,

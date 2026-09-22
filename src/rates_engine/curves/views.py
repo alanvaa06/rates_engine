@@ -18,12 +18,12 @@ from datetime import date
 from typing import Any
 
 from rates_engine.conventions.calendar import SIFMA_US, BusinessDayConvention, HolidayCalendar
-from rates_engine.conventions.daycount import DayCount, year_fraction
+from rates_engine.conventions.daycount import CURVE_TIME_BASIS, DayCount, year_fraction
 from rates_engine.conventions.schedule import Schedule, add_months
 from rates_engine.core.evidence import Evidence
 from rates_engine.core.money import Currency
 from rates_engine.core.results import EngineResult
-from rates_engine.curves.discount import CURVE_TIME_BASIS, DiscountCurve
+from rates_engine.curves.discount import DiscountCurve
 
 __all__ = ["CurveView", "CurveViews", "zero_curve", "par_curve", "forward_curve", "all_views"]
 

@@ -13,7 +13,7 @@ from enum import Enum
 
 from rates_engine.core.errors import UnsupportedConventionError
 
-__all__ = ["DayCount", "year_fraction", "day_count_from_name"]
+__all__ = ["DayCount", "year_fraction", "day_count_from_name", "CURVE_TIME_BASIS"]
 
 
 class DayCount(Enum):
@@ -57,6 +57,13 @@ def day_count_from_name(name: str) -> DayCount:
         f"day count {name!r} is not implemented; supported: "
         + ", ".join(sorted(c.value for c in DayCount))
     )
+
+
+CURVE_TIME_BASIS = DayCount.ACT_365F
+"""The curve's internal time axis. Deliberately not a money-market basis: the
+interpolation variable should not inherit ACT/360's 365/360 stretch. Defined
+here rather than beside the curve so that an instrument can measure option
+time on the same axis without importing the curve layer."""
 
 
 def year_fraction(start: date, end: date, day_count: DayCount) -> float:

@@ -217,11 +217,33 @@ TIIE de Fondeo for pesos. A peso price also carries the
 member needs an entry in `COLLATERAL_INDEX`; `tests/test_indices.py` fails
 until it has one.
 
-**An instrument still takes its currency from the curve it is priced on.**
-`OISSwap` has no currency or index field, so an `OISSwap` priced on a peso
-curve is a peso swap -- but it keeps its own `calendar` (SIFMA by default).
-Pass `calendar=BMV` for peso dates. Whether instruments should carry their
-index is an open decision in `docs/architecture/ARCHITECTURE.md`.
+**An instrument carries its index, and the index fixes its currency.**
+`OISSwap(index=TIIE_FONDEO, ...)` is a peso swap that rolls on the BMV
+calendar; the default `index=SOFR` is a dollar swap on SIFMA. Pricing a
+swap on a curve in another currency raises `CurrencyMismatchError` -- it is
+not relabelled, which is what v0.3 did. `calendar=None` means "the index's
+calendar"; pass one only to override it. `IRSwap` and `CapFloor` default to
+Term SOFR of their frequency, and a frequency with no published Term SOFR is
+refused. A `FRA` has no frequency, so it defaults to Term SOFR 3M whatever
+its period: name the index when the period is not three months.
+
+**Instruments do not price themselves.** There is no `swap.cashflows(curve_set)`.
+`rates_engine.project(instrument, curve_set)` gives the flows, `swap.fixed_cashflows()`
+the fixed leg (no curve needed), `pricing.projection.float_leg` the floating
+one. A product of your own prices with `pv` (and so every risk measure and
+hedge) once you `project.register` it; a swap-like one also needs
+`float_leg.register` for `par_rate`, `annuity` and swaptions.
+
+**Calibrate to a swap with `SwapQuoteNode`, not `ParSwapNode`, when you have
+the swap.** `SwapQuoteNode(swap, quote)` fits the pricer's own par rate, so
+the curve reprices the swap exactly. `ParSwapNode` takes dates and accruals
+and assumes the floating leg telescopes to `P(start) - P(end)`. This
+library's schedules leave accrual ends unadjusted and roll payments, so that
+holds only when no payment date rolls: on a 2026-01-15 strip the curve
+misprices the two-year swap it was fitted to by 1.7 bp. The CLI's
+`par_swaps` block still builds `ParSwapNode`s, because its quotes arrive as
+dates, and the CLI's `price` refuses a non-dollar swap because its curve
+block quotes SOFR instruments. `SwapQuoteNode` takes an OIS only.
 
 **Nothing here reads the network except `market.providers.fred`,** and that
 imports `urllib` inside the call. Importing `rates_engine` opens no socket and
@@ -247,8 +269,8 @@ Subpackage `__init__` files document their layer and re-export nothing, so
 | `models` | 2 | Closed forms: Black, Bachelier, Garman-Kohlhagen, SABR, the four FX delta conventions, Ho-Lee and Hull-White convexity |
 | `curves` | 3 | `DiscountCurve`, the bootstrap, the four views, the dual-curve solver, monotone convex, Nelson-Siegel, the FOMC step curve, and the MXN curve with its unresolved conventions |
 | `volatility` | 3 | `Volatility` and its units, the SABR cube, the vanna-volga FX smile |
-| `instruments` | 3 | `OISSwap`, `IRSwap`, `FRA`, `SOFRFuture1M`, `SOFRFuture3M`, `CapFloor`, `Swaption` |
-| `pricing` | 4 | `linear` (`pv`, `par_rate`, `annuity`, `price_on_parametric`, and `discounted_value`, the bare float for callers that reprice many times), `options` (swaptions, caps and floors), `fx_forward` (the CIP forward and its basis), `collateral` (the discounting evidence every pricer writes) |
+| `instruments` | 3 | Terms only, each carrying its `RateIndex`: `OISSwap`, `IRSwap`, `FRA`, `SOFRFuture1M`, `SOFRFuture3M`, `CapFloor`, `Swaption` |
+| `pricing` | 4 | `linear` (`pv`, `par_rate`, `annuity`, `price_on_parametric`, and `discounted_value`, the bare float for callers that reprice many times), `options` (swaptions, caps and floors), `fx_forward` (the CIP forward and its basis), `collateral` (the discounting evidence and degradations every result carries), `projection` (`project`, `float_leg`: instruments to cashflows), `calibration` (`SwapQuoteNode`) |
 | `risk` | 5 | `bumps` (the one shift-and-reprice primitive, `BUMP_BP`, `tent_weights`), `sensitivities` (parallel `dv01`, key rate, duration conventions, convexity, and the stubs), `greeks` (option greeks) |
 | `hedging` | 6 | `futures_strip` (`strip_hedge`, `shock_table`), `fx_structures` (`compare_structures`), `program` (the hedging policy as data) |
 | `reporting` | 7 | JSON payloads and error payloads |
