@@ -17,7 +17,7 @@ nothing else.
 
 Two places to look when this file does not answer the question.
 [`docs/ERRORS.md`](docs/ERRORS.md) is the refusal contract: which of the
-thirty-one exception types to catch, which are recoverable, the CLI's exit
+thirty-three exception types to catch, which are recoverable, the CLI's exit
 codes, and the failures that are *reported* rather than raised.
 [`docs/RESEARCH.md`](docs/RESEARCH.md) maps every formula to the paper it came
 from and says whether that paper was read or taken from a secondary source.

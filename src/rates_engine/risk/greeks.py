@@ -17,8 +17,9 @@ from rates_engine.core.results import EngineResult
 from rates_engine.curves.discount import CurveSet
 from rates_engine.instruments.capfloor import CapFloor
 from rates_engine.instruments.swaption import Swaption
+from rates_engine.pricing.collateral import curve_warnings
 from rates_engine.pricing.options import cap_floor_pv, forward_swap_rate, model_for, swaption_pv
-from rates_engine.risk.bumps import BUMP_BP
+from rates_engine.risk.bumps import BUMP_BP, shifted
 from rates_engine.volatility.units import Volatility, VolUnits
 
 __all__ = ["GreeksResult", "option_greeks"]
@@ -133,8 +134,8 @@ def option_greeks(
         return cap_floor_pv(option, curves, vol, as_of=day).value
 
     base = at(curve_set, volatility, valuation)
-    up = at(curve_set.shifted(shift), volatility, valuation)
-    down = at(curve_set.shifted(-shift), volatility, valuation)
+    up = at(shifted(curve_set, shift), volatility, valuation)
+    down = at(shifted(curve_set, -shift), volatility, valuation)
     delta = (down - up) / 2.0 / rate_bump_bp
     gamma = (up + down - 2.0 * base) / (rate_bump_bp * rate_bump_bp)
 
@@ -178,6 +179,7 @@ def option_greeks(
                 "base_value": base,
             },
             sources=source_evidence,
+            warnings=curve_warnings(curve_set),
         ),
         delta=delta,
         gamma=gamma,

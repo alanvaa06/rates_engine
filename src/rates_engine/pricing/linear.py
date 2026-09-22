@@ -23,7 +23,7 @@ from rates_engine.core.money import require_same_currency
 from rates_engine.core.results import EngineResult
 from rates_engine.curves.discount import CurveSet
 from rates_engine.instruments.cashflow import Cashflow
-from rates_engine.pricing.collateral import collateral_warnings, discounting_fields, merge_warnings
+from rates_engine.pricing.collateral import collateral_warnings, curve_warnings, discounting_fields
 
 __all__ = [
     "Priceable",
@@ -241,7 +241,7 @@ def valuation_evidence(
         # conventions are assumed inherits that without the caller having
         # to remember to pass source_evidence. That forgetting is what made
         # the marking decorative.
-        warnings=merge_warnings(curve_set.provenance, collateral_warnings(curve_set.currency)),
+        warnings=curve_warnings(curve_set),
     )
 
 

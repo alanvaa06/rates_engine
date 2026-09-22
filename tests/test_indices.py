@@ -133,3 +133,70 @@ class TestTheEvidenceNamesTheRightCurve:
         usd = pv(_swap(), CurveSet(_curve(Currency.USD))).value
         mxn = pv(_swap(), CurveSet(_curve(Currency.MXN))).value
         assert usd == mxn
+
+
+class TestTheAssumptionReachesEveryMeasure:
+    """Review finding: `pv` and `dv01` carried the peso collateral assumption
+    but the key-rate profile, the curvature measures, the option pricers and
+    the greeks did not, so a peso risk number read `observed`."""
+
+    @staticmethod
+    def _peso(curve):
+        from dataclasses import replace
+
+        return CurveSet(replace(curve, currency=Currency.MXN))
+
+    @staticmethod
+    def _assumed(result) -> None:
+        codes = {w.code for w in result.evidence.warnings}
+        assert "unresolved_convention:mxn_collateral_rate" in codes
+        assert result.evidence.worst_quality is DataQuality.ASSUMED
+
+    def test_linear_risk(self, option_curve):
+        from rates_engine.risk.sensitivities import (
+            effective_duration,
+            key_rate_duration,
+            key_rate_dv01,
+            money_convexity,
+        )
+
+        curves, swap = self._peso(option_curve), _swap()
+        self._assumed(key_rate_dv01(swap, curves, (1.0, 2.0)))
+        self._assumed(key_rate_duration(swap, curves, (1.0, 2.0)))
+        self._assumed(money_convexity(swap, curves))
+        self._assumed(effective_duration(swap, curves))
+
+    def test_options_and_greeks(self, option_curve, atm_swaption):
+        from rates_engine.pricing.options import swaption_pv
+        from rates_engine.risk.greeks import option_greeks
+        from rates_engine.volatility.units import Volatility, VolUnits
+
+        curves = self._peso(option_curve)
+        vol = Volatility(90.0, VolUnits.NORMAL_BP)
+        self._assumed(swaption_pv(atm_swaption, curves, vol))
+        self._assumed(option_greeks(atm_swaption, curves, vol))
+
+    def test_a_proxied_dollar_curve_reaches_the_risk_too(self, option_curve):
+        """The same gap applied to any curve provenance, not just pesos."""
+        from dataclasses import replace
+
+        from rates_engine.core.evidence import Degradation
+        from rates_engine.risk.sensitivities import key_rate_dv01
+
+        proxy = Degradation("treasury_par_proxy", "long end proxied", DataQuality.PROXY)
+        curves = CurveSet(replace(option_curve, provenance=(proxy,)))
+        result = key_rate_dv01(_swap(), curves, (1.0, 2.0))
+        assert result.evidence.worst_quality is DataQuality.PROXY
+
+
+def test_a_curve_built_from_lists_cannot_go_stale():
+    """Review finding: the cached arrays outlived a mutation of the lists a
+    curve was built from. Inputs are now frozen into tuples."""
+    nodes = [AS_OF + timedelta(days=365), AS_OF + timedelta(days=730)]
+    dfs = [0.96, 0.92]
+    curve = DiscountCurve(AS_OF, nodes, dfs)  # type: ignore[arg-type]
+    before = curve.df(AS_OF + timedelta(days=500))
+    dfs[1] = 0.5
+    nodes.append(AS_OF + timedelta(days=1000))
+    assert curve.df(AS_OF + timedelta(days=500)) == before
+    assert len(curve.node_times) == len(curve.nodes) == 2

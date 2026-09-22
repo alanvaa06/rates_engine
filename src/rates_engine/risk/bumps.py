@@ -27,7 +27,7 @@ from collections.abc import Callable
 from rates_engine.curves.discount import CurveSet
 from rates_engine.pricing.linear import Priceable, discounted_value
 
-__all__ = ["BUMP_BP", "Shift", "shift_from_bp", "tent_weights", "tent_shift", "repriced"]
+__all__ = ["BUMP_BP", "Shift", "shift_from_bp", "tent_weights", "tent_shift", "shifted", "repriced"]
 
 BUMP_BP = 1.0
 """Default bump size in basis points for every risk measure."""
@@ -111,6 +111,23 @@ def tent_shift(index: int, key_tenors: tuple[float, ...], shift: float) -> Calla
     return shape
 
 
+def shifted(curve_set: CurveSet, shift: Shift) -> CurveSet:
+    """Both curves of ``curve_set`` with their zero rates moved by ``shift``.
+
+    The one call in the package that moves a curve for risk. Measures that
+    need more than a present value on the moved curves -- option greeks, the
+    shock table's post-shock DV01 -- take the curve set from here.
+
+    Args:
+        curve_set: The unshifted curves.
+        shift: A constant decimal shift or a function of time in years.
+
+    Returns:
+        The shifted curve set; the original is untouched.
+    """
+    return curve_set.shifted(shift)
+
+
 def repriced(instrument: Priceable, curve_set: CurveSet, shift: Shift) -> float:
     """Present value after shifting both curves of ``curve_set`` by ``shift``.
 
@@ -122,4 +139,4 @@ def repriced(instrument: Priceable, curve_set: CurveSet, shift: Shift) -> float:
     Returns:
         The present value on the shifted curves, in their currency.
     """
-    return discounted_value(instrument, curve_set.shifted(shift))
+    return discounted_value(instrument, shifted(curve_set, shift))

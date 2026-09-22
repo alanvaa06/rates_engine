@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
+from rates_engine.conventions.indices import SOFR
 from rates_engine.core.errors import UnsupportedConventionError
 from rates_engine.core.evidence import DataQuality, Evidence, Provenance
 from rates_engine.core.results import EngineResult
@@ -218,11 +219,13 @@ def convexity_adjustment(
             "time_to_start": time_to_start,
             "time_to_end": time_to_end,
             "hull_white_evaluated_as_ho_lee_limit": took_limit,
-            "discounting": "collateral_rate_ois_sofr",
+            # SOFR futures are a dollar product, so the collateral index is
+            # SOFR by construction rather than read from a curve.
+            "discounting": f"collateral_rate_ois_{SOFR.slug}",
             "discounting_note": (
-                "Collateralised flows discount on the OIS-SOFR curve because the "
-                "collateral is remunerated at SOFR (Fujii-Shimada-Takahashi; Piterbarg), "
-                "not on a separate funding curve."
+                f"Collateralised flows discount on the OIS-{SOFR.label} curve because the "
+                f"collateral is remunerated at {SOFR.label} (Fujii-Shimada-Takahashi; "
+                "Piterbarg), not on a separate funding curve."
             ),
             "atm_calibration_caveat": (
                 "Calibrating sigma at the money alone overstates the adjustment by "

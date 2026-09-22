@@ -50,7 +50,7 @@ SAME_LAYER_EXCEPTIONS: dict[tuple[str, str], str] = {
     ("instruments", "curves"): (
         "Linear instruments project their own floating cashflows from a CurveSet. "
         "Removed when projection moves into rates_engine.pricing "
-        "(ARCHITECTURE.md §7, decision 2)."
+        "(ARCHITECTURE.md §8.2)."
     ),
 }
 
@@ -64,6 +64,45 @@ def _modules() -> list[Path]:
     return [p for p in ROOT.rglob("*.py") if "__pycache__" not in p.parts]
 
 
+def _package_of(path: Path) -> list[str]:
+    """Dotted parts of the package a module lives in, below ``rates_engine``."""
+    parts = list(path.relative_to(ROOT).with_suffix("").parts)
+    return parts[:-1]
+
+
+def _targets(node: ast.AST, path: Path) -> list[str]:
+    """Top-level rates_engine packages an import statement reaches.
+
+    Relative imports are resolved against the module's own package, and a
+    bare ``import rates_engine`` counts as an edge to the root. Missing
+    either would let an upward edge through unseen -- the first version of
+    this function missed both.
+    """
+    if isinstance(node, ast.ImportFrom):
+        if node.level:
+            base = _package_of(path)
+            base = base[: len(base) - (node.level - 1)]
+            dotted = [*base, *(node.module.split(".") if node.module else [])]
+            if dotted:
+                return [dotted[0]]
+            return [alias.name for alias in node.names]
+        module = node.module or ""
+        if module == "rates_engine":
+            return ["__init__"]
+        if module.startswith("rates_engine."):
+            return [module.split(".")[1]]
+        return []
+    if isinstance(node, ast.Import):
+        found = []
+        for alias in node.names:
+            if alias.name == "rates_engine":
+                found.append("__init__")
+            elif alias.name.startswith("rates_engine."):
+                found.append(alias.name.split(".")[1])
+        return found
+    return []
+
+
 def _edges() -> dict[str, set[str]]:
     edges: dict[str, set[str]] = defaultdict(set)
     for path in _modules():
@@ -72,19 +111,7 @@ def _edges() -> dict[str, set[str]]:
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
-            targets: list[str] = []
-            if isinstance(node, ast.ImportFrom) and node.module:
-                if node.module == "rates_engine":
-                    targets.append("__init__")
-                elif node.module.startswith("rates_engine."):
-                    targets.append(node.module.split(".")[1])
-            elif isinstance(node, ast.Import):
-                targets += [
-                    alias.name.split(".")[1]
-                    for alias in node.names
-                    if alias.name.startswith("rates_engine.")
-                ]
-            edges[mine].update(t for t in targets if t != mine)
+            edges[mine].update(t for t in _targets(node, path) if t != mine)
     return edges
 
 
@@ -121,6 +148,29 @@ def test_no_exception_points_upward():
         (s, t) for s, t in SAME_LAYER_EXCEPTIONS if LAYER_OF[t] > LAYER_OF[s]
     ]
     assert upward == [], upward
+
+
+def test_no_module_uses_a_relative_import():
+    # Absolute imports are what this file, the migration scripts and a human
+    # grepping for a module all read. A relative one is resolved here, but
+    # banning them keeps every edge greppable as ``rates_engine.<package>``.
+    offenders = [
+        f"{path.relative_to(ROOT)}:{node.lineno}"
+        for path in _modules()
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+        if isinstance(node, ast.ImportFrom) and node.level
+    ]
+    assert offenders == [], offenders
+
+
+def test_the_edge_finder_sees_relative_and_bare_imports():
+    """The detector is itself tested: an upward edge written as a relative
+    import, and a bare ``import rates_engine``, must both be seen."""
+    fake = ROOT / "curves" / "views.py"
+    relative = ast.parse("from ..hedging import futures_strip").body[0]
+    bare = ast.parse("import rates_engine").body[0]
+    assert _targets(relative, fake) == ["hedging"]
+    assert _targets(bare, fake) == ["__init__"]
 
 
 def test_nothing_inside_the_package_imports_the_package_root():
@@ -221,4 +271,23 @@ def test_no_test_imports_another_test_module():
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             if re.match(r"\s*(import tests\b|from tests\b)", line):
                 offenders.append(f"{path.name}:{number}: {line.strip()}")
+    assert offenders == [], offenders
+
+
+def test_only_risk_bumps_moves_a_curve_set():
+    """`CurveSet.shifted` is called from exactly one place outside `curves`:
+    `risk.bumps.shifted`. Every sensitivity, the greeks and the shock table
+    go through it, so there is one definition of what a bump is."""
+    offenders = []
+    for path in _modules():
+        relative = path.relative_to(ROOT).as_posix()
+        if relative.startswith("curves/") or relative == "risk/bumps.py":
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "shifted"
+            ):
+                offenders.append(f"{relative}:{node.lineno}")
     assert offenders == [], offenders

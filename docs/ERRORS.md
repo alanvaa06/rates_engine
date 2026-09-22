@@ -5,7 +5,7 @@ helps if the refusal is legible, so this is the contract: every exception the
 library raises on purpose, what causes it, whether it is recoverable, and what
 to catch.
 
-There are thirty-one exception classes plus the base. You almost never want to
+There are thirty-two exception classes plus the base. You almost never want to
 catch all of them, because they mean two different things — and the exit code
 says which.
 

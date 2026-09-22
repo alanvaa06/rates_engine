@@ -42,6 +42,7 @@ from rates_engine.core.errors import KeyTenorOutOfRangeError, UndefinedDurationE
 from rates_engine.core.evidence import Evidence
 from rates_engine.core.results import EngineResult
 from rates_engine.curves.discount import CURVE_TIME_BASIS, CurveSet
+from rates_engine.pricing.collateral import curve_warnings
 from rates_engine.pricing.linear import Priceable, PriceResult, discounted_value, valuation_evidence
 from rates_engine.risk.bumps import BUMP_BP, repriced, shift_from_bp, tent_shift
 
@@ -262,6 +263,7 @@ def key_rate_dv01(
             "partition_of_unity": True,
         },
         sources=source_evidence,
+        warnings=curve_warnings(curve_set),
     )
     return KeyRateResult(
         evidence=evidence,
@@ -322,6 +324,7 @@ def key_rate_duration(
         produced_by="risk.key_rate_duration",
         fields={**dict(raw.evidence.fields), "price": price, "normalised_by": "pv"},
         sources=raw.evidence.sources,
+        warnings=raw.evidence.warnings,
     )
     return KeyRateResult(
         evidence=evidence,
@@ -451,6 +454,7 @@ def money_convexity(
                 "defined_at_zero_price": True,
             },
             sources=source_evidence,
+            warnings=curve_warnings(curve_set),
         ),
         value=value,
         measure="money_convexity",
@@ -507,6 +511,7 @@ def effective_duration(
                 ),
             },
             sources=source_evidence,
+            warnings=curve_warnings(curve_set),
         ),
         value=value,
         measure="effective_duration",

@@ -37,6 +37,7 @@ from rates_engine.curves.bootstrap import (
 from rates_engine.curves.discount import CurveSet
 from rates_engine.instruments.futures import BASIS_POINT, SR3_CONTRACT_TENOR, SR3_NOTIONAL
 from rates_engine.pricing.linear import Priceable, discounted_value
+from rates_engine.risk.bumps import shifted as shift_curves
 from rates_engine.risk.sensitivities import dv01
 
 __all__ = ["SR3_DV01", "HedgeResult", "ShockTableResult", "strip_hedge", "shock_table", "DEFAULT_SHOCKS_BP"]
@@ -379,7 +380,7 @@ def shock_table(
     base_pv = discounted_value(hedge.swap, hedge.curve_set)
     rows: list[dict[str, float]] = []
     for shock in shocks_bp:
-        shifted = hedge.curve_set.shifted(shock * 1e-4)
+        shifted = shift_curves(hedge.curve_set, shock * 1e-4)
         swap_pnl = discounted_value(hedge.swap, shifted) - base_pv
         # A long futures position loses when rates rise, linearly in *its own*
         # forward rate. Using a nominal parallel basis point here instead would

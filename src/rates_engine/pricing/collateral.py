@@ -19,8 +19,9 @@ from typing import Any
 from rates_engine.conventions.indices import UNRESOLVED_MXN, collateral_index
 from rates_engine.core.evidence import DataQuality, Degradation
 from rates_engine.core.money import Currency
+from rates_engine.curves.discount import CurveSet
 
-__all__ = ["discounting_fields", "collateral_warnings", "merge_warnings"]
+__all__ = ["discounting_fields", "collateral_warnings", "merge_warnings", "curve_warnings"]
 
 _WHY = dict(UNRESOLVED_MXN)
 
@@ -92,3 +93,20 @@ def merge_warnings(*groups: Iterable[Degradation]) -> tuple[Degradation, ...]:
         for item in group:
             seen.setdefault(item.code, item)
     return tuple(seen.values())
+
+
+def curve_warnings(curve_set: CurveSet) -> tuple[Degradation, ...]:
+    """Every degradation a result computed on ``curve_set`` must carry.
+
+    The curves' own provenance -- a Treasury proxy, an MXN convention -- and
+    the collateral assumption of their currency, each code once. Every
+    valuation and every sensitivity puts this in its evidence, so a number
+    computed on a degraded curve cannot come back reading ``observed``.
+
+    Args:
+        curve_set: The curves the result was computed on.
+
+    Returns:
+        The merged degradations.
+    """
+    return merge_warnings(curve_set.provenance, collateral_warnings(curve_set.currency))

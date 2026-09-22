@@ -93,6 +93,16 @@ def cases() -> dict[str, tuple[Callable[[], object], int]]:
             2,
         ),
         "pv_10y_ois": (lambda: pv(ten_year, long_set), 50),
+        # A new instrument per call, so its schedule is built every time: the
+        # honest cost of pricing a trade seen once, not a book repriced.
+        "pv_10y_ois_fresh_instrument": (
+            lambda: pv(
+                OISSwap(effective=start, maturity=end, fixed_rate=ten_year.fixed_rate,
+                        notional=100_000_000.0, side=Side.PAYER),
+                long_set,
+            ),
+            50,
+        ),
         "pv_10y_ois_monotone_convex": (lambda: pv(ten_year, mc_set), 10),
         "dv01_10y_ois": (lambda: dv01(ten_year, long_set), 20),
         "key_rate_dv01_10y_10tenors": (lambda: key_rate_dv01(ten_year, long_set, tenors), 3),

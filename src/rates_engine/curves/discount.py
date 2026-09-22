@@ -83,6 +83,10 @@ class DiscountCurve:
     provenance: tuple[Degradation, ...] = ()
 
     def __post_init__(self) -> None:
+        # Tuples, whatever the caller passed: the derived arrays are cached per
+        # curve, and a list mutated after the first df() would leave them stale.
+        object.__setattr__(self, "nodes", tuple(self.nodes))
+        object.__setattr__(self, "dfs", tuple(self.dfs))
         if len(self.nodes) != len(self.dfs):
             raise ValueError(f"{len(self.nodes)} nodes and {len(self.dfs)} discount factors")
         if not self.nodes:

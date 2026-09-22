@@ -40,8 +40,8 @@ A reorganisation into layers. No number moves, and every name exported from
   both interfaces dispatch through. `cli` and `mcp_server` are sibling
   adapters and no longer import each other (`mcp_server` used to import the
   CLI's private `_COMMANDS`). `rates_engine.cli.load_config` is now
-  `rates_engine.app.config.load_config`. Every command's payload is
-  byte-identical to v0.3.0 except one evidence note, below.
+  `rates_engine.app.config.load_config`. No payload changed in this step;
+  the text changes listed below are the only differences from v0.3.0.
 - **Text that named a module now names where it lives.** The hedge's
   bucketed-delta note points at `rates_engine.key_rate_dv01` (the stable root
   name) instead of `rates_engine.risk.key_rate_dv01`; the currency-mismatch
@@ -72,8 +72,10 @@ A reorganisation into layers. No number moves, and every name exported from
   it built. `dv01` moved from `pricing` to `risk.sensitivities` (its payload,
   `produced_by: "pricing.dv01"` included, is unchanged: `produced_by` is an
   identifier, not a module path). `option_greeks` and `GreeksResult` moved to
-  `risk.greeks`, typed `Swaption | CapFloor` instead of `Any`. Bit-identical;
-  DV01 x9 and the shock table x3.6 against v0.3.0.
+  `risk.greeks`, typed `Swaption | CapFloor` instead of `Any`. The option
+  greeks and the shock table take their shifted curves from
+  `risk.bumps.shifted`, and `tests/test_layering.py` fails on any other
+  `.shifted(` call outside `curves`. Bit-identical.
 - **`tests/test_layering.py`** checks layers rather than a total order of
   modules: nothing imports sideways or upward except one declared, dated
   exception (`instruments -> curves`).
@@ -86,8 +88,29 @@ A reorganisation into layers. No number moves, and every name exported from
   Every output of a 80 kB battery (discount factors, forwards, zeros, PV,
   par, annuity, DV01, key rates, strip hedge, shock table, both
   interpolations) is bit-identical to v0.3.0. Against v0.3.0 on
-  `benchmarks/bench_core.py`: PV of a ten-year OIS x10 (x21 on monotone
-  convex), DV01 x7, key rate DV01 x5, bootstrap x3, strip hedge x1.8.
+  `benchmarks/bench_core.py`, with the bump primitive below: repricing a
+  ten-year OIS x10 (x22 on monotone convex), pricing a newly built one x5,
+  DV01 x9, key rate DV01 x5.6, bootstrap x3, shock table x3.3, strip hedge
+  x1.8.
+
+### Fixed
+
+- **Risk numbers inherit their curve's degradations.** In v0.3.0 `pv` and
+  `dv01` carried a curve's provenance, but `key_rate_dv01`,
+  `key_rate_duration`, `money_convexity`, `effective_duration`, the swaption
+  and cap/floor pricers and `option_greeks` did not: on a Treasury-proxied or
+  peso curve they reported `worst_quality: observed`. Every one of them now
+  carries `pricing.collateral.curve_warnings(curve_set)`. Dollar payloads on
+  an unproxied curve are unchanged.
+- **A curve built from lists froze them.** `DiscountCurve` and
+  `MonotoneConvex` convert their inputs to tuples, so the cached arrays
+  cannot outlive a mutation of the caller's list.
+- **`tests/test_layering.py` saw neither relative imports nor a bare
+  `import rates_engine`**, so an upward edge written either way passed. Both
+  are resolved now, relative imports are banned, and the detector has its
+  own test.
+- Documentation counted thirty-one exceptions; there are thirty-two plus the
+  base.
 
 ### Added
 

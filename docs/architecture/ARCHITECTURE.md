@@ -1,6 +1,6 @@
 # Arquitectura de `rates_engine` (reorganización v0.4)
 
-*Escrito 2026-09-22 sobre `main` @ `cf3c2f1` (v0.3.0: 60 módulos, 14.9k líneas, 1612 tests). Rama `refactor/architecture`. Estado: **fases 1-5 implementadas y verificadas**; quedan dos decisiones abiertas para Alan (§8).*
+*Escrito 2026-09-22 sobre `main` @ `cf3c2f1` (v0.3.0: 59 archivos `.py`, 14.9k líneas, 1612 tests). Rama `refactor/architecture`. Estado: **fases 1-5 implementadas y verificadas**; quedan dos decisiones abiertas para Alan (§8).*
 
 Este documento reemplaza la sección de módulos de `docs/design/2026-09-16-rates-engine-design.md`, que describía la fase 1 antes de que existiera código. Los PRDs siguen vigentes: la reorganización no cambia ningún número ni ninguna refusal documentada.
 
@@ -16,13 +16,13 @@ La calidad por función era alta: evidencia encadenada, refusals nombradas, 1612
 | D2 | La moneda es una etiqueta; índice y calendario están cableados a USD | `calendar: SIFMAUSCalendar` (tipo concreto) en 5 módulos. `pricing` y `optionpricing` escribían `"collateral_rate_ois_sofr"` en la evidencia de **cualquier** curva | **Resuelto en la evidencia** (fase 4): `conventions.indices` + `pricing.collateral`; un precio MXN dice TIIE de Fondeo y queda `assumed`. **Abierto en los instrumentos** (§8.2) |
 | D3 | Dos vocabularios de instrumentos | `OISSwap` (para valuar) frente a `ParSwapNode` (para calibrar), con su propia `annuity`/`par_rate`. El swap TIIE solo existe como nodo | **Abierto** (§8.1) |
 | D4 | Los instrumentos valúan y recalculan | `OISSwap.float_cashflows(curve_set)` proyecta desde la curva. `Schedule.generate` corría en **cada** `cashflows()` | **Recálculo resuelto** (fase 2: el schedule se calcula una vez). **Proyección abierta** (§8.2) |
-| D5 | Valuación y riesgo fragmentados | `dv01` en `pricing`, el resto en `risk`; seis medidas escribían `pv(instrument, curve_set.shifted(s)).value` por su cuenta | **Resuelto** (fase 5): `risk.bumps` es la única primitiva de bump; `dv01` vive en `risk` |
+| D5 | Valuación y riesgo fragmentados | `dv01` en `pricing`, el resto en `risk`; seis medidas escribían `pv(instrument, curve_set.shifted(s)).value` por su cuenta | **Resuelto** (fase 5 y revisión): `risk.bumps.shifted` es la única llamada que mueve una curva fuera de `curves`, y `test_layering` lo exige; `dv01` vive en `risk` |
 | D6 | Fórmulas mezcladas con objetos de mercado | `volatility/` tenía fórmulas, objetos y un enum de producto; Garman-Kohlhagen en `fx/`; `convexity.py` estimaba σ desde un snapshot | **Resuelto** (fase 1): `models/` = solo fórmulas; σ realizada en `market.estimators` |
 | D7 | No hay capa de aplicación | `cli.py` (595 líneas) parseaba, construía y ejecutaba; `mcp_server` importaba el `_COMMANDS` **privado** de `cli` | **Resuelto** (fase 3): `app.config`, `app.builders`, `app.commands.COMMANDS`; `cli` y `mcp_server` son adaptadores hermanos |
 | D8 | "Hedging" disperso | `hedging.py`, `hedging_structures.py`, `hedge_program.py` en la raíz | **Resuelto** (fase 1): paquete `hedging/` |
 | D9 | Evaluación de curva sin caché | `df()` recalculaba `node_times` y `log(dfs)` en cada llamada; barrido lineal; monotone-convex reconstruido por llamada | **Resuelto** (fase 2): caché, `bisect`, prefijos acumulados; salida bit a bit idéntica |
 
-**Qué no era un problema, aunque lo pareciera.** Los 31 tipos de excepción en un solo `errors.py` están bien: es el "hogar único" que `docs/ERRORS.md` documenta. Las 157 re-exportaciones de `rates_engine/__init__.py` también: son la API estable y se conservan todas.
+**Qué no era un problema, aunque lo pareciera.** Los 33 tipos de excepción (32 más la base) en un solo `errors.py` están bien: es el "hogar único" que `docs/ERRORS.md` documenta. Las 157 re-exportaciones de `rates_engine/__init__.py` también: son la API estable y se conservan todas.
 
 ---
 
@@ -82,7 +82,7 @@ La calidad por función era alta: evidencia encadenada, refusals nombradas, 1612
 | Para añadir… | Se toca | No se toca |
 |---|---|---|
 | Una moneda (EUR) | `Currency` en `core.money`, su `RateIndex` y su entrada en `COLLATERAL_INDEX` (`conventions/indices.py`), un calendario si es nuevo. `tests/test_indices.py` falla hasta que la moneda dice a qué tasa descuenta | `curves` (`bootstrap_discount_curve(currency=...)` ya es genérico), `pricing`, `risk`, `app` |
-| Una convención no verificada | Una entrada en el `unresolved` del índice y su porqué | Nada: la degradación llega sola a cada precio |
+| Una convención no verificada | Una entrada en el `unresolved` del índice y su porqué | Nada: `pricing.collateral.curve_warnings` la lleva a cada precio, cada sensibilidad y cada griega |
 | Un producto lineal | Un dataclass en `instruments` con `cashflows(curve_set)` | `risk` (bumpea curvas, no productos), `hedging` |
 | Una fórmula de opción | Un módulo de funciones en `models` | `volatility`, `instruments` |
 | Una medida de riesgo | Una función sobre `risk.bumps.repriced` | `pricing`, `curves` |
@@ -96,14 +96,17 @@ La calidad por función era alta: evidencia encadenada, refusals nombradas, 1612
 
 | Caso | v0.3.0 | v0.4 | Mejora |
 |---|---:|---:|---:|
-| bootstrap 40 trimestres, log-lineal | 7.53 | 2.45 | ×3.1 |
-| bootstrap 40 trimestres, monotone convex | 22.28 | 9.61 | ×2.3 |
-| PV swap OIS 10 años | 0.634 | 0.066 | ×9.6 |
-| PV swap OIS 10 años, monotone convex | 1.768 | 0.083 | ×21.2 |
-| DV01 swap 10 años | 1.354 | 0.152 | ×8.9 |
-| key rate DV01, 10 tenores | 14.20 | 2.56 | ×5.5 |
-| strip hedge 2 años, 8 trimestres | 16.02 | 8.71 | ×1.8 |
-| shock table, 8 choques | 2.61 | 0.73 | ×3.6 |
+| bootstrap 40 trimestres, log-lineal | 7.70 | 2.56 | ×3.0 |
+| bootstrap 40 trimestres, monotone convex | 21.82 | 10.01 | ×2.2 |
+| PV swap OIS 10 años, mismo instrumento (reprecio de un libro) | 0.640 | 0.064 | ×10.0 |
+| PV swap OIS 10 años, instrumento nuevo en cada llamada | 0.634 | 0.123 | ×5.2 |
+| PV swap OIS 10 años, monotone convex | 1.757 | 0.080 | ×21.9 |
+| DV01 swap 10 años | 1.339 | 0.151 | ×8.9 |
+| key rate DV01, 10 tenores | 14.33 | 2.58 | ×5.6 |
+| strip hedge 2 años, 8 trimestres | 16.06 | 8.97 | ×1.8 |
+| shock table, 8 choques | 2.60 | 0.78 | ×3.3 |
+
+Las dos columnas se midieron en la misma corrida y con el mismo script (`benchmarks/bench_core.py`, que solo usa la API raíz), aplicado a cada árbol. Las filas de "mismo instrumento" se benefician además del schedule en caché; la fila de "instrumento nuevo" no, y es la cifra honesta para una operación que se valúa una sola vez.
 
 De dónde sale la mejora, medida con perfilador antes de tocar nada:
 
@@ -121,11 +124,12 @@ De dónde sale la mejora, medida con perfilador antes de tocar nada:
 
 | Chequeo | Resultado |
 |---|---|
-| Suite completa | 1612 → **1679** tests en verde (los nuevos: capas, caché, índices, docstrings de la capa `app`) |
+| Suite completa | 1612 → **1690** tests en verde (los nuevos: capas, caché, índices, degradaciones en riesgo, docstrings de la capa `app`) |
 | Criterios de aceptación (`scripts/audit_acceptance.py`) | 109 cubiertos, 0 sin cubrir, 5 parciales (los mismos 5 que dependen de números publicados por CME) |
 | Equivalencia numérica contra v0.3.0 | Bit a bit idéntica tras cada fase |
 | Payloads de la CLI contra v0.3.0 | `bootstrap` idéntico byte a byte. Cambios intencionales, todos en texto de evidencia: `float_index` de `OISSwap` pasa a `compounded_overnight`; la nota del bucketed delta apunta a `rates_engine.key_rate_dv01`; `describe` lista la nueva convención MXN `mxn_collateral_rate` |
-| `ruff`, `mypy` | Limpios (72 archivos) |
+| `ruff`, `mypy` | Limpios (72 archivos; `mypy --python-version 3.12`, porque los stubs de numpy instalados localmente no parsean con el objetivo 3.11 del config, igual que en v0.3.0) |
+| Revisión independiente | Un agente revisor comparó 113 328 evaluaciones de curva y 544 payloads de riesgo y opciones contra v0.3.0: todos idénticos. Encontró 6 defectos (test de capas ciego a imports relativos, degradaciones que no llegaban al riesgo, dos bumps por fuera de `risk.bumps`, caché obsoleta con listas mutables, afirmaciones infladas en docs, un literal SOFR). Los seis se corrigieron y cada corrección tiene un test que falla sin ella |
 
 ---
 
@@ -138,6 +142,7 @@ De dónde sale la mejora, medida con perfilador antes de tocar nada:
 | 3 | `311bcfb` | Capa `app`; `mcp_server` deja de importar `cli` |
 | 4 | `fc79148` | `conventions.indices`, `pricing.collateral`; la evidencia MXN deja de decir SOFR |
 | 5 | `b7ca83c` | `risk.bumps` como primitiva única; `dv01` a `risk`; griegas a `risk.greeks` |
+| Revisión | (este commit) | Correcciones de la revisión independiente (§6) |
 
 ---
 

@@ -27,7 +27,7 @@ from rates_engine.curves.discount import CurveSet
 from rates_engine.instruments.capfloor import CapFloor, Caplet
 from rates_engine.instruments.swaption import Swaption
 from rates_engine.models import bachelier, black
-from rates_engine.pricing.collateral import collateral_warnings, discounting_fields
+from rates_engine.pricing.collateral import curve_warnings, discounting_fields
 from rates_engine.volatility.units import Volatility
 
 __all__ = [
@@ -179,7 +179,7 @@ def _evidence(
             **extra,
         },
         sources=sources,
-        warnings=collateral_warnings(curve_set.currency),
+        warnings=curve_warnings(curve_set),
     )
 
 

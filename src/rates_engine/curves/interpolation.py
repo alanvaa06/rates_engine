@@ -222,6 +222,12 @@ class MonotoneConvex:
     log_dfs: tuple[float, ...]
     collar: bool = True
 
+    def __post_init__(self) -> None:
+        # Tuples, so the cached forwards and integrals cannot outlive a
+        # mutation of the caller's lists.
+        object.__setattr__(self, "times", tuple(self.times))
+        object.__setattr__(self, "log_dfs", tuple(self.log_dfs))
+
     @cached_property
     def discrete(self) -> tuple[float, ...]:
         """Average forward over each interval."""
