@@ -209,7 +209,7 @@ jobs:
           from rates_engine.app.commands import COMMANDS as _COMMANDS
           from rates_engine import MissingDependencyError
 
-          # Derived from the CLI's own table rather than a list written here,
+          # Derived from the application layer's table rather than a list written here,
           # which is exactly the staleness that failed this job when v3 added
           # two commands. What matters is that the two agree and that every
           # tool is described, not what the set happens to contain today.

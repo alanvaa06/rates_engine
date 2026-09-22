@@ -262,7 +262,8 @@ says whether that source was read directly.
 | Refusal contract | `docs/ERRORS.md` |
 | Formula provenance | `docs/RESEARCH.md` |
 | Releasing | `docs/RELEASING.md` |
-| Architecture (phase 1) | `docs/design/2026-09-16-rates-engine-design.md` |
+| Architecture: layers, packages, extension points | `docs/architecture/ARCHITECTURE.md` |
+| Original design (phase 1) | `docs/design/2026-09-16-rates-engine-design.md` |
 | PRD-001 v1 | `docs/forge/prd/001-v1-curves-futures-swaps.md` |
 | Plan-design v1 | `docs/forge/plan/001-v1-plan-design.md` |
 | PRD-002 v2: swaptions, vol cube, MCP | `docs/forge/prd/002-v2-swaptions-vol-mcp.md` |
