@@ -248,9 +248,8 @@ class TestProxyThroughTheCLI:
         config["curve"]["par_swaps"] = [
             {
                 "label": "DGS2",
-                "start": as_of.isoformat(),
-                "payment_dates": ["2029-01-15"],
-                "year_fractions": [3.05],
+                "effective": as_of.isoformat(),
+                "maturity": "2029-01-15",
                 "rate": 0.041,
                 "data_quality": "proxy",
                 "instrument_kind": "treasury_par_yield",
@@ -267,9 +266,8 @@ class TestProxyThroughTheCLI:
         config["curve"]["par_swaps"] = [
             {
                 "label": "DGS2",
-                "start": as_of.isoformat(),
-                "payment_dates": ["2029-01-15"],
-                "year_fractions": [3.05],
+                "effective": as_of.isoformat(),
+                "maturity": "2029-01-15",
                 "rate": 0.041,
                 "data_quality": "proxy",
                 "instrument_kind": "treasury_par_yield",
@@ -283,3 +281,46 @@ class TestProxyThroughTheCLI:
         assert payload["long_end_source"] == "treasury_proxy"
         assert "proxy" in payload["node_quality"]
         assert payload["evidence"]["data_quality"] == "proxy"
+
+
+class TestParSwapQuotesThroughTheCLI:
+    """`par_swaps` entries are swaps, priced by the pricer that calibrates them."""
+
+    def test_a_quoted_swap_reprices_on_the_curve_it_built(self, tmp_path, as_of):
+        config = _config(as_of)
+        config["curve"]["par_swaps"] = [
+            {"label": "OIS3Y", "effective": as_of.isoformat(), "maturity": "2029-01-15",
+             "rate": 0.041}
+        ]
+        path = tmp_path / "par.json"
+        path.write_text(json.dumps(config), encoding="utf-8")
+        done = _run("bootstrap", "--config", str(path), "--json")
+        assert done.returncode == 0, done.stderr
+        payload = json.loads(done.stdout)
+        used = {i["label"]: i for i in payload["evidence"]["fields"]["instruments_used"]}
+        assert used["OIS3Y"]["kind"] == "swap_quote"
+        assert used["OIS3Y"]["swap"]["payment_lag_days"] == 2
+        assert abs(used["OIS3Y"]["residual_bp"]) < 1e-6
+
+    def test_the_v03_shape_is_refused_with_the_migration(self, tmp_path, as_of):
+        config = _config(as_of)
+        config["curve"]["par_swaps"] = [
+            {"start": as_of.isoformat(), "payment_dates": ["2029-01-15"],
+             "year_fractions": [3.05], "rate": 0.041}
+        ]
+        path = tmp_path / "old.json"
+        path.write_text(json.dumps(config), encoding="utf-8")
+        done = _run("bootstrap", "--config", str(path), "--json")
+        assert done.returncode == 1
+        error = json.loads(done.stdout)["error"]
+        assert error["type"] == "ConfigurationError"
+        assert "effective, maturity and rate" in error["message"]
+
+    def test_a_missing_key_is_named(self, tmp_path, as_of):
+        config = _config(as_of)
+        config["curve"]["par_swaps"] = [{"effective": as_of.isoformat(), "rate": 0.041}]
+        path = tmp_path / "missing.json"
+        path.write_text(json.dumps(config), encoding="utf-8")
+        done = _run("bootstrap", "--config", str(path), "--json")
+        assert done.returncode == 1
+        assert "maturity" in json.loads(done.stdout)["error"]["message"]

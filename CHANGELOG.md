@@ -16,6 +16,16 @@ instrument is valued, not to what it is worth.
 
 ### Changed (breaking)
 
+- **The CLI's `par_swaps` entries are swaps.** Each entry gives
+  `effective`, `maturity` and `rate` (optional `frequency_months`, default
+  12, and `payment_lag_days`, default 2) and is calibrated as a
+  `SwapQuoteNode`, so the curve reprices the quoted SOFR OIS with the pricer
+  itself, payment lag included. The v0.3 shape -- `start`, `payment_dates`,
+  `year_fractions` -- built a `ParSwapNode`, which assumes each period is
+  paid the day it ends and so misprices a SOFR OIS by several basis points
+  at the front (5.5 bp at one year on the 2026-01-15 strip). It is refused
+  with `ConfigurationError` (exit code 1) and a message that spells out the
+  new keys.
 - **Accrual period ends are adjusted, and dollar numbers move.**
   `Schedule.generate` now rolls each period end by the same business-day
   convention as the payment (Modified Following by default) and pays

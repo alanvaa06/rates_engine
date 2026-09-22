@@ -19,10 +19,11 @@ from rates_engine.conventions.side import Side
 from rates_engine.core.errors import ConfigurationError
 from rates_engine.core.evidence import DataQuality, Provenance
 from rates_engine.core.money import Currency
-from rates_engine.curves.bootstrap import FuturesNode, ParSwapNode, RealizedStubNode
+from rates_engine.curves.bootstrap import FuturesNode, RealizedStubNode
 from rates_engine.curves.discount import DiscountCurve
 from rates_engine.instruments.swaps import OISSwap
 from rates_engine.models.convexity import ConvexityModel, convexity_adjustment
+from rates_engine.pricing.calibration import SwapQuoteNode
 
 __all__ = ["calibration_nodes", "ois_swap", "flat_curve", "fx_inputs"]
 
@@ -40,7 +41,14 @@ def calibration_nodes(config: dict[str, Any], as_of: date) -> tuple[Any, ...]:
             years on the curve's time basis.
 
     Returns:
-        The stub, futures and par swap nodes, in the order given.
+        The stub, futures and par swap nodes, in the order given. Each
+        ``par_swaps`` entry becomes a
+        :class:`~rates_engine.pricing.calibration.SwapQuoteNode` on the SOFR
+        OIS it describes.
+
+    Raises:
+        ConfigurationError: A ``par_swaps`` entry uses the v0.3 shape or is
+            missing a required key.
     """
     curve = config.get("curve") or {}
     instruments: list[Any] = []
@@ -80,24 +88,57 @@ def calibration_nodes(config: dict[str, Any], as_of: date) -> tuple[Any, ...]:
             )
         )
 
-    for entry in curve.get("par_swaps", ()):
-        payments = tuple(as_date(d) for d in entry["payment_dates"])
-        instruments.append(
-            ParSwapNode(
-                start=as_date(entry["start"]),
-                payment_dates=payments,
-                year_fractions=tuple(float(x) for x in entry["year_fractions"]),
-                quoted_rate=float(entry["rate"]),
-                label=str(entry.get("label", f"par:{entry['payment_dates'][-1]}")),
-                provenance=Provenance(
-                    source=str(entry.get("source", "file")),
-                    series_id=str(entry.get("label", "par_swap")),
-                    instrument_kind=str(entry.get("instrument_kind", "ois_par")),
-                    data_quality=DataQuality(entry.get("data_quality", "observed")),
-                ),
-            )
-        )
+    for number, entry in enumerate(curve.get("par_swaps", ())):
+        instruments.append(_par_swap_quote(entry, number))
     return tuple(instruments)
+
+
+_LEGACY_PAR_SWAP_KEYS = ("start", "payment_dates", "year_fractions")
+_PAR_SWAP_REQUIRED = ("effective", "maturity", "rate")
+
+
+def _par_swap_quote(entry: dict[str, Any], number: int) -> SwapQuoteNode:
+    """One ``par_swaps`` entry as a quote on a real SOFR OIS.
+
+    The entry states the swap's terms and the node reprices that swap with
+    the pricer itself, payment lag included. The v0.3 shape -- a start, a
+    list of payment dates and their year fractions -- built a node that
+    assumed each period is paid the day it ends, which misprices a SOFR OIS
+    (paid two business days later) by several basis points at the front; it
+    is refused with the migration spelled out rather than accepted.
+    """
+    legacy = [key for key in _LEGACY_PAR_SWAP_KEYS if key in entry]
+    if legacy:
+        raise ConfigurationError(
+            f"curve.par_swaps[{number}] uses the v0.3 keys {legacy}. A par quote is now "
+            "given as the swap it quotes: effective, maturity and rate, with optional "
+            "frequency_months (12), payment_lag_days (2) and label. The dates and year "
+            "fractions are generated from those terms, payment lag included; the old "
+            "shape ignored the lag and mispriced a SOFR OIS by several basis points."
+        )
+    missing = [key for key in _PAR_SWAP_REQUIRED if key not in entry]
+    if missing:
+        raise ConfigurationError(f"curve.par_swaps[{number}] is missing {missing}")
+    rate = float(entry["rate"])
+    swap = OISSwap(
+        effective=as_date(entry["effective"]),
+        maturity=as_date(entry["maturity"]),
+        fixed_rate=rate,
+        frequency_months=int(entry.get("frequency_months", 12)),
+        payment_lag_days=int(entry.get("payment_lag_days", 2)),
+    )
+    label = str(entry.get("label", ""))
+    return SwapQuoteNode(
+        swap,
+        rate,
+        label=label,
+        provenance=Provenance(
+            source=str(entry.get("source", "file")),
+            series_id=label or None,
+            instrument_kind=str(entry.get("instrument_kind", "ois_par")),
+            data_quality=DataQuality(entry.get("data_quality", "observed")),
+        ),
+    )
 
 
 def ois_swap(config: dict[str, Any]) -> OISSwap:

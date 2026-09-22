@@ -241,9 +241,12 @@ and prices the floating leg as `P(start) - P(last payment)`, which is exact
 only when every period is paid the day it ends. A SOFR OIS pays two business
 days later: a curve fitted to `ParSwapNode`s built from such swaps' payment
 dates misprices the one-year swap by about 5.5 bp. With no payment lag the
-two nodes agree exactly. The CLI's `par_swaps` block still builds
-`ParSwapNode`s, because its quotes arrive as dates, and the CLI's `price`
-refuses a non-dollar swap because its curve block quotes SOFR instruments.
+two nodes agree exactly. The CLI's `par_swaps` entries are swaps --
+`effective`, `maturity`, `rate`, optional `frequency_months` (12) and
+`payment_lag_days` (2) -- and become `SwapQuoteNode`s; the v0.3 shape
+(`start`, `payment_dates`, `year_fractions`) is refused with the migration in
+the message. The CLI's `price` refuses a non-dollar swap because its curve
+block quotes SOFR instruments.
 `SwapQuoteNode` takes an OIS only.
 
 **Accrual periods end on adjusted dates.** Since v0.4 a schedule's period
