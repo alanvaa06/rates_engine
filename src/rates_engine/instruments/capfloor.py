@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any
 from rates_engine.conventions.calendar import (
     SIFMA_US,
     BusinessDayConvention,
-    SIFMAUSCalendar,
+    HolidayCalendar,
 )
 from rates_engine.conventions.daycount import (
     DayCount,
@@ -140,7 +140,7 @@ class CapFloor:
     frequency_months: int = 3
     day_count: DayCount = DayCount.ACT_360
     payment_lag_days: int = 0
-    calendar: SIFMAUSCalendar = SIFMA_US
+    calendar: HolidayCalendar = SIFMA_US
     convention: BusinessDayConvention = BusinessDayConvention.MODIFIED_FOLLOWING
     include_first_period: bool = True
 

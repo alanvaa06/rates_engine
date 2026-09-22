@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING
 from rates_engine.conventions.calendar import (
     SIFMA_US,
     BusinessDayConvention,
-    SIFMAUSCalendar,
+    HolidayCalendar,
 )
 from rates_engine.conventions.daycount import (
     DayCount,
@@ -70,7 +70,7 @@ class OISSwap:
     frequency_months: int = 12
     fixed_day_count: DayCount = DayCount.ACT_360
     payment_lag_days: int = 2
-    calendar: SIFMAUSCalendar = SIFMA_US
+    calendar: HolidayCalendar = SIFMA_US
     convention: BusinessDayConvention = BusinessDayConvention.MODIFIED_FOLLOWING
 
     @property
@@ -188,7 +188,7 @@ class OISSwap:
             "frequency_months": self.frequency_months,
             "fixed_day_count": self.fixed_day_count.value,
             "payment_lag_days": self.payment_lag_days,
-            "float_index": "compounded_sofr",
+            "float_index": "compounded_overnight",
         }
 
 
@@ -223,7 +223,7 @@ class IRSwap:
     fixed_day_count: DayCount = DayCount.ACT_360
     float_day_count: DayCount = DayCount.ACT_360
     payment_lag_days: int = 0
-    calendar: SIFMAUSCalendar = SIFMA_US
+    calendar: HolidayCalendar = SIFMA_US
     convention: BusinessDayConvention = BusinessDayConvention.MODIFIED_FOLLOWING
 
     @property

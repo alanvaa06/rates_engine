@@ -16,7 +16,7 @@ banxico.org.mx (403 at the egress proxy), so the SIE identifiers for TIIE
 28 and TIIE de Fondeo are not known here. There is no mapping in this
 module from a benchmark to a series ID, because writing one would mean
 inventing it. The caller passes the identifier they looked up, and
-``rates_engine.curves.mxn.UNRESOLVED_MXN`` records that the mapping is
+``rates_engine.conventions.indices.UNRESOLVED_MXN`` records that the mapping is
 missing.
 
 So this is a working client for an endpoint this build has never reached.
@@ -172,7 +172,7 @@ def parse_sie_payload(payload: str, series_id: str, *, percent: bool = True) -> 
                 "Banxico SIE. Which benchmark this identifier corresponds to is the "
                 "caller's knowledge, not this package's: the SIE identifiers for TIIE "
                 "28 and TIIE de Fondeo are recorded as unresolved in "
-                "rates_engine.curves.mxn.UNRESOLVED_MXN."
+                "rates_engine.conventions.indices.UNRESOLVED_MXN."
                 + (
                     " Values were divided by 100 on the assumption that SIE quotes in "
                     "percent, which this build has never confirmed against the live "

@@ -47,10 +47,27 @@ A reorganisation into layers. No number moves, and every name exported from
   name) instead of `rates_engine.risk.key_rate_dv01`; the currency-mismatch
   refusal points at `rates_engine.pricing.fx_forward` instead of
   `rates_engine.fx`.
+- **Discounting evidence is derived, not written.** Every pricer used to
+  record `"discounting": "collateral_rate_ois_sofr"` whatever the curve, so a
+  peso swap on a peso curve claimed an OIS-SOFR discount. The fields now come
+  from `conventions.indices.collateral_index(curve.currency)`: dollar
+  payloads are byte-identical, peso ones say `collateral_rate_ois_tiie_fondeo`
+  and carry an `unresolved_convention:mxn_collateral_rate` degradation, which
+  makes their `worst_quality` `assumed`. No number moves.
+- **`OISSwap`'s `float_index` is `compounded_overnight`** (was
+  `compounded_sofr`) in its evidence and in `list-instruments`. The swap
+  floats on the discount curve's own overnight rate in whichever currency
+  that curve is; the `discounting` field beside it names the index.
+- **`UNRESOLVED_MXN`, `TIIE_PERIOD_DAYS` and `TIIE_DAY_COUNT`** moved from
+  `curves.mxn` to `conventions.indices`, and `UNRESOLVED_MXN` gained
+  `mxn_collateral_rate`. `describe` lists it; an MXN curve carries one more
+  `assumed` degradation.
+- **Calendars are typed as `HolidayCalendar`**, not `SIFMAUSCalendar`, on
+  instruments, snapshots, curve views and the FOMC step curve, so a `BMV`
+  calendar is a valid argument rather than a type error. Defaults unchanged.
 - **`tests/test_layering.py`** checks layers rather than a total order of
   modules: nothing imports sideways or upward except one declared, dated
   exception (`instruments -> curves`).
-
 - **Faster curves and schedules, same bits.** `DiscountCurve` caches its
   node times, log discount factors and monotone-convex interpolant instead
   of recomputing them on every `df()`, finds the interval by bisection, and
@@ -67,6 +84,12 @@ A reorganisation into layers. No number moves, and every name exported from
 
 - `benchmarks/bench_core.py`: hot-path timings through the public API, run
   before and after a structural change.
+- **`conventions.indices`**: `RateIndex` (currency, tenor, day count,
+  calendar, administrator, unresolved conventions), the `SOFR`,
+  `TIIE_FONDEO` and `TIIE_28` definitions, `COLLATERAL_INDEX` and
+  `collateral_index`. A currency with no entry is refused with
+  `UnsupportedConventionError` rather than defaulted to SOFR.
+- **`pricing.collateral`**: the one home of the discounting evidence.
 - `tests/test_curve_cache.py`: a derived curve's handed-down arrays equal a
   fresh computation exactly, and the cache never enters equality or hashing.
 

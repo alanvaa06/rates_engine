@@ -26,6 +26,11 @@ from rates_engine.conventions.daycount import (
     DayCount,
     year_fraction,
 )
+from rates_engine.conventions.indices import (
+    TIIE_DAY_COUNT,
+    TIIE_PERIOD_DAYS,
+    UNRESOLVED_MXN,
+)
 from rates_engine.core.errors import (
     RatesEngineError,
     UnresolvedConventionError,
@@ -38,9 +43,6 @@ from rates_engine.curves.bootstrap import (
 )
 from rates_engine.curves.discount import CurveSet
 from rates_engine.curves.mxn import (
-    TIIE_DAY_COUNT,
-    TIIE_PERIOD_DAYS,
-    UNRESOLVED_MXN,
     MXNCurveResult,
     TIIEBenchmark,
     bootstrap_mxn_curve,

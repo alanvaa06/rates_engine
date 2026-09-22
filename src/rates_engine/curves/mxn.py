@@ -10,14 +10,14 @@ That leaves two honest options. Guess the conventions and let every peso
 price rest on an unmarked assumption, or build the machinery and carry the
 gap in the evidence. AC-1.4 chose the second before the research ran, which
 is why this module has the shape it does: every result names the
-conventions it assumed in :data:`UNRESOLVED_MXN`, carries a
+conventions it assumed in :data:`~rates_engine.conventions.indices.UNRESOLVED_MXN`, carries a
 :class:`~rates_engine.core.evidence.Degradation` per convention that pushes
 ``worst_quality`` to ``ASSUMED``, and refuses outright under
 ``strict_conventions=True``.
 
 **What resolving them looks like.** Someone with a browser and half an hour
 reads Banxico's SIE pages for TIIE 28 and TIIE de Fondeo. Then
-:data:`UNRESOLVED_MXN` shrinks, the degradations stop being emitted, and no
+:data:`~rates_engine.conventions.indices.UNRESOLVED_MXN` shrinks, the degradations stop being emitted, and no
 other code changes. The gap is a data gap, and it is stored as one.
 
 **The two benchmarks never mix unmarked.** TIIE 28 is the historical
@@ -39,8 +39,12 @@ from rates_engine.conventions.calendar import (
     BusinessDayConvention,
 )
 from rates_engine.conventions.daycount import (
-    DayCount,
     year_fraction,
+)
+from rates_engine.conventions.indices import (
+    TIIE_DAY_COUNT,
+    TIIE_PERIOD_DAYS,
+    UNRESOLVED_MXN,
 )
 from rates_engine.core.errors import UnresolvedConventionError
 from rates_engine.core.evidence import (
@@ -60,9 +64,6 @@ from rates_engine.curves.discount import DiscountCurve
 
 __all__ = [
     "TIIEBenchmark",
-    "UNRESOLVED_MXN",
-    "TIIE_PERIOD_DAYS",
-    "TIIE_DAY_COUNT",
     "MXNCurveResult",
     "BenchmarkComparison",
     "tiie_schedule",
@@ -70,57 +71,6 @@ __all__ = [
     "bootstrap_mxn_curve",
     "compare_benchmarks",
 ]
-
-TIIE_PERIOD_DAYS = 28
-"""The assumed TIIE coupon period, in calendar days. Unverified — see
-:data:`UNRESOLVED_MXN`."""
-
-TIIE_DAY_COUNT = DayCount.ACT_360
-"""The assumed TIIE accrual basis. Unverified — see :data:`UNRESOLVED_MXN`."""
-
-UNRESOLVED_MXN: tuple[tuple[str, str], ...] = (
-    (
-        "tiie_day_count",
-        f"ACT/360 assumed for TIIE accrual; not confirmed against Banxico. "
-        f"Currently {TIIE_DAY_COUNT.value}.",
-    ),
-    (
-        "tiie_period_days",
-        f"A {TIIE_PERIOD_DAYS}-day coupon period assumed; not confirmed against "
-        "Banxico.",
-    ),
-    (
-        "tiie_fondeo_vs_28",
-        "Which conventions attach to TIIE de Fondeo as against TIIE 28 is not "
-        "established. This build applies the same ones to both, which is an "
-        "assumption and possibly a wrong one.",
-    ),
-    (
-        "banxico_series_ids",
-        "The Banxico SIE series identifiers for either benchmark are not known "
-        "here, so fixings must be supplied by the caller rather than fetched.",
-    ),
-    (
-        "banxico_quotes_in_percent",
-        "Series from Banxico's SIE are divided by 100 on the assumption that SIE "
-        "quotes rates in percent, as FRED does. Never confirmed against the live "
-        "endpoint, which this build cannot reach. A wrong guess is a hundredfold "
-        "error in every fixing.",
-    ),
-    (
-        "mxn_calendar_is_bmv_not_banxico",
-        "Business days come from the BMV (stock exchange) calendar. Banxico's "
-        "banking calendar is a different list and the two have not been diffed.",
-    ),
-)
-"""Every MXN convention this build assumes rather than knows.
-
-A tuple of ``(name, why)``. Each one becomes a
-:class:`~rates_engine.core.evidence.Degradation` on every result, and
-``strict_conventions=True`` turns the set into a refusal. When Banxico
-becomes reachable this tuple shrinks and nothing else changes.
-"""
-
 
 class TIIEBenchmark(StrEnum):
     """Which peso benchmark a curve is built on.
@@ -177,7 +127,7 @@ def tiie_par_swap_node(
 ) -> ParSwapNode:
     """A par TIIE swap node with this module's assumed conventions applied.
 
-    This is where :data:`TIIE_PERIOD_DAYS` and :data:`TIIE_DAY_COUNT` are
+    This is where :data:`~rates_engine.conventions.indices.TIIE_PERIOD_DAYS` and :data:`~rates_engine.conventions.indices.TIIE_DAY_COUNT` are
     actually *used*. Without it they were two constants that the payload
     advertised and no calculation ever touched — a field that reads as a
     statement about the accrual while describing nothing, which is the one
@@ -196,7 +146,7 @@ def tiie_par_swap_node(
         roll: Adjust period ends onto BMV business days.
 
     Returns:
-        The node, with accruals on :data:`TIIE_DAY_COUNT`.
+        The node, with accruals on :data:`~rates_engine.conventions.indices.TIIE_DAY_COUNT`.
     """
     payments = tiie_schedule(as_of, periods, roll=roll)
     starts = (as_of, *payments[:-1])
@@ -232,7 +182,7 @@ class MXNCurveResult(EngineResult):
         benchmark: Which benchmark the quotes are on.
         residuals_bp: Repricing residual per instrument label.
         max_residual_bp: The worst of them.
-        unresolved_conventions: The names from :data:`UNRESOLVED_MXN` that
+        unresolved_conventions: The names from :data:`~rates_engine.conventions.indices.UNRESOLVED_MXN` that
             this result rests on. Empty only when they have been verified.
     """
 
@@ -293,7 +243,7 @@ def bootstrap_mxn_curve(
 
     Raises:
         UnresolvedConventionError: ``strict_conventions`` is set and
-            :data:`UNRESOLVED_MXN` is not empty.
+            :data:`~rates_engine.conventions.indices.UNRESOLVED_MXN` is not empty.
         CurveArbitrageError: The instruments imply a non-monotone curve.
         BootstrapResidualError: Under ``strict``, an instrument missed.
     """

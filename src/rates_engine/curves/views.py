@@ -20,7 +20,7 @@ from typing import Any
 from rates_engine.conventions.calendar import (
     SIFMA_US,
     BusinessDayConvention,
-    SIFMAUSCalendar,
+    HolidayCalendar,
 )
 from rates_engine.conventions.daycount import (
     DayCount,
@@ -152,7 +152,7 @@ def par_curve(
     frequency_months: int = 12,
     day_count: DayCount = DayCount.ACT_360,
     start: date | None = None,
-    calendar: SIFMAUSCalendar = SIFMA_US,
+    calendar: HolidayCalendar = SIFMA_US,
     convention: BusinessDayConvention = BusinessDayConvention.MODIFIED_FOLLOWING,
     payment_lag_days: int = 0,
 ) -> CurveView:

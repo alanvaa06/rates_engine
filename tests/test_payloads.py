@@ -116,12 +116,12 @@ def _hedge_structures():
 def _mxn():
     """A peso curve and a benchmark comparison, as test_mxn_curve.py builds them."""
     from rates_engine.conventions.daycount import year_fraction
+    from rates_engine.conventions.indices import TIIE_DAY_COUNT
     from rates_engine.curves.bootstrap import (
         ParSwapNode,
         RealizedStubNode,
     )
     from rates_engine.curves.mxn import (
-        TIIE_DAY_COUNT,
         TIIEBenchmark,
         bootstrap_mxn_curve,
         compare_benchmarks,

@@ -208,6 +208,21 @@ Call `curve.require_monotone()` when you mean to assert it.
 extra. They are not quite interchangeable in one respect the code handles for
 you: YAML parses `2026-01-15` into a `date`, JSON leaves it a string.
 
+**The discounting evidence comes from the curve's currency.** Every price
+records `discounting: collateral_rate_ois_<index>`, where the index is
+`conventions.indices.collateral_index(curve.currency)`: SOFR for dollars,
+TIIE de Fondeo for pesos. A peso price also carries the
+`unresolved_convention:mxn_collateral_rate` degradation, so its
+`worst_quality` is `assumed` even on a hand-built curve. A new `Currency`
+member needs an entry in `COLLATERAL_INDEX`; `tests/test_indices.py` fails
+until it has one.
+
+**An instrument still takes its currency from the curve it is priced on.**
+`OISSwap` has no currency or index field, so an `OISSwap` priced on a peso
+curve is a peso swap -- but it keeps its own `calendar` (SIFMA by default).
+Pass `calendar=BMV` for peso dates. Whether instruments should carry their
+index is an open decision in `docs/architecture/ARCHITECTURE.md`.
+
 **Nothing here reads the network except `market.providers.fred`,** and that
 imports `urllib` inside the call. Importing `rates_engine` opens no socket and
 installs no warning filter; `tests/test_import_side_effects.py` enforces both.
@@ -227,13 +242,13 @@ Subpackage `__init__` files document their layer and re-export nothing, so
 | Package | Layer | Responsibility |
 | --- | --- | --- |
 | `core` | 0 | `errors` (every refusal, each with an exit code), `evidence`, `results` (`EngineResult`), `money` (`Currency`), `diagnostics` (reading an evidence chain) |
-| `conventions` | 1 | Day counts, the SIFMA and BMV calendars, rolls, IMM dates, schedules; the shared vocabulary `Side`, `OptionKind`, `CurrencyPair` |
+| `conventions` | 1 | Day counts, the SIFMA and BMV calendars, rolls, IMM dates, schedules; `indices` (`RateIndex`, the collateral index of each currency, `UNRESOLVED_MXN`); the shared vocabulary `Side`, `OptionKind`, `CurrencyPair` |
 | `market` | 2 | Snapshots, the SOFR compounding rules, realised sigma (`estimators`), the `file`, `fred` and `banxico` providers |
 | `models` | 2 | Closed forms: Black, Bachelier, Garman-Kohlhagen, SABR, the four FX delta conventions, Ho-Lee and Hull-White convexity |
 | `curves` | 3 | `DiscountCurve`, the bootstrap, the four views, the dual-curve solver, monotone convex, Nelson-Siegel, the FOMC step curve, and the MXN curve with its unresolved conventions |
 | `volatility` | 3 | `Volatility` and its units, the SABR cube, the vanna-volga FX smile |
 | `instruments` | 3 | `OISSwap`, `IRSwap`, `FRA`, `SOFRFuture1M`, `SOFRFuture3M`, `CapFloor`, `Swaption` |
-| `pricing` | 4 | `linear` (`pv`, `par_rate`, `annuity`, parallel `dv01`, `price_on_parametric`), `options` (swaptions, caps and floors), `fx_forward` (the CIP forward and its basis) |
+| `pricing` | 4 | `linear` (`pv`, `par_rate`, `annuity`, parallel `dv01`, `price_on_parametric`), `options` (swaptions, caps and floors), `fx_forward` (the CIP forward and its basis), `collateral` (the discounting evidence every pricer writes) |
 | `risk` | 5 | Key rate, duration conventions, convexity, option greeks, and the stubs |
 | `hedging` | 6 | `futures_strip` (`strip_hedge`, `shock_table`), `fx_structures` (`compare_structures`), `program` (the hedging policy as data) |
 | `reporting` | 7 | JSON payloads and error payloads |

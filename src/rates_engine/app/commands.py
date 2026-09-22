@@ -16,13 +16,13 @@ from typing import Any
 from rates_engine.app.builders import calibration_nodes, flat_curve, fx_inputs, ois_swap
 from rates_engine.app.config import as_date, require_config
 from rates_engine.conventions.currency_pair import USDMXN
+from rates_engine.conventions.indices import UNRESOLVED_MXN
 from rates_engine.core.errors import ConfigurationError, UndefinedDurationError
 from rates_engine.core.errors import __all__ as EXCEPTION_NAMES
 from rates_engine.core.money import Currency
 from rates_engine.core.results import SCHEMA_VERSION
 from rates_engine.curves.bootstrap import bootstrap_discount_curve
 from rates_engine.curves.discount import CurveSet
-from rates_engine.curves.mxn import UNRESOLVED_MXN
 from rates_engine.curves.views import all_views
 from rates_engine.hedging.futures_strip import (
     DEFAULT_SHOCKS_BP,
@@ -84,7 +84,7 @@ def list_instruments(_config: dict[str, Any] | None) -> dict[str, Any]:
         "schema_version": SCHEMA_VERSION,
         "result_type": "InstrumentCatalogue",
         "linear": [
-            {"name": "OISSwap", "index": "compounded_sofr", "curves": ["discount"]},
+            {"name": "OISSwap", "index": "compounded_overnight", "curves": ["discount"]},
             {"name": "IRSwap", "index": "term_sofr", "curves": ["discount", "tenor"]},
             {"name": "FRA", "index": "term_sofr", "curves": ["discount", "tenor"]},
             {"name": "SOFRFuture1M", "settlement": "arithmetic_average", "dv01_usd": 41.67},

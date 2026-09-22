@@ -36,7 +36,7 @@ from scipy.optimize import minimize_scalar
 
 from rates_engine.conventions.calendar import (
     SIFMA_US,
-    SIFMAUSCalendar,
+    HolidayCalendar,
 )
 from rates_engine.conventions.daycount import year_fraction
 from rates_engine.core.errors import (
@@ -375,7 +375,7 @@ class FOMCStepCurve:
         return total / (end - start).days
 
     def term_rate(
-        self, start: date, months: int, *, calendar: SIFMAUSCalendar = SIFMA_US
+        self, start: date, months: int, *, calendar: HolidayCalendar = SIFMA_US
     ) -> float:
         """The compounded overnight rate over a term, with the caveat attached.
 

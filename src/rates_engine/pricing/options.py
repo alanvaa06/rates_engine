@@ -33,6 +33,7 @@ from rates_engine.models import (
     bachelier,
     black,
 )
+from rates_engine.pricing.collateral import collateral_warnings, discounting_fields
 from rates_engine.volatility.units import Volatility
 
 __all__ = [
@@ -180,10 +181,11 @@ def _evidence(
             "volatility": volatility.to_dict(),
             "curve_interpolation": curve_set.discount.interpolation,
             "dual_curve": curve_set.is_dual,
-            "discounting": "collateral_rate_ois_sofr",
+            "discounting": discounting_fields(curve_set.currency)["discounting"],
             **extra,
         },
         sources=sources,
+        warnings=collateral_warnings(curve_set.currency),
     )
 
 

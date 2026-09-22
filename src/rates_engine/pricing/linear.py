@@ -27,6 +27,11 @@ from rates_engine.core.money import require_same_currency
 from rates_engine.core.results import EngineResult
 from rates_engine.curves.discount import CurveSet
 from rates_engine.instruments.cashflow import Cashflow
+from rates_engine.pricing.collateral import (
+    collateral_warnings,
+    discounting_fields,
+    merge_warnings,
+)
 
 __all__ = [
     "Priceable",
@@ -187,16 +192,6 @@ class PriceResult(EngineResult):
         )
 
 
-def _discount_note() -> dict[str, Any]:
-    return {
-        "discounting": "collateral_rate_ois_sofr",
-        "discounting_note": (
-            "Discounted on the OIS-SOFR curve because collateral is remunerated at "
-            "SOFR (Fujii-Shimada-Takahashi; Piterbarg), not on a separate funding curve."
-        ),
-    }
-
-
 def _pv_of(flows: tuple[Cashflow, ...], curve_set: CurveSet) -> float:
     """Present value, refusing any flow the curve is not denominated to discount.
 
@@ -230,7 +225,7 @@ def _evidence(
             "curve_interpolation": curve_set.discount.interpolation,
             "dual_curve": curve_set.is_dual,
             "projection_curve": "tenor" if curve_set.is_dual else "discount",
-            **_discount_note(),
+            **discounting_fields(curve_set.currency),
             **extra,
         },
         sources=sources,
@@ -238,7 +233,7 @@ def _evidence(
         # conventions are assumed inherits that without the caller having
         # to remember to pass source_evidence. That forgetting is what made
         # the marking decorative.
-        warnings=curve_set.provenance,
+        warnings=merge_warnings(curve_set.provenance, collateral_warnings(curve_set.currency)),
     )
 
 
@@ -499,7 +494,7 @@ def price_on_parametric(
             "difference": difference,
             "difference_bp_of_notional": per_bp,
             "currency": currency.value,
-            **_discount_note(),
+            **discounting_fields(currency),
             "note": (
                 "A parametric curve smooths the quotes rather than reproducing them, "
                 "so this difference is the cost of the smoothing, not an error in "
@@ -507,6 +502,7 @@ def price_on_parametric(
             ),
         },
         sources=(fit.evidence,),
+        warnings=collateral_warnings(currency),
     )
     return ParametricComparison(
         evidence=evidence,
