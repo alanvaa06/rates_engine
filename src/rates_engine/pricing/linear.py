@@ -36,6 +36,8 @@ __all__ = [
     "ParametricComparison",
     "pv",
     "discounted_value",
+    "annuity_value",
+    "par_rate_value",
     "valuation_evidence",
     "par_rate",
     "annuity",
@@ -217,6 +219,42 @@ def discounted_value(instrument: Priceable, curve_set: CurveSet) -> float:
     return _pv_of(project(instrument, curve_set), curve_set)
 
 
+def annuity_value(swap: Swappable, curve_set: CurveSet) -> float:
+    """Fixed-leg annuity per unit notional as a bare float; see :func:`annuity`.
+
+    Args:
+        swap: A two-legged instrument.
+        curve_set: Discount and projection curves.
+
+    Returns:
+        The annuity in years of discounted accrual.
+    """
+    unit_swap = swap.with_terms(fixed_rate=1.0, side=Side.RECEIVER)
+    return _pv_of(unit_swap.fixed_cashflows(), curve_set) / swap.notional
+
+
+def _float_leg_pv(swap: Swappable, curve_set: CurveSet) -> float:
+    payer = swap.with_terms(side=Side.PAYER)
+    return _pv_of(float_leg(payer, curve_set), curve_set)
+
+
+def par_rate_value(swap: Swappable, curve_set: CurveSet) -> float:
+    """The par rate as a bare float: exactly :func:`par_rate`'s value.
+
+    For callers that evaluate it many times -- a root solver calibrating a
+    curve node to the swap, above all -- and would otherwise build and
+    discard an evidence record per trial.
+
+    Args:
+        swap: A two-legged instrument.
+        curve_set: Discount and projection curves.
+
+    Returns:
+        The par rate as a decimal.
+    """
+    return _float_leg_pv(swap, curve_set) / (swap.notional * annuity_value(swap, curve_set))
+
+
 def pv(
     instrument: Priceable,
     curve_set: CurveSet,
@@ -262,8 +300,7 @@ def annuity(
     Returns:
         A :class:`PriceResult` with ``measure="annuity"`` and ``unit="years"``.
     """
-    unit_swap = swap.with_terms(fixed_rate=1.0, side=Side.RECEIVER)
-    value = _pv_of(unit_swap.fixed_cashflows(), curve_set) / swap.notional
+    value = annuity_value(swap, curve_set)
     return PriceResult(
         evidence=valuation_evidence("pricing.annuity", swap, curve_set, {}, source_evidence),
         value=value,
@@ -298,16 +335,15 @@ def par_rate(
         ZeroDivisionError: The annuity is zero, which means the fixed leg has
             no periods left to discount.
     """
-    payer = swap.with_terms(side=Side.PAYER)
-    float_pv = _pv_of(float_leg(payer, curve_set), curve_set)
-    annuity_value = annuity(swap, curve_set).value
-    value = float_pv / (swap.notional * annuity_value)
+    float_pv = _float_leg_pv(swap, curve_set)
+    years = annuity_value(swap, curve_set)
+    value = float_pv / (swap.notional * years)
     return PriceResult(
         evidence=valuation_evidence(
             "pricing.par_rate",
             swap,
             curve_set,
-            {"annuity_years": annuity_value, "float_leg_pv": float_pv},
+            {"annuity_years": years, "float_leg_pv": float_pv},
             source_evidence,
         ),
         value=value,

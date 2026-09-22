@@ -9,8 +9,37 @@ claims, so it belongs here too.
 
 ## [Unreleased]
 
-A reorganisation into layers. No number moves, and every name exported from
-`rates_engine` is still exported from it.
+A reorganisation into layers, then two decisions the layering exposed:
+instruments carry their rate index, and curves calibrate to real swaps. Every
+dollar number is bit-identical to v0.3.0; the breaking changes are to how an
+instrument is valued, not to what it is worth.
+
+### Changed (breaking)
+
+- **Instruments carry their rate index, and it fixes their currency.**
+  `OISSwap`, `IRSwap`, `FRA`, `CapFloor` and `Caplet` take an `index`
+  (`SOFR`, and Term SOFR of the frequency, by default). v0.3 took an
+  instrument's currency from the curve it was priced on, so a SOFR swap
+  priced on a peso curve came back as a peso swap rolling on SIFMA holidays;
+  it now raises `CurrencyMismatchError`. `calendar` defaults to `None`,
+  meaning the index's calendar, so a TIIE de Fondeo swap rolls on BMV
+  without being told. `IRSwap.float_frequency_months` and
+  `CapFloor.frequency_months` default to `None` (taken from the index) and
+  are refused if they contradict it.
+- **Instruments no longer project their own cashflows.** Removed:
+  `OISSwap/IRSwap.cashflows`, `float_cashflows`, `FRA.fair_rate`,
+  `FRA.cashflows`, `Caplet.forward_rate`, `Caplet.numeraire`. Use
+  `pricing.projection.project(instrument, curve_set)`, `float_leg`,
+  `fra_fair_rate`, and `pricing.options.caplet_forward_rate` /
+  `caplet_numeraire`. `fixed_cashflows()` takes no curve. `Priceable` and
+  `Swappable` moved to `pricing.projection` and require `currency` instead
+  of `cashflows`. A third-party instrument prices everywhere once it is
+  registered with `project.register`.
+- **`OISSwap`'s `float_index` is `compounded_<index>`**: `compounded_sofr`
+  for a dollar swap, which is again byte-identical to v0.3.0, and
+  `compounded_tiie_fondeo` for a peso one.
+- **`CURVE_TIME_BASIS`** moved to `conventions.daycount`, so an instrument can
+  measure option time without importing the curve layer.
 
 ### Changed
 
@@ -114,6 +143,22 @@ A reorganisation into layers. No number moves, and every name exported from
 
 ### Added
 
+- **`pricing.calibration.SwapQuoteNode`**: a calibration node wrapping a real
+  swap, whose residual is `pricing.linear.par_rate_value` itself. The curve
+  layer receives it through the `CalibrationInstrument` protocol and still
+  imports no product. A curve fitted to it reprices its swaps to 1e-12.
+  Fitted instead to `ParSwapNode`s built from the same swaps' dates, the
+  2026-01-15 strip misprices its two-year swap by 1.7 bp, because a rolled
+  payment date stops the floating leg telescoping; the two agree exactly
+  where nothing rolls. `ParSwapNode` stays for quotes that arrive as dates.
+- **Term SOFR indices** (`TERM_SOFR_1M/3M/6M/12M`), `INDICES`,
+  `index_named` and `term_sofr`. The CLI's `swap` block takes an `index`,
+  `price` builds its curve in that index's currency, and `describe` lists
+  `rate_indices`.
+- **Every result carries its instrument's index assumptions.** A TIIE de
+  Fondeo swap's price, risk and greeks carry the TIIE day count, calendar
+  and collateral conventions as `assumed`, whatever curve they ran on.
+- `pricing.linear.annuity_value` and `par_rate_value`, the bare floats.
 - `benchmarks/bench_core.py`: hot-path timings through the public API, run
   before and after a structural change.
 - **`conventions.indices`**: `RateIndex` (currency, tenor, day count,
