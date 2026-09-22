@@ -54,13 +54,13 @@ def _nodes(
     )
 
 
-def _date_nodes(as_of: date, years=tuple(QUOTES)) -> tuple[ParSwapNode, ...]:
+def _date_nodes(as_of: date, years=tuple(QUOTES), lag: int = 0) -> tuple[ParSwapNode, ...]:
     """The same quotes as ``ParSwapNode``s, built the way a caller would:
     the swap's payment dates and accruals, float leg assumed to telescope."""
     nodes = []
     for tenor in years:
         quote = QUOTES[tenor]
-        schedule = _swap(tenor, lag=0, as_of=as_of).schedule
+        schedule = _swap(tenor, lag=lag, as_of=as_of).schedule
         nodes.append(
             ParSwapNode(
                 start=as_of,
@@ -133,22 +133,33 @@ class TestAgainstTheDateNode:
         for a, b in zip(from_swaps.dfs, from_dates.dfs, strict=True):
             assert a == pytest.approx(b, rel=1e-13)
 
-    def test_where_a_date_rolls_only_the_swap_node_reprices_the_swap(self):
-        """The duplication was not harmless. When an anniversary falls on a
-        weekend the payment rolls past the accrual end, the floating leg no
-        longer telescopes, and a curve fitted to ParSwapNodes misprices the
-        very swaps whose quotes it was fitted to. SwapQuoteNode fits the
-        pricer's own formula, so it does not."""
+    def test_without_a_lag_they_agree_even_where_dates_roll(self):
+        """Until v0.4 the schedule left period ends unadjusted while payments
+        rolled, and a rolled date alone cost 1.7 bp on this strip. With ends
+        adjusted like the payments (the SOFR OIS and 2006 ISDA convention)
+        the floating leg telescopes again and the two nodes agree."""
         from_swaps = CurveSet(bootstrap_discount_curve(AS_OF, _nodes(lag=0)).curve)
         from_dates = CurveSet(bootstrap_discount_curve(AS_OF, _date_nodes(AS_OF)).curve)
+        for years, quote in QUOTES.items():
+            assert par_rate(_swap(years, lag=0), from_swaps).value == pytest.approx(quote, abs=1e-12)
+            assert par_rate(_swap(years, lag=0), from_dates).value == pytest.approx(quote, abs=1e-12)
+
+    def test_with_the_ois_payment_lag_only_the_swap_node_reprices_the_swap(self):
+        """ParSwapNode prices the floating leg as P(start) - P(last payment):
+        it assumes each period is paid the day it ends. A SOFR OIS pays two
+        business days later, and a curve fitted to ParSwapNodes built from the
+        swaps' payment dates misprices them by several basis points at the
+        front. SwapQuoteNode fits the pricer's formula, lag included."""
+        from_swaps = CurveSet(bootstrap_discount_curve(AS_OF, _nodes(lag=2)).curve)
+        from_dates = CurveSet(
+            bootstrap_discount_curve(AS_OF, _date_nodes(AS_OF, lag=2)).curve
+        )
         worst_swap = max(
-            abs(par_rate(_swap(y, lag=0), from_swaps).value - q) for y, q in QUOTES.items()
+            abs(par_rate(_swap(y, lag=2), from_swaps).value - q) for y, q in QUOTES.items()
         )
-        worst_date = max(
-            abs(par_rate(_swap(y, lag=0), from_dates).value - q) for y, q in QUOTES.items()
-        )
+        one_year_error_bp = (par_rate(_swap(1, lag=2), from_dates).value - QUOTES[1]) * 1e4
         assert worst_swap < 1e-12
-        assert worst_date > 1e-6  # more than a hundredth of a basis point
+        assert one_year_error_bp < -5.0
 
 
 class TestCurrencyAndProvenance:

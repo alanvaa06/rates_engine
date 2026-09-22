@@ -237,13 +237,22 @@ hedge) once you `project.register` it; a swap-like one also needs
 **Calibrate to a swap with `SwapQuoteNode`, not `ParSwapNode`, when you have
 the swap.** `SwapQuoteNode(swap, quote)` fits the pricer's own par rate, so
 the curve reprices the swap exactly. `ParSwapNode` takes dates and accruals
-and assumes the floating leg telescopes to `P(start) - P(end)`. This
-library's schedules leave accrual ends unadjusted and roll payments, so that
-holds only when no payment date rolls: on a 2026-01-15 strip the curve
-misprices the two-year swap it was fitted to by 1.7 bp. The CLI's
-`par_swaps` block still builds `ParSwapNode`s, because its quotes arrive as
-dates, and the CLI's `price` refuses a non-dollar swap because its curve
-block quotes SOFR instruments. `SwapQuoteNode` takes an OIS only.
+and prices the floating leg as `P(start) - P(last payment)`, which is exact
+only when every period is paid the day it ends. A SOFR OIS pays two business
+days later: a curve fitted to `ParSwapNode`s built from such swaps' payment
+dates misprices the one-year swap by about 5.5 bp. With no payment lag the
+two nodes agree exactly. The CLI's `par_swaps` block still builds
+`ParSwapNode`s, because its quotes arrive as dates, and the CLI's `price`
+refuses a non-dollar swap because its curve block quotes SOFR instruments.
+`SwapQuoteNode` takes an OIS only.
+
+**Accrual periods end on adjusted dates.** Since v0.4 a schedule's period
+ends are rolled by the same convention as its payments (Modified Following
+by default), and the payment falls `payment_lag_days` business days after
+the adjusted end -- the SOFR OIS and 2006 ISDA convention. v0.3 left period
+ends unadjusted, so interest accrued to a Saturday was paid on the Monday.
+`Schedule.generate(..., adjust_accrual_ends=False)` reproduces the old
+schedule.
 
 **Nothing here reads the network except `market.providers.fred`,** and that
 imports `urllib` inside the call. Importing `rates_engine` opens no socket and

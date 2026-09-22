@@ -79,12 +79,12 @@ print(f"net at -100bp    {worst.net_pnl:,.0f} USD ({worst.net_per_dv01_bp:.2f} b
 ```text
 worst residual   5.97e-12 bp
 data quality     observed
-par rate         4.0539%
-DV01             -21,870.88 USD/bp
-key rates sum to -21,870.88 USD/bp
+par rate         4.0537%
+DV01             -21,870.07 USD/bp
+key rates sum to -21,870.07 USD/bp
 SR3 contracts    878.0
 hedge ratio      -1.000000
-net at -100bp    -31,289 USD (-1.39 bp)
+net at -100bp    -31,288 USD (-1.39 bp)
 ```
 
 That output is verified by `tests/test_readme_quickstart.py`, which runs every

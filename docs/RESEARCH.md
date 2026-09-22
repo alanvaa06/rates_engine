@@ -10,6 +10,7 @@ of claim, and a reader deserves to know which one they are getting.
 
 | What | Where it lives | Source | Read? |
 | --- | --- | --- | --- |
+| Accrual period ends adjusted Modified Following, payment two business days after | `conventions/schedule.py` | CME Eris SOFR Swap Futures rulebook (chapter 62) and ISDA, *Key Changes in the 2021 ISDA Interest Rate Derivatives Definitions* (2006 default) | Secondary: read through search summaries; the CME PDFs did not load |
 | SR1 settlement: arithmetic average of daily SOFR, ACT/360 | `instruments/futures.py` | CME contract definition, via the vault note *SOFR Futures — Pricing, Convexity and Hedging Swaps* | Secondary |
 | SR3 settlement: daily compounded SOFR between IMM dates, ACT/360 | `instruments/futures.py` | Same | Secondary |
 | Non-publication days repeat the last published rate | `market/snapshot.py` | CME and New York Fed rule, via the same note | Secondary |
