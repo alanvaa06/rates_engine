@@ -26,10 +26,11 @@ from dataclasses import dataclass
 from datetime import date
 from typing import TYPE_CHECKING, Any
 
-from rates_engine.conventions.daycount import DayCount, year_fraction
+from rates_engine.conventions.daycount import CURVE_TIME_BASIS, DayCount, year_fraction
+from rates_engine.conventions.indices import RateIndex
 from rates_engine.conventions.option_kind import OptionKind
 from rates_engine.conventions.side import Side
-from rates_engine.curves.discount import CURVE_TIME_BASIS
+from rates_engine.core.money import Currency
 from rates_engine.instruments.swaps import IRSwap, OISSwap
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -70,6 +71,16 @@ class Swaption:
                 f"at {self.underlying.effective}; a swaption cannot be exercised into a "
                 "swap that has already begun accruing"
             )
+
+    @property
+    def rate_index(self) -> RateIndex:
+        """The underlying swap's floating index."""
+        return self.underlying.rate_index
+
+    @property
+    def currency(self) -> Currency:
+        """The currency of the underlying swap."""
+        return self.underlying.currency
 
     @property
     def kind(self) -> OptionKind:

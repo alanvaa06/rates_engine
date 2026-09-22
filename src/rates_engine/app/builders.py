@@ -13,13 +13,14 @@ from datetime import date, timedelta
 from typing import Any
 
 from rates_engine.app.config import as_date
-from rates_engine.conventions.daycount import year_fraction
+from rates_engine.conventions.daycount import CURVE_TIME_BASIS, year_fraction
+from rates_engine.conventions.indices import SOFR, index_named
 from rates_engine.conventions.side import Side
 from rates_engine.core.errors import ConfigurationError
 from rates_engine.core.evidence import DataQuality, Provenance
 from rates_engine.core.money import Currency
 from rates_engine.curves.bootstrap import FuturesNode, ParSwapNode, RealizedStubNode
-from rates_engine.curves.discount import CURVE_TIME_BASIS, DiscountCurve
+from rates_engine.curves.discount import DiscountCurve
 from rates_engine.instruments.swaps import OISSwap
 from rates_engine.models.convexity import ConvexityModel, convexity_adjustment
 
@@ -106,7 +107,14 @@ def ois_swap(config: dict[str, Any]) -> OISSwap:
         config: The whole configuration mapping.
 
     Returns:
-        The swap, with notional in currency units and rates as decimals.
+        The swap, with notional in currency units and rates as decimals. An
+        optional ``index`` names the overnight rate it floats on (``"SOFR"``
+        by default, or ``"TIIE_FONDEO"``); the index fixes its currency and
+        calendar.
+
+    Raises:
+        UnsupportedConventionError: ``index`` names no defined rate, or a term
+            rate.
     """
     spec = config["swap"]
     return OISSwap(
@@ -117,6 +125,7 @@ def ois_swap(config: dict[str, Any]) -> OISSwap:
         side=str(spec.get("side", Side.PAYER)),
         frequency_months=int(spec.get("frequency_months", 12)),
         payment_lag_days=int(spec.get("payment_lag_days", 2)),
+        index=index_named(str(spec.get("index", SOFR.name))),
     )
 
 

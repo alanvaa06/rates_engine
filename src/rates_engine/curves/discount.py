@@ -24,17 +24,13 @@ from dataclasses import dataclass
 from datetime import date
 from functools import cached_property
 
-from rates_engine.conventions.daycount import DayCount, year_fraction
+from rates_engine.conventions.daycount import CURVE_TIME_BASIS, DayCount, year_fraction
 from rates_engine.core.errors import CurveArbitrageError, UnsupportedConventionError
 from rates_engine.core.evidence import Degradation
 from rates_engine.core.money import Currency, require_same_currency
 from rates_engine.curves.interpolation import MonotoneConvex
 
-__all__ = ["DiscountCurve", "CurveSet", "CURVE_TIME_BASIS"]
-
-CURVE_TIME_BASIS = DayCount.ACT_365F
-"""The curve's internal time axis. Deliberately not a money-market basis: the
-interpolation variable should not inherit ACT/360's 365/360 stretch."""
+__all__ = ["DiscountCurve", "CurveSet"]
 
 _COMPOUNDING = ("continuous", "annual", "simple")
 

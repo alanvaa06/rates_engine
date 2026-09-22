@@ -14,7 +14,12 @@ from rates_engine.core.errors import MissingForwardError
 from rates_engine.instruments.capfloor import CapFloor
 from rates_engine.instruments.swaps import IRSwap
 from rates_engine.pricing.linear import pv
-from rates_engine.pricing.options import cap_floor_pv, caplet_pv
+from rates_engine.pricing.options import (
+    cap_floor_pv,
+    caplet_forward_rate,
+    caplet_numeraire,
+    caplet_pv,
+)
 from rates_engine.risk.greeks import option_greeks
 from rates_engine.volatility.units import Volatility
 
@@ -98,7 +103,7 @@ class TestZeroStrikeLimit:
             for k in (1e-2, 1e-4, 1e-6, 1e-9)
         ]
         floating = sum(
-            c.numeraire(option_curve_set) * c.forward_rate(option_curve_set)
+            caplet_numeraire(c, option_curve_set) * caplet_forward_rate(c, option_curve_set)
             for c in cap.caplets
         )
         assert values == sorted(values)
@@ -109,7 +114,7 @@ class TestZeroStrikeLimit:
     ):
         cap, _ = _pair(strike=0.0)
         caplet = cap.caplets[0]
-        expected = caplet.numeraire(option_curve_set) * caplet.forward_rate(option_curve_set)
+        expected = caplet_numeraire(caplet, option_curve_set) * caplet_forward_rate(caplet, option_curve_set)
         assert caplet_pv(
             caplet, option_curve_set, Volatility.lognormal_percent(20.0)
         ) == pytest.approx(expected, rel=1e-12)

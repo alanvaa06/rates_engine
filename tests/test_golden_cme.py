@@ -30,12 +30,12 @@ from datetime import date, timedelta
 import pytest
 from conftest import require_published
 
-from rates_engine.conventions.daycount import year_fraction
+from rates_engine.conventions.daycount import CURVE_TIME_BASIS, year_fraction
 from rates_engine.conventions.schedule import next_imm_on_or_after
 from rates_engine.conventions.side import Side
 from rates_engine.core.evidence import DataQuality
 from rates_engine.curves.bootstrap import FuturesNode, RealizedStubNode, bootstrap_discount_curve
-from rates_engine.curves.discount import CURVE_TIME_BASIS, CurveSet
+from rates_engine.curves.discount import CurveSet
 from rates_engine.hedging.futures_strip import shock_table, strip_hedge
 from rates_engine.instruments.swaps import OISSwap
 from rates_engine.models.convexity import ConvexityModel, convexity_adjustment

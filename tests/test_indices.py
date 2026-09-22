@@ -39,14 +39,19 @@ def _curve(currency: Currency, rate: float = 0.05) -> DiscountCurve:
     return DiscountCurve(AS_OF, nodes, dfs, currency=currency)
 
 
-def _swap() -> OISSwap:
+def _swap(index=SOFR) -> OISSwap:
     return OISSwap(
         effective=AS_OF + timedelta(days=30),
         maturity=AS_OF + timedelta(days=730),
         fixed_rate=0.05,
         notional=1_000_000.0,
         side=Side.PAYER,
+        index=index,
     )
+
+
+def _peso_swap() -> OISSwap:
+    return _swap(TIIE_FONDEO)
 
 
 class TestTheRegistry:
@@ -85,22 +90,24 @@ class TestTheEvidenceNamesTheRightCurve:
         )
 
     def test_a_peso_price_no_longer_claims_sofr(self):
-        fields = pv(_swap(), CurveSet(_curve(Currency.MXN))).evidence.fields
+        fields = pv(_peso_swap(), CurveSet(_curve(Currency.MXN))).evidence.fields
         assert fields["discounting"] == "collateral_rate_ois_tiie_fondeo"
         assert "SOFR" not in fields["discounting_note"]
         assert "TIIE de Fondeo" in fields["discounting_note"]
 
-    def test_the_swap_does_not_name_an_index_the_curve_contradicts(self):
-        """The OIS floats on the discount curve's own overnight rate, so the
-        instrument says 'overnight' and the discounting field says which."""
-        fields = pv(_swap(), CurveSet(_curve(Currency.MXN))).evidence.fields
-        assert fields["instrument"]["float_index"] == "compounded_overnight"
+    def test_the_swap_names_its_own_index(self):
+        """The swap carries its index, so its evidence names it -- and for a
+        dollar swap that is the v0.3 label, byte for byte."""
+        peso = pv(_peso_swap(), CurveSet(_curve(Currency.MXN))).evidence.fields
+        dollar = pv(_swap(), CurveSet(_curve(Currency.USD))).evidence.fields
+        assert peso["instrument"]["float_index"] == "compounded_tiie_fondeo"
+        assert dollar["instrument"]["float_index"] == "compounded_sofr"
 
     @pytest.mark.parametrize("measure", [pv, par_rate, dv01])
     def test_the_collateral_assumption_reaches_the_quality(self, measure):
         """A hand-built peso curve carries no provenance of its own; the
         assumption about peso collateral has to arrive anyway."""
-        result = measure(_swap(), CurveSet(_curve(Currency.MXN)))
+        result = measure(_peso_swap(), CurveSet(_curve(Currency.MXN)))
         codes = {w.code for w in result.evidence.warnings}
         assert "unresolved_convention:mxn_collateral_rate" in codes
         assert result.evidence.worst_quality is DataQuality.ASSUMED
@@ -122,17 +129,27 @@ class TestTheEvidenceNamesTheRightCurve:
         curve = DiscountCurve(
             base.as_of, base.nodes, base.dfs, currency=Currency.MXN, provenance=(carried,)
         )
-        warnings = pv(_swap(), CurveSet(curve)).evidence.warnings
+        warnings = pv(_peso_swap(), CurveSet(curve)).evidence.warnings
         matching = [w for w in warnings if w.code == carried.code]
         assert len(matching) == 1
         assert matching[0].message == "from the curve"
 
-    def test_the_numbers_do_not_depend_on_the_label(self):
-        """Relabelling the evidence must not move a price: the same discount
-        factors in either currency give the same value."""
-        usd = pv(_swap(), CurveSet(_curve(Currency.USD))).value
-        mxn = pv(_swap(), CurveSet(_curve(Currency.MXN))).value
-        assert usd == mxn
+    def test_the_index_assumptions_reach_the_price(self):
+        """A peso swap accrues and rolls on conventions this build could not
+        verify. They are the index's, so they arrive even on a curve that
+        carries no provenance of its own."""
+        codes = {
+            w.code
+            for w in pv(_peso_swap(), CurveSet(_curve(Currency.MXN))).evidence.warnings
+        }
+        for name in TIIE_FONDEO.unresolved:
+            assert f"unresolved_convention:{name}" in codes
+
+    def test_a_dollar_swap_on_a_peso_curve_refuses(self):
+        from rates_engine.core.errors import CurrencyMismatchError
+
+        with pytest.raises(CurrencyMismatchError):
+            pv(_swap(), CurveSet(_curve(Currency.MXN)))
 
 
 class TestTheAssumptionReachesEveryMeasure:
@@ -160,21 +177,24 @@ class TestTheAssumptionReachesEveryMeasure:
             money_convexity,
         )
 
-        curves, swap = self._peso(option_curve), _swap()
+        curves, swap = self._peso(option_curve), _peso_swap()
         self._assumed(key_rate_dv01(swap, curves, (1.0, 2.0)))
         self._assumed(key_rate_duration(swap, curves, (1.0, 2.0)))
         self._assumed(money_convexity(swap, curves))
         self._assumed(effective_duration(swap, curves))
 
     def test_options_and_greeks(self, option_curve, atm_swaption):
+        from dataclasses import replace
+
         from rates_engine.pricing.options import swaption_pv
         from rates_engine.risk.greeks import option_greeks
         from rates_engine.volatility.units import Volatility, VolUnits
 
         curves = self._peso(option_curve)
         vol = Volatility(90.0, VolUnits.NORMAL_BP)
-        self._assumed(swaption_pv(atm_swaption, curves, vol))
-        self._assumed(option_greeks(atm_swaption, curves, vol))
+        peso = replace(atm_swaption, underlying=replace(atm_swaption.underlying, index=TIIE_FONDEO))
+        self._assumed(swaption_pv(peso, curves, vol))
+        self._assumed(option_greeks(peso, curves, vol))
 
     def test_a_proxied_dollar_curve_reaches_the_risk_too(self, option_curve):
         """The same gap applied to any curve provenance, not just pesos."""

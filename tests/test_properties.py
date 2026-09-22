@@ -16,11 +16,11 @@ import pytest
 from hypothesis import HealthCheck, assume, given, settings
 from hypothesis import strategies as st
 
-from rates_engine.conventions.daycount import DayCount, year_fraction
+from rates_engine.conventions.daycount import CURVE_TIME_BASIS, DayCount, year_fraction
 from rates_engine.conventions.schedule import imm_date, next_imm_on_or_after
 from rates_engine.conventions.side import Side
 from rates_engine.curves.bootstrap import FuturesNode, RealizedStubNode, bootstrap_discount_curve
-from rates_engine.curves.discount import CURVE_TIME_BASIS, CurveSet, DiscountCurve
+from rates_engine.curves.discount import CurveSet, DiscountCurve
 from rates_engine.curves.views import par_curve
 from rates_engine.instruments.swaps import OISSwap
 from rates_engine.pricing.linear import par_rate, pv

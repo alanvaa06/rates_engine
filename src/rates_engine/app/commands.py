@@ -16,7 +16,7 @@ from typing import Any
 from rates_engine.app.builders import calibration_nodes, flat_curve, fx_inputs, ois_swap
 from rates_engine.app.config import as_date, require_config
 from rates_engine.conventions.currency_pair import USDMXN
-from rates_engine.conventions.indices import UNRESOLVED_MXN
+from rates_engine.conventions.indices import INDICES, UNRESOLVED_MXN
 from rates_engine.core.errors import ConfigurationError, UndefinedDurationError
 from rates_engine.core.errors import __all__ as EXCEPTION_NAMES
 from rates_engine.core.money import Currency
@@ -131,6 +131,7 @@ def describe(_config: dict[str, Any] | None) -> dict[str, Any]:
         "currencies": [c.value for c in Currency],
         "day_counts": ["ACT/360", "ACT/365F", "30/360"],
         "calendars": ["SIFMA_US"],
+        "rate_indices": sorted(INDICES),
         "interpolation": ["log_linear_df", "monotone_convex"],
         "convexity_models": ["none", "ho_lee", "hull_white"],
         "option_models": ["bachelier", "black"],
@@ -223,11 +224,16 @@ def price(config: dict[str, Any] | None) -> dict[str, Any]:
     config = require_config(config, "price")
     as_of = as_date(config["as_of"])
     instruments = calibration_nodes(config, as_of)
+    swap = ois_swap(config)
+    # The curve is in the swap's currency: a TIIE de Fondeo swap is priced on
+    # a peso curve built from the same quotes, not relabelled onto a dollar one.
     boot = bootstrap_discount_curve(
-        as_of, instruments, long_end_source=(config.get("curve") or {}).get("long_end_source")
+        as_of,
+        instruments,
+        long_end_source=(config.get("curve") or {}).get("long_end_source"),
+        currency=swap.currency,
     )
     curve_set = CurveSet(boot.curve)
-    swap = ois_swap(config)
     sources = (boot.evidence,)
 
     value = pv(swap, curve_set, source_evidence=sources)

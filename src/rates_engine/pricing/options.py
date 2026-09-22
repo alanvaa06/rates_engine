@@ -21,16 +21,19 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
+from rates_engine.core.errors import MissingForwardError
 from rates_engine.core.evidence import Evidence
 from rates_engine.core.results import EngineResult
 from rates_engine.curves.discount import CurveSet
 from rates_engine.instruments.capfloor import CapFloor, Caplet
 from rates_engine.instruments.swaption import Swaption
 from rates_engine.models import bachelier, black
-from rates_engine.pricing.collateral import curve_warnings, discounting_fields
+from rates_engine.pricing.collateral import discounting_fields, valuation_warnings
 from rates_engine.volatility.units import Volatility
 
 __all__ = [
+    "caplet_forward_rate",
+    "caplet_numeraire",
     "OptionPriceResult",
     "model_for",
     "forward_swap_rate",
@@ -74,6 +77,44 @@ def swaption_annuity(swaption: Swaption, curve_set: CurveSet) -> float:
     from rates_engine.pricing.linear import annuity as leg_annuity
 
     return leg_annuity(swaption.underlying, curve_set).value * swaption.notional
+
+
+def caplet_forward_rate(caplet: Caplet, curve_set: CurveSet) -> float:
+    """The projected rate for one caplet's period, as a decimal.
+
+    Args:
+        caplet: The period.
+        curve_set: Discount and projection curves.
+
+    Returns:
+        The forward from the projection curve, on the caplet's day count.
+
+    Raises:
+        MissingForwardError: The period ends past the projection curve's last
+            node, where a forward would be extrapolated rather than implied.
+    """
+    projection = curve_set.projection
+    if caplet.accrual_end > projection.nodes[-1]:
+        raise MissingForwardError(
+            f"the caplet over {caplet.accrual_start} to {caplet.accrual_end} ends past the "
+            f"projection curve's last node {projection.nodes[-1]}. The curve would "
+            "extrapolate a flat forward there; for a discount factor that is a "
+            "convention, for an option it is a rate the market never quoted."
+        )
+    return projection.forward(caplet.accrual_start, caplet.accrual_end, day_count=caplet.day_count)
+
+
+def caplet_numeraire(caplet: Caplet, curve_set: CurveSet) -> float:
+    """The discounted accrual one caplet's payoff is scaled by.
+
+    Args:
+        caplet: The period.
+        curve_set: Discount and projection curves.
+
+    Returns:
+        ``notional * year_fraction * P(payment)``, in the caplet's currency.
+    """
+    return caplet.notional * caplet.year_fraction * curve_set.discount.df(caplet.payment)
 
 
 def model_for(volatility: Volatility) -> str:
@@ -179,7 +220,7 @@ def _evidence(
             **extra,
         },
         sources=sources,
-        warnings=curve_warnings(curve_set),
+        warnings=valuation_warnings(instrument, curve_set),
     )
 
 
@@ -261,18 +302,17 @@ def caplet_pv(
     Raises:
         MissingForwardError: The period ends past the projection curve.
     """
-    from rates_engine.conventions.daycount import year_fraction
-    from rates_engine.curves.discount import CURVE_TIME_BASIS
+    from rates_engine.conventions.daycount import CURVE_TIME_BASIS, year_fraction
 
     valuation = as_of or curve_set.as_of
     expiry = max(year_fraction(valuation, caplet.accrual_start, CURVE_TIME_BASIS), 0.0)
     return _price(
         volatility,
-        caplet.forward_rate(curve_set),
+        caplet_forward_rate(caplet, curve_set),
         caplet.strike,
         expiry,
         caplet.kind,
-        caplet.numeraire(curve_set),
+        caplet_numeraire(caplet, curve_set),
     )
 
 
@@ -310,11 +350,10 @@ def cap_floor_pv(
     if not caplets:
         raise ValueError("a cap with no periods has nothing to price")
     values = [caplet_pv(c, curve_set, volatility, as_of=valuation) for c in caplets]
-    forwards = [c.forward_rate(curve_set) for c in caplets]
-    numeraires = [c.numeraire(curve_set) for c in caplets]
+    forwards = [caplet_forward_rate(c, curve_set) for c in caplets]
+    numeraires = [caplet_numeraire(c, curve_set) for c in caplets]
 
-    from rates_engine.conventions.daycount import year_fraction
-    from rates_engine.curves.discount import CURVE_TIME_BASIS
+    from rates_engine.conventions.daycount import CURVE_TIME_BASIS, year_fraction
 
     expiries = [
         max(year_fraction(valuation, c.accrual_start, CURVE_TIME_BASIS), 0.0) for c in caplets

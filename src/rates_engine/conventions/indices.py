@@ -41,6 +41,13 @@ __all__ = [
     "SOFR",
     "TIIE_FONDEO",
     "TIIE_28",
+    "TERM_SOFR_1M",
+    "TERM_SOFR_3M",
+    "TERM_SOFR_6M",
+    "TERM_SOFR_12M",
+    "INDICES",
+    "index_named",
+    "term_sofr",
     "COLLATERAL_INDEX",
     "collateral_index",
     "TIIE_PERIOD_DAYS",
@@ -112,10 +119,22 @@ class IndexTenor(StrEnum):
         One business day, compounded over a period: SOFR, TIIE de Fondeo.
     ``TERM_28D``
         A 28-day term rate known at the start of its period: TIIE 28.
+    ``TERM_1M``, ``TERM_3M``, ``TERM_6M``, ``TERM_12M``
+        A term rate for that many months, known at the start of its period:
+        Term SOFR.
     """
 
     OVERNIGHT = "overnight"
     TERM_28D = "28d"
+    TERM_1M = "1m"
+    TERM_3M = "3m"
+    TERM_6M = "6m"
+    TERM_12M = "12m"
+
+    @property
+    def months(self) -> int | None:
+        """The tenor in months, or ``None`` for overnight and day-count tenors."""
+        return {"1m": 1, "3m": 3, "6m": 6, "12m": 12}.get(self.value)
 
 
 @dataclass(frozen=True)
@@ -201,6 +220,78 @@ TIIE_28 = RateIndex(
     ),
 )
 """The historical 28-day interbank rate."""
+
+
+def _term_sofr(tenor: IndexTenor) -> RateIndex:
+    return RateIndex(
+        name=f"TERM_SOFR_{tenor.value.upper()}",
+        label=f"Term SOFR {tenor.value.upper()}",
+        slug=f"term_sofr_{tenor.value}",
+        currency=Currency.USD,
+        tenor=tenor,
+        day_count=DayCount.ACT_360,
+        calendar=SIFMA_US,
+        administrator="CME Group Benchmark Administration",
+    )
+
+
+TERM_SOFR_1M = _term_sofr(IndexTenor.TERM_1M)
+"""CME Term SOFR, one month."""
+TERM_SOFR_3M = _term_sofr(IndexTenor.TERM_3M)
+"""CME Term SOFR, three months: the default floating index of an IRS here."""
+TERM_SOFR_6M = _term_sofr(IndexTenor.TERM_6M)
+"""CME Term SOFR, six months."""
+TERM_SOFR_12M = _term_sofr(IndexTenor.TERM_12M)
+"""CME Term SOFR, twelve months."""
+
+INDICES: dict[str, RateIndex] = {
+    index.name: index
+    for index in (
+        SOFR, TIIE_FONDEO, TIIE_28, TERM_SOFR_1M, TERM_SOFR_3M, TERM_SOFR_6M, TERM_SOFR_12M
+    )
+}
+"""Every index this build defines, by :attr:`RateIndex.name`."""
+
+
+def index_named(name: str) -> RateIndex:
+    """The index registered under ``name``.
+
+    Args:
+        name: A key of :data:`INDICES`, e.g. ``"TIIE_FONDEO"``.
+
+    Returns:
+        The index.
+
+    Raises:
+        UnsupportedConventionError: No index has that name.
+    """
+    try:
+        return INDICES[name]
+    except KeyError:
+        raise UnsupportedConventionError(
+            f"no rate index named {name!r}; defined: {', '.join(sorted(INDICES))}"
+        ) from None
+
+
+def term_sofr(months: int) -> RateIndex:
+    """The Term SOFR index of a tenor in months.
+
+    Args:
+        months: 1, 3, 6 or 12.
+
+    Returns:
+        The index.
+
+    Raises:
+        UnsupportedConventionError: CME publishes no Term SOFR of that tenor.
+    """
+    for index in (TERM_SOFR_1M, TERM_SOFR_3M, TERM_SOFR_6M, TERM_SOFR_12M):
+        if index.tenor.months == months:
+            return index
+    raise UnsupportedConventionError(
+        f"no Term SOFR is published for {months} months; CME publishes 1, 3, 6 and 12"
+    )
+
 
 COLLATERAL_INDEX: dict[Currency, RateIndex] = {
     Currency.USD: SOFR,

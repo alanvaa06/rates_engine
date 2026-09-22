@@ -14,14 +14,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
-from typing import TYPE_CHECKING
 
 from rates_engine.conventions.daycount import DayCount, year_fraction
-from rates_engine.conventions.side import Side, fixed_leg_sign
-from rates_engine.instruments.cashflow import Cashflow
-
-if TYPE_CHECKING:  # pragma: no cover - import for typing only, avoids a cycle
-    from rates_engine.curves.discount import CurveSet
+from rates_engine.conventions.indices import TERM_SOFR_3M, RateIndex
+from rates_engine.conventions.side import Side
+from rates_engine.core.money import Currency
 
 __all__ = ["FRA"]
 
@@ -30,13 +27,18 @@ __all__ = ["FRA"]
 class FRA:
     """A single-period forward rate agreement settled at the period end.
 
+    Terms only. The fair rate and the settlement flow come from
+    :mod:`rates_engine.pricing.projection` (``fra_fair_rate``, ``project``).
+
     Attributes:
         start: Start of the reference period.
         end: End of it.
         rate: Contract rate as a decimal.
-        notional: Notional in USD.
+        notional: Notional in the index's currency.
         side: ``"payer"`` pays the fixed rate and receives the index.
         day_count: Accrual basis for the period.
+        index: The term rate the contract settles against; it fixes the
+            currency. Term SOFR 3M by default.
     """
 
     start: date
@@ -45,6 +47,17 @@ class FRA:
     notional: float = 1_000_000.0
     side: str = Side.PAYER
     day_count: DayCount = DayCount.ACT_360
+    index: RateIndex = TERM_SOFR_3M
+
+    @property
+    def rate_index(self) -> RateIndex:
+        """The index settled against; every instrument answers this alike."""
+        return self.index
+
+    @property
+    def currency(self) -> Currency:
+        """The settlement currency, from :attr:`index`."""
+        return self.index.currency
 
     @property
     def span(self) -> tuple[date, date]:
@@ -56,35 +69,6 @@ class FRA:
         """Reference period length in years, on :attr:`day_count`."""
         return year_fraction(self.start, self.end, self.day_count)
 
-    def fair_rate(self, curve_set: CurveSet) -> float:
-        """The rate that makes the contract worth zero, from the projection curve.
-
-        Args:
-            curve_set: Discount and projection curves.
-
-        Returns:
-            The fair rate as a decimal.
-        """
-        return curve_set.projection.forward(self.start, self.end, day_count=self.day_count)
-
-    def cashflows(self, curve_set: CurveSet) -> tuple[Cashflow, ...]:
-        """The single settlement, signed for :attr:`side`."""
-        sign = -fixed_leg_sign(self.side)
-        projected = self.fair_rate(curve_set)
-        tau = self.year_fraction
-        return (
-            Cashflow(
-                payment_date=self.end,
-                amount=sign * self.notional * (projected - self.rate) * tau,
-                leg="float",
-                accrual_start=self.start,
-                accrual_end=self.end,
-                year_fraction=tau,
-                rate=projected,
-                currency=curve_set.currency,
-            ),
-        )
-
     def describe(self) -> dict[str, object]:
         """Terms of the FRA, for the evidence record."""
         return {
@@ -95,4 +79,5 @@ class FRA:
             "notional": self.notional,
             "side": self.side,
             "day_count": self.day_count.value,
+            "index": self.index.name,
         }

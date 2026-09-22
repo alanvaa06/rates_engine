@@ -46,13 +46,10 @@ LAYERS: tuple[frozenset[str], ...] = (
 LAYER_OF: dict[str, int] = {name: index for index, layer in enumerate(LAYERS) for name in layer}
 
 #: Edges that break the rules today, each with the reason and the fix.
-SAME_LAYER_EXCEPTIONS: dict[tuple[str, str], str] = {
-    ("instruments", "curves"): (
-        "Linear instruments project their own floating cashflows from a CurveSet. "
-        "Removed when projection moves into rates_engine.pricing "
-        "(ARCHITECTURE.md §8.2)."
-    ),
-}
+SAME_LAYER_EXCEPTIONS: dict[tuple[str, str], str] = {}
+"""Empty since v0.4. The last entry, ``instruments -> curves``, went when
+cashflow projection moved into :mod:`rates_engine.pricing.projection`; a new
+entry needs its reason and the work that removes it."""
 
 
 def _top_level(path: Path) -> str:

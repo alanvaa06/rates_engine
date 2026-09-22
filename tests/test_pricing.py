@@ -14,6 +14,7 @@ from rates_engine.curves.discount import CurveSet, DiscountCurve
 from rates_engine.instruments.fra import FRA
 from rates_engine.instruments.swaps import IRSwap, OISSwap
 from rates_engine.pricing.linear import annuity, par_rate, pv
+from rates_engine.pricing.projection import float_leg, fra_fair_rate
 from rates_engine.risk.sensitivities import dv01
 
 
@@ -40,7 +41,7 @@ class TestParPricesAtZero:
         payer = replace(par_swap, side=Side.PAYER)
         float_pv = sum(
             flow.amount * curve_set.discount.df(flow.payment_date)
-            for flow in payer.float_cashflows(curve_set)
+            for flow in float_leg(payer, curve_set)
         )
         expected = float_pv / (par_swap.notional * annuity(par_swap, curve_set).value)
         assert par_rate(par_swap, curve_set).value == pytest.approx(expected, rel=1e-15)
@@ -157,7 +158,7 @@ class TestFRA:
         start = as_of + timedelta(days=365)
         end = start + timedelta(days=91)
         fra = FRA(start=start, end=end, rate=0.04)
-        fair = fra.fair_rate(CurveSet(discount, projection))
+        fair = fra_fair_rate(fra, CurveSet(discount, projection))
         assert fair != pytest.approx(
             discount.forward(start, end, day_count=DayCount.ACT_360), rel=1e-6
         )
@@ -170,10 +171,10 @@ class TestFRA:
         start = as_of + timedelta(days=365)
         end = start + timedelta(days=91)
         fra = FRA(start=start, end=end, rate=0.04)
-        assert fra.fair_rate(CurveSet(discount, discount)) == pytest.approx(
-            fra.fair_rate(CurveSet(discount)), rel=1e-15
+        assert fra_fair_rate(fra, CurveSet(discount, discount)) == pytest.approx(
+            fra_fair_rate(fra, CurveSet(discount)), rel=1e-15
         )
-        assert fra.fair_rate(CurveSet(discount)) == pytest.approx(
+        assert fra_fair_rate(fra, CurveSet(discount)) == pytest.approx(
             discount.forward(start, end, day_count=DayCount.ACT_360), rel=1e-15
         )
 
@@ -182,7 +183,7 @@ class TestFRA:
         start = as_of + timedelta(days=365)
         end = start + timedelta(days=91)
         provisional = FRA(start=start, end=end, rate=0.0)
-        fra = FRA(start=start, end=end, rate=provisional.fair_rate(curve_set))
+        fra = FRA(start=start, end=end, rate=fra_fair_rate(provisional, curve_set))
         assert abs(pv(fra, curve_set).value) < 1e-9 * fra.notional
 
     def test_payer_and_receiver_mirror(self, as_of):

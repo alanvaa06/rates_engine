@@ -36,7 +36,8 @@ from rates_engine.curves.bootstrap import (
 )
 from rates_engine.curves.discount import CurveSet
 from rates_engine.instruments.futures import BASIS_POINT, SR3_CONTRACT_TENOR, SR3_NOTIONAL
-from rates_engine.pricing.linear import Priceable, discounted_value
+from rates_engine.pricing.linear import discounted_value
+from rates_engine.pricing.projection import Priceable
 from rates_engine.risk.bumps import shifted as shift_curves
 from rates_engine.risk.sensitivities import dv01
 

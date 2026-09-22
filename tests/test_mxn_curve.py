@@ -173,34 +173,18 @@ class TestTheBootstrapArithmetic:
     def test_it_is_deterministic(self):
         assert _curve().curve.dfs == _curve().curve.dfs
 
-    def test_a_peso_curve_will_not_discount_a_dollar_flow(self):
-        """The currency carried in phase 0, doing its job on a real curve."""
+    def test_a_peso_curve_will_not_discount_a_dollar_swap(self):
+        """The currency carried in phase 0, doing its job on a real curve and
+        a real instrument: a SOFR swap is a dollar swap, whatever it is
+        priced on."""
         from rates_engine.core.errors import CurrencyMismatchError
-        from rates_engine.instruments.cashflow import Cashflow
+        from rates_engine.instruments.swaps import OISSwap
         from rates_engine.pricing.linear import pv
 
-        flow = Cashflow(
-            payment_date=AS_OF + timedelta(days=28),
-            amount=1.0,
-            leg="fixed",
-            accrual_start=AS_OF,
-            accrual_end=AS_OF + timedelta(days=28),
-            year_fraction=28 / 360,
-            currency=Currency.USD,
-        )
-
-        class _One:
-            span = (AS_OF, AS_OF + timedelta(days=28))
-
-            def cashflows(self, curve_set):
-                del curve_set
-                return (flow,)
-
-            def describe(self):
-                return {"kind": "probe"}
-
+        curve = _curve().curve
+        swap = OISSwap(effective=curve.nodes[0], maturity=curve.nodes[-1], fixed_rate=0.09)
         with pytest.raises(CurrencyMismatchError):
-            pv(_One(), CurveSet(_curve().curve))
+            pv(swap, CurveSet(curve))
 
 
 class TestTheBenchmarkIsAlwaysNamed:
