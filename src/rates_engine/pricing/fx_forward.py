@@ -50,15 +50,15 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
-from rates_engine.curves.discount import DiscountCurve
-from rates_engine.errors import (
+from rates_engine.conventions.currency_pair import CurrencyPair
+from rates_engine.core.errors import (
     CurrencyMismatchError,
     CurveMismatchError,
     ImplausibleInputError,
 )
-from rates_engine.evidence import Evidence
-from rates_engine.fx.quote import CurrencyPair
-from rates_engine.results import EngineResult
+from rates_engine.core.evidence import Evidence
+from rates_engine.core.results import EngineResult
+from rates_engine.curves.discount import DiscountCurve
 
 __all__ = [
     "BASIS_LEG",

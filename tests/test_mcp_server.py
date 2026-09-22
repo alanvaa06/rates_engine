@@ -25,8 +25,11 @@ from pathlib import Path
 import pytest
 
 from rates_engine import cli, mcp_server
-from rates_engine.conventions import imm_date, next_imm_on_or_after
-from rates_engine.errors import (
+from rates_engine.conventions.schedule import (
+    imm_date,
+    next_imm_on_or_after,
+)
+from rates_engine.core.errors import (
     ConfigurationError,
     CurveArbitrageError,
     IncompatibleDependencyError,

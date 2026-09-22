@@ -17,16 +17,19 @@ import math
 
 import pytest
 
-from rates_engine.errors import DeltaConventionError, RatesEngineError
-from rates_engine.fx import garman_kohlhagen as gk
-from rates_engine.fx.delta import (
+from rates_engine.conventions.option_kind import OptionKind
+from rates_engine.core.errors import (
+    DeltaConventionError,
+    RatesEngineError,
+)
+from rates_engine.models import garman_kohlhagen as gk
+from rates_engine.models.fx_delta import (
     DeltaBasis,
     DeltaConvention,
     PremiumAdjustment,
     delta,
     strike_from_delta,
 )
-from rates_engine.volatility.kinds import OptionKind
 
 SPOT = 18.50
 EXPIRY = 0.25

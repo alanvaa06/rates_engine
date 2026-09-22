@@ -165,7 +165,7 @@ point on them.
 is what every v1 and v2 object already was. Discounting a flow on a curve
 of another currency raises `CurrencyMismatchError` before any arithmetic.
 There is no conversion here at all: that needs a spot rate, a date and a
-quoting convention, and `rates_engine.fx` is where those are stated.
+quoting convention, and `rates_engine.pricing.fx_forward` is where those are stated.
 
 **`holidays(year)` returns dates observed *for* that year, not dates *in*
 it.** With New Year's Day on a Saturday, the observed holiday is 31
@@ -196,7 +196,7 @@ whose provenance says `data_quality="proxy"` raises
 **`Evidence` is nested, not flat.** `evidence.sources` holds the evidence of
 the inputs, so `hedge.evidence.sources[0].sources[0]` is the bootstrap. Read
 the summary with `evidence.worst_quality` or
-`rates_engine.diagnostics.quality_report(evidence)` rather than walking it by
+`rates_engine.core.diagnostics.quality_report(evidence)` rather than walking it by
 hand.
 
 **Constructing a curve with rising discount factors is allowed.** Negative
@@ -214,29 +214,31 @@ installs no warning filter; `tests/test_import_side_effects.py` enforces both.
 
 ## Where things live
 
-| Module | Responsibility |
-| --- | --- |
-| `errors` | Every deliberate refusal, each with an exit code |
-| `money` | `Currency`, and the refusal when two of them meet |
-| `conventions` | Day counts, the SIFMA and BMV calendars, rolls, IMM dates, schedules |
-| `evidence` | `Evidence`, `Provenance`, `Degradation`, `DataQuality` |
-| `results` | `EngineResult`, the base every result serialises through |
-| `market` | Snapshots, the SOFR compounding rules, `file`, `fred` and `banxico` providers |
-| `instruments` | `OISSwap`, `IRSwap`, `FRA`, `SOFRFuture1M`, `SOFRFuture3M` |
-| `volatility` | `Volatility` and its units, Bachelier, Black, SABR, the cube |
-| `curves` | `DiscountCurve`, the bootstrap, the four views, the dual-curve solver, monotone convex, Nelson-Siegel, the FOMC step curve, and the MXN curve with its unresolved conventions |
-| `fx` | The currency pair, Garman-Kohlhagen, four delta conventions, vanna-volga, the CIP forward and its basis |
-| `convexity` | Ho-Lee and Hull-White adjustments, realised sigma |
-| `pricing` | `pv`, `par_rate`, `annuity`, parallel `dv01`, `price_on_parametric` |
-| `optionpricing` | Forward swap rate, swaption annuity, swaption and cap/floor PV |
-| `risk` | Key rate, duration conventions, convexity, option greeks, and the stubs |
-| `hedging` | `strip_hedge`, `shock_table` |
-| `hedging_structures` | `compare_structures`: eight structures, costed side by side |
-| `hedge_program` | The hedging policy as data, loaded strictly and audited |
-| `diagnostics` | Reading an evidence chain |
-| `reporting` | JSON payloads and error payloads |
-| `cli` | `rateng bootstrap / price / hedge / describe / list-instruments / fx-forward / hedge-structures` |
-| `mcp_server` | `rateng-mcp`: the same seven payloads over stdio |
+Packages sit on layers, lowest first; a package imports only from layers
+below its own, and `tests/test_layering.py` enforces it. The design is
+[`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHITECTURE.md).
+
+**Import from `rates_engine` or from the module that defines a name.**
+Subpackage `__init__` files document their layer and re-export nothing, so
+`from rates_engine.curves import DiscountCurve` fails on purpose; write
+`from rates_engine import DiscountCurve` or
+`from rates_engine.curves.discount import DiscountCurve`.
+
+| Package | Layer | Responsibility |
+| --- | --- | --- |
+| `core` | 0 | `errors` (every refusal, each with an exit code), `evidence`, `results` (`EngineResult`), `money` (`Currency`), `diagnostics` (reading an evidence chain) |
+| `conventions` | 1 | Day counts, the SIFMA and BMV calendars, rolls, IMM dates, schedules; the shared vocabulary `Side`, `OptionKind`, `CurrencyPair` |
+| `market` | 2 | Snapshots, the SOFR compounding rules, realised sigma (`estimators`), the `file`, `fred` and `banxico` providers |
+| `models` | 2 | Closed forms: Black, Bachelier, Garman-Kohlhagen, SABR, the four FX delta conventions, Ho-Lee and Hull-White convexity |
+| `curves` | 3 | `DiscountCurve`, the bootstrap, the four views, the dual-curve solver, monotone convex, Nelson-Siegel, the FOMC step curve, and the MXN curve with its unresolved conventions |
+| `volatility` | 3 | `Volatility` and its units, the SABR cube, the vanna-volga FX smile |
+| `instruments` | 3 | `OISSwap`, `IRSwap`, `FRA`, `SOFRFuture1M`, `SOFRFuture3M`, `CapFloor`, `Swaption` |
+| `pricing` | 4 | `linear` (`pv`, `par_rate`, `annuity`, parallel `dv01`, `price_on_parametric`), `options` (swaptions, caps and floors), `fx_forward` (the CIP forward and its basis) |
+| `risk` | 5 | Key rate, duration conventions, convexity, option greeks, and the stubs |
+| `hedging` | 6 | `futures_strip` (`strip_hedge`, `shock_table`), `fx_structures` (`compare_structures`), `program` (the hedging policy as data) |
+| `reporting` | 7 | JSON payloads and error payloads |
+| `cli` | 8 | `rateng bootstrap / price / hedge / describe / list-instruments / fx-forward / hedge-structures` |
+| `mcp_server` | 8 | `rateng-mcp`: the same seven payloads over stdio |
 
 ## The CLI in one line
 

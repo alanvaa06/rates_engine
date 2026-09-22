@@ -1,44 +1,8 @@
-"""Day counts, calendars, rolls and schedules — every one of them explicit.
+"""How the market counts and names things (layer 1).
 
-Nothing in this package accepts a convention as a bare string on a hot path.
-The enums exist so that an unsupported convention is a refusal at construction
-time rather than a plausible number later.
+Day counts, calendars, rolls, IMM dates and schedules, plus the shared
+vocabulary the layers above agree on: which side of a swap, which kind of
+option, how a currency pair is quoted. Every convention is an explicit type,
+so an unsupported one is a refusal at construction time rather than a
+plausible number later. Depends on :mod:`rates_engine.core` only.
 """
-
-from rates_engine.conventions.calendar import (
-    BMV,
-    SIFMA_US,
-    BMVCalendar,
-    BusinessDayConvention,
-    Calendar,
-    HolidayCalendar,
-    SIFMAUSCalendar,
-    easter_sunday,
-)
-from rates_engine.conventions.daycount import DayCount, day_count_from_name, year_fraction
-from rates_engine.conventions.schedule import (
-    Schedule,
-    add_months,
-    imm_date,
-    imm_dates,
-    next_imm_on_or_after,
-)
-
-__all__ = [
-    "BMV",
-    "BMVCalendar",
-    "BusinessDayConvention",
-    "Calendar",
-    "DayCount",
-    "HolidayCalendar",
-    "SIFMAUSCalendar",
-    "SIFMA_US",
-    "Schedule",
-    "add_months",
-    "day_count_from_name",
-    "easter_sunday",
-    "imm_date",
-    "imm_dates",
-    "next_imm_on_or_after",
-    "year_fraction",
-]

@@ -24,11 +24,20 @@ from datetime import date, timedelta
 
 import pytest
 
-from rates_engine.curves.discount import CurveSet, DiscountCurve
-from rates_engine.errors import CurrencyMismatchError, RatesEngineError
+from rates_engine.core.errors import (
+    CurrencyMismatchError,
+    RatesEngineError,
+)
+from rates_engine.core.money import (
+    Currency,
+    require_same_currency,
+)
+from rates_engine.curves.discount import (
+    CurveSet,
+    DiscountCurve,
+)
 from rates_engine.instruments.cashflow import Cashflow
-from rates_engine.money import Currency, require_same_currency
-from rates_engine.pricing import pv
+from rates_engine.pricing.linear import pv
 
 AS_OF = date(2026, 9, 16)
 
@@ -103,9 +112,18 @@ def _dual_inputs(basis: float = 0.0005, rate: float = 0.04):
     an installed package, so a cross-module import passes locally and
     raises `ModuleNotFoundError` under CI's installed-package run.
     """
-    from rates_engine.conventions import DayCount, year_fraction
-    from rates_engine.curves import ParSwapNode, RealizedStubNode
-    from rates_engine.curves.dual import BasisSwapNode, TenorParSwapNode
+    from rates_engine.conventions.daycount import (
+        DayCount,
+        year_fraction,
+    )
+    from rates_engine.curves.bootstrap import (
+        ParSwapNode,
+        RealizedStubNode,
+    )
+    from rates_engine.curves.dual import (
+        BasisSwapNode,
+        TenorParSwapNode,
+    )
 
     maturities = tuple(date(AS_OF.year + k, AS_OF.month, AS_OF.day) for k in range(1, 5))
 
@@ -161,7 +179,10 @@ def _dual_inputs(basis: float = 0.0005, rate: float = 0.04):
 def _futures_strip():
     """A quarterly SR3 strip on a curve that is not flat, so the two
     interpolations actually disagree and the comparison has work to do."""
-    from rates_engine.curves import FuturesNode, RealizedStubNode
+    from rates_engine.curves.bootstrap import (
+        FuturesNode,
+        RealizedStubNode,
+    )
 
     start = AS_OF + timedelta(days=14)
     nodes: list[object] = [
@@ -181,9 +202,10 @@ def _futures_strip():
 
 def _futures_hedge():
     """A real sized strip hedge, which is what `shock_table` consumes."""
-    from rates_engine.curves import FuturesNode
-    from rates_engine.hedging import strip_hedge
-    from rates_engine.instruments.swaps import OISSwap, Side
+    from rates_engine.conventions.side import Side
+    from rates_engine.curves.bootstrap import FuturesNode
+    from rates_engine.hedging.futures_strip import strip_hedge
+    from rates_engine.instruments.swaps import OISSwap
 
     instruments = _futures_strip()
     futures = [i for i in instruments if isinstance(i, FuturesNode)]
@@ -216,7 +238,7 @@ class TestMixingRefuses:
             require_same_currency(Currency.USD, Currency.MXN, operation="adding two prices")
         message = str(excinfo.value)
         assert "no implicit conversion" in message
-        assert "rates_engine.fx" in message
+        assert "rates_engine.pricing.fx_forward" in message
 
     def test_a_curve_set_of_two_currencies_refuses_at_construction(self):
         with pytest.raises(CurrencyMismatchError) as excinfo:
@@ -273,7 +295,10 @@ class TestItSurvivesEveryTransformation:
         assert replaced.currency is Currency.MXN
 
     def test_the_bootstrap_produces_the_currency_it_was_asked_for(self):
-        from rates_engine.curves.bootstrap import RealizedStubNode, bootstrap_discount_curve
+        from rates_engine.curves.bootstrap import (
+            RealizedStubNode,
+            bootstrap_discount_curve,
+        )
 
         end = AS_OF + timedelta(days=28)
         result = bootstrap_discount_curve(
@@ -284,7 +309,10 @@ class TestItSurvivesEveryTransformation:
         assert result.curve.currency is Currency.MXN
 
     def test_the_bootstrap_still_defaults_to_dollars(self):
-        from rates_engine.curves.bootstrap import RealizedStubNode, bootstrap_discount_curve
+        from rates_engine.curves.bootstrap import (
+            RealizedStubNode,
+            bootstrap_discount_curve,
+        )
 
         end = AS_OF + timedelta(days=28)
         result = bootstrap_discount_curve(
@@ -322,7 +350,8 @@ class TestARealInstrumentNotJustAProbe:
 
     @staticmethod
     def _swap(notional: float = 1_000_000.0) -> object:
-        from rates_engine.instruments.swaps import OISSwap, Side
+        from rates_engine.conventions.side import Side
+        from rates_engine.instruments.swaps import OISSwap
 
         return OISSwap(
             effective=AS_OF + timedelta(days=30),
@@ -388,12 +417,12 @@ class TestAddingTwoPresentValues:
     def test_the_refusal_names_where_conversion_lives(self):
         with pytest.raises(CurrencyMismatchError) as caught:
             _ = self._priced(Currency.MXN, 0.09) + self._priced(Currency.USD)
-        assert "rates_engine.fx" in str(caught.value)
+        assert "rates_engine.pricing.fx_forward" in str(caught.value)
 
     def test_adding_a_rate_to_a_present_value_is_a_type_error_not_a_refusal(self):
         """A measure mismatch is a bug in the caller, not a data problem, so
         it is not in the RatesEngineError taxonomy."""
-        from rates_engine.pricing import par_rate
+        from rates_engine.pricing.linear import par_rate
 
         priced = self._priced(Currency.USD)
         rate = par_rate(TestARealInstrumentNotJustAProbe._swap(), CurveSet(_curve()))
@@ -415,7 +444,10 @@ class TestAddingTwoPresentValues:
     def test_an_assumed_leg_degrades_the_total(self):
         """The reason the sum composes evidence instead of picking one side:
         adding a marked result to a clean one must not launder the mark."""
-        from rates_engine.evidence import DataQuality, Degradation
+        from rates_engine.core.evidence import (
+            DataQuality,
+            Degradation,
+        )
 
         clean = self._priced(Currency.USD)
         marked = replace(
@@ -531,7 +563,7 @@ class TestTheCurrencySurvivesTheDerivedCalculations:
         """`shock_table` subtracts a strip P&L built from SR3_DV01 — a dollar
         constant — from the swap's P&L. On a peso curve set that sum is two
         currencies reported as one number, so it refuses instead."""
-        from rates_engine.hedging import shock_table
+        from rates_engine.hedging.futures_strip import shock_table
 
         hedge = _futures_hedge()
         assert not shock_table(hedge, (-100.0,)).table.empty
@@ -541,6 +573,6 @@ class TestTheCurrencySurvivesTheDerivedCalculations:
             shock_table(pesos, (-100.0,))
 
     def test_the_shock_table_says_what_currency_its_columns_are(self):
-        from rates_engine.hedging import shock_table
+        from rates_engine.hedging.futures_strip import shock_table
 
         assert shock_table(_futures_hedge(), (-100.0,)).to_dict()["currency"] == "USD"

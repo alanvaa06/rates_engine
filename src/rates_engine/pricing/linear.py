@@ -8,7 +8,7 @@ than leaving it to be inferred from the absence of an alternative.
 **DV01 is a central difference.** ``(PV(y - 1bp) - PV(y + 1bp)) / 2``, not a
 one-sided bump. The symmetric form cancels the second-order term exactly,
 which is what lets a receiver and a payer agree in magnitude to machine
-precision and what lets the key-rate profile in :mod:`rates_engine.risk` sum
+precision and what lets the key-rate profile in :mod:`rates_engine.risk.sensitivities` sum
 back to this number. A one-sided bump would leave a curvature residual in both
 places, and it would look like a bug in the key rates rather than in the
 differencing.
@@ -20,13 +20,13 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any, Protocol, runtime_checkable
 
+from rates_engine.conventions.side import Side
+from rates_engine.core.errors import CurrencyMismatchError
+from rates_engine.core.evidence import Evidence
+from rates_engine.core.money import require_same_currency
+from rates_engine.core.results import EngineResult
 from rates_engine.curves.discount import CurveSet
-from rates_engine.errors import CurrencyMismatchError
-from rates_engine.evidence import Evidence
 from rates_engine.instruments.cashflow import Cashflow
-from rates_engine.instruments.swaps import Side
-from rates_engine.money import require_same_currency
-from rates_engine.results import EngineResult
 
 __all__ = [
     "Priceable",
@@ -143,10 +143,10 @@ class PriceResult(EngineResult):
         Refuses a unit mismatch rather than converting: a peso present value
         and a dollar one are not commensurable, and making them so needs a
         rate, a date and a quoting convention that only
-        :mod:`rates_engine.fx` may supply. A measure mismatch — a par rate
+        :mod:`rates_engine.pricing.fx_forward` may supply. A measure mismatch — a par rate
         plus an annuity — raises ``TypeError`` instead, because that is a
         mistake in the calling code rather than a problem with the data, and
-        :mod:`rates_engine.errors` is for the latter.
+        :mod:`rates_engine.core.errors` is for the latter.
 
         The result's evidence names this sum as its producer and carries both
         operands as sources, so ``worst_quality`` degrades to the weaker of
@@ -169,7 +169,7 @@ class PriceResult(EngineResult):
             raise CurrencyMismatchError(
                 f"cannot add {self.unit} to {other.unit}: converting between them "
                 "needs a rate, a date and a quoting convention, which is "
-                "rates_engine.fx's job and never an implicit one"
+                "rates_engine.pricing.fx_forward's job and never an implicit one"
             )
         flows: tuple[Cashflow, ...] | None = None
         if self.cashflows is not None and other.cashflows is not None:

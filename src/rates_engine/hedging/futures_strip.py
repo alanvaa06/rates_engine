@@ -3,7 +3,7 @@
 The hedge ratio per IMM period is a bucketed delta: bump one contract's quote
 by a basis point, rebuild the curve from every quote including the bumped one,
 and reprice the swap. That is deliberately *not* the key-rate profile in
-:mod:`rates_engine.risk`, which bumps curve nodes instead. The two answer
+:mod:`rates_engine.risk.sensitivities`, which bumps curve nodes instead. The two answer
 different questions — how much of the swap's risk this contract can take, and
 how the swap's risk is distributed along the curve — and they are reported
 under different names for that reason. They do sum to the same parallel DV01,
@@ -25,18 +25,29 @@ from typing import Any
 
 import pandas as pd
 
+from rates_engine.core.errors import IncompleteStripError
+from rates_engine.core.evidence import Evidence
+from rates_engine.core.money import (
+    Currency,
+    require_same_currency,
+)
+from rates_engine.core.results import EngineResult
 from rates_engine.curves.bootstrap import (
     CalibrationInstrument,
     FuturesNode,
     bootstrap_discount_curve,
 )
 from rates_engine.curves.discount import CurveSet
-from rates_engine.errors import IncompleteStripError
-from rates_engine.evidence import Evidence
-from rates_engine.instruments.futures import BASIS_POINT, SR3_CONTRACT_TENOR, SR3_NOTIONAL
-from rates_engine.money import Currency, require_same_currency
-from rates_engine.pricing import Priceable, dv01, pv
-from rates_engine.results import EngineResult
+from rates_engine.instruments.futures import (
+    BASIS_POINT,
+    SR3_CONTRACT_TENOR,
+    SR3_NOTIONAL,
+)
+from rates_engine.pricing.linear import (
+    Priceable,
+    dv01,
+    pv,
+)
 
 __all__ = ["SR3_DV01", "HedgeResult", "ShockTableResult", "strip_hedge", "shock_table", "DEFAULT_SHOCKS_BP"]
 
@@ -220,7 +231,7 @@ def strip_hedge(
             "note": (
                 "Bucketed delta by instrument quote, not a key-rate profile by curve "
                 "node. The two sum to the same parallel DV01 and answer different "
-                "questions; see rates_engine.risk.key_rate_dv01."
+                "questions; see rates_engine.risk.sensitivities.key_rate_dv01."
             ),
         },
         sources=(base.evidence,),

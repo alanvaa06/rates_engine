@@ -4,8 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from rates_engine.evidence import DataQuality, Degradation, Evidence
-from rates_engine.results import EngineResult
+from rates_engine.core.evidence import (
+    DataQuality,
+    Degradation,
+    Evidence,
+)
+from rates_engine.core.results import EngineResult
 
 __all__ = ["walk", "all_warnings", "quality_report", "summarise"]
 

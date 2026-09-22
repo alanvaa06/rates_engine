@@ -38,11 +38,22 @@ from datetime import date, timedelta
 from typing import Any, NoReturn
 
 from rates_engine.conventions.daycount import year_fraction
-from rates_engine.curves.discount import CURVE_TIME_BASIS, CurveSet
-from rates_engine.errors import KeyTenorOutOfRangeError, UndefinedDurationError
-from rates_engine.evidence import Evidence
-from rates_engine.pricing import BUMP_BP, Priceable, dv01, pv
-from rates_engine.results import EngineResult
+from rates_engine.core.errors import (
+    KeyTenorOutOfRangeError,
+    UndefinedDurationError,
+)
+from rates_engine.core.evidence import Evidence
+from rates_engine.core.results import EngineResult
+from rates_engine.curves.discount import (
+    CURVE_TIME_BASIS,
+    CurveSet,
+)
+from rates_engine.pricing.linear import (
+    BUMP_BP,
+    Priceable,
+    dv01,
+    pv,
+)
 
 __all__ = [
     "RiskResult",
@@ -344,7 +355,7 @@ def pvbp(
 ) -> RiskResult:
     """Price value of a basis point, in USD per basis point.
 
-    The same number as :func:`~rates_engine.pricing.dv01`, and computed by
+    The same number as :func:`~rates_engine.pricing.linear.dv01`, and computed by
     calling it rather than reimplemented — the two names exist because both
     are in common use, not because they are different quantities.
 
@@ -607,7 +618,7 @@ class GreeksResult(EngineResult):
     Attributes:
         delta: Change in value for a one basis point fall in the curve, per
             basis point — the option's DV01, on the same sign convention as
-            :func:`~rates_engine.pricing.dv01`.
+            :func:`~rates_engine.pricing.linear.dv01`.
         gamma: Change in :attr:`delta` per basis point squared.
         vega: Change in value per basis point of *normal* volatility. Reported on the normal basis whatever model
             priced the option, because that is what the market quotes and
@@ -692,8 +703,15 @@ def option_greeks(
     """
     from rates_engine.instruments.capfloor import CapFloor
     from rates_engine.instruments.swaption import Swaption
-    from rates_engine.optionpricing import cap_floor_pv, model_for, swaption_pv
-    from rates_engine.volatility.units import Volatility, VolUnits
+    from rates_engine.pricing.options import (
+        cap_floor_pv,
+        model_for,
+        swaption_pv,
+    )
+    from rates_engine.volatility.units import (
+        Volatility,
+        VolUnits,
+    )
 
     if rate_bump_bp <= 0.0 or vol_bump_bp <= 0.0:
         raise ValueError(
@@ -726,7 +744,7 @@ def option_greeks(
             volatility.as_normal_bp() + vol_bump_bp, VolUnits.NORMAL_BP
         )
     else:
-        from rates_engine.optionpricing import forward_swap_rate
+        from rates_engine.pricing.options import forward_swap_rate
 
         forward = (
             forward_swap_rate(option, curve_set)

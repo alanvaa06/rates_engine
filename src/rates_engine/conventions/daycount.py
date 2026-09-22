@@ -1,7 +1,7 @@
 """Day count conventions, as an enum rather than a string nobody validates.
 
 Three are implemented. A fourth name does not fall back to a default — it
-raises :class:`~rates_engine.errors.UnsupportedConventionError`, because a year
+raises :class:`~rates_engine.core.errors.UnsupportedConventionError`, because a year
 fraction computed on the wrong basis is a wrong number that looks entirely
 plausible.
 """
@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import date
 from enum import Enum
 
-from rates_engine.errors import UnsupportedConventionError
+from rates_engine.core.errors import UnsupportedConventionError
 
 __all__ = ["DayCount", "year_fraction", "day_count_from_name"]
 

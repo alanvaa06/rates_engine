@@ -22,15 +22,21 @@ from datetime import date, timedelta
 
 import pytest
 
-from rates_engine.curves.bootstrap import FuturesNode, RealizedStubNode
+from rates_engine.core.errors import UnsupportedConventionError
+from rates_engine.curves.bootstrap import (
+    FuturesNode,
+    RealizedStubNode,
+)
 from rates_engine.curves.comparison import compare_interpolations
-from rates_engine.curves.discount import INTERPOLATIONS, DiscountCurve
+from rates_engine.curves.discount import (
+    INTERPOLATIONS,
+    DiscountCurve,
+)
 from rates_engine.curves.interpolation import (
     MonotoneConvex,
     discrete_forwards,
     node_forwards,
 )
-from rates_engine.errors import UnsupportedConventionError
 
 AS_OF = date(2026, 9, 16)
 

@@ -33,9 +33,8 @@ from datetime import date, timedelta
 from rates_engine import (
     CurveSet, FuturesNode, OISSwap, RealizedStubNode,
     bootstrap_discount_curve, dv01, imm_date, key_rate_dv01,
-    next_imm_on_or_after, par_rate,
+    next_imm_on_or_after, par_rate, shock_table, strip_hedge,
 )
-from rates_engine.hedging import shock_table, strip_hedge
 
 as_of = date(2026, 1, 15)
 start = imm_date(2026, 3)
@@ -168,10 +167,9 @@ from datetime import date, timedelta
 
 from rates_engine import (
     CurveSet, FuturesNode, OISSwap, RealizedStubNode,
-    bootstrap_discount_curve, imm_date, next_imm_on_or_after,
+    bootstrap_discount_curve, imm_date, next_imm_on_or_after, strip_hedge,
 )
-from rates_engine.diagnostics import quality_report
-from rates_engine.hedging import strip_hedge
+from rates_engine.core.diagnostics import quality_report
 
 as_of = date(2026, 1, 15)
 start = imm_date(2026, 3)

@@ -15,7 +15,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from rates_engine.conventions import imm_date, next_imm_on_or_after  # noqa: E402
+from rates_engine.conventions.schedule import (
+    imm_date,
+    next_imm_on_or_after,
+)  # noqa: E402
 
 AS_OF = date(2026, 1, 15)
 FLAT_PRICE = 96.0

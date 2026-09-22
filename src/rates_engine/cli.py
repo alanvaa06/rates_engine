@@ -7,7 +7,7 @@ to strip narration out of its input. A failure before a result is produced
 still puts one document on stdout — ``{"error": ..., "exit_code": ...}`` — and
 the traceback goes to stderr.
 
-Exit codes follow the exception taxonomy in :mod:`rates_engine.errors`: ``1``
+Exit codes follow the exception taxonomy in :mod:`rates_engine.core.errors`: ``1``
 when the inputs cannot support the calculation, ``2`` when the calculation
 itself is impossible on inputs that are fine.
 
@@ -29,42 +29,72 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
+from rates_engine.conventions.currency_pair import USDMXN
 from rates_engine.conventions.daycount import year_fraction
-from rates_engine.convexity import ConvexityModel, convexity_adjustment
+from rates_engine.conventions.side import Side
+from rates_engine.core.errors import (
+    ConfigurationError,
+    MissingDependencyError,
+    UndefinedDurationError,
+)
+from rates_engine.core.errors import __all__ as EXCEPTION_NAMES
+from rates_engine.core.evidence import (
+    DataQuality,
+    Provenance,
+)
+from rates_engine.core.money import Currency
+from rates_engine.core.results import SCHEMA_VERSION
 from rates_engine.curves.bootstrap import (
     FuturesNode,
     ParSwapNode,
     RealizedStubNode,
     bootstrap_discount_curve,
 )
-from rates_engine.curves.discount import CURVE_TIME_BASIS, CurveSet, DiscountCurve
+from rates_engine.curves.discount import (
+    CURVE_TIME_BASIS,
+    CurveSet,
+    DiscountCurve,
+)
 from rates_engine.curves.mxn import UNRESOLVED_MXN
 from rates_engine.curves.views import all_views
-from rates_engine.errors import (
-    ConfigurationError,
-    MissingDependencyError,
-    UndefinedDurationError,
+from rates_engine.hedging.futures_strip import (
+    DEFAULT_SHOCKS_BP,
+    SR3_DV01,
+    shock_table,
+    strip_hedge,
 )
-from rates_engine.errors import __all__ as EXCEPTION_NAMES
-from rates_engine.evidence import DataQuality, Provenance
-from rates_engine.fx.delta import DeltaBasis, PremiumAdjustment
-from rates_engine.fx.forward import forward_from_curves
-from rates_engine.fx.quote import USDMXN
-from rates_engine.fx.vannavolga import ATMConvention
-from rates_engine.hedge_program import audit_hedge, load_program
-from rates_engine.hedging import DEFAULT_SHOCKS_BP, SR3_DV01, shock_table, strip_hedge
-from rates_engine.hedging_structures import (
+from rates_engine.hedging.fx_structures import (
     Exposure,
     ExposureDirection,
     StructureQuote,
     compare_structures,
 )
-from rates_engine.instruments.swaps import OISSwap, Side
-from rates_engine.money import Currency
-from rates_engine.pricing import annuity, dv01, par_rate, pv
-from rates_engine.reporting.payloads import dumps, error_payload, result_payload
-from rates_engine.results import SCHEMA_VERSION
-from rates_engine.risk import (
+from rates_engine.hedging.program import (
+    audit_hedge,
+    load_program,
+)
+from rates_engine.instruments.swaps import OISSwap
+from rates_engine.models.convexity import (
+    ConvexityModel,
+    convexity_adjustment,
+)
+from rates_engine.models.fx_delta import (
+    DeltaBasis,
+    PremiumAdjustment,
+)
+from rates_engine.pricing.fx_forward import forward_from_curves
+from rates_engine.pricing.linear import (
+    annuity,
+    dv01,
+    par_rate,
+    pv,
+)
+from rates_engine.reporting.payloads import (
+    dumps,
+    error_payload,
+    result_payload,
+)
+from rates_engine.risk.sensitivities import (
     INTERPOLATION_CAVEAT,
     effective_convexity,
     effective_duration,
@@ -73,6 +103,7 @@ from rates_engine.risk import (
     money_duration,
     pvbp,
 )
+from rates_engine.volatility.fx_smile import ATMConvention
 from rates_engine.volatility.units import VolUnits
 
 __all__ = ["main", "build_parser", "load_config"]

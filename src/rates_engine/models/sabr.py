@@ -43,14 +43,14 @@ from typing import Any
 import numpy as np
 from scipy.optimize import least_squares
 
-from rates_engine.errors import (
+from rates_engine.conventions.option_kind import OptionKind
+from rates_engine.core.errors import (
     CalibrationError,
     ExpansionBreakdownError,
     ShiftRequiredError,
 )
-from rates_engine.evidence import Evidence
-from rates_engine.results import EngineResult
-from rates_engine.volatility.kinds import OptionKind
+from rates_engine.core.evidence import Evidence
+from rates_engine.core.results import EngineResult
 
 __all__ = [
     "SABRParameters",
@@ -525,7 +525,7 @@ def density_diagnostics(
         A mapping with ``arbitrage_free`` (bool), the most negative density
         found, the strike where it occurred, and the scan's bounds.
     """
-    from rates_engine.volatility import bachelier
+    from rates_engine.models import bachelier
 
     atm = normal_vol(parameters, forward, forward, expiry)
     width = 4.0 * atm * math.sqrt(expiry)

@@ -10,7 +10,10 @@ from datetime import timedelta
 import pytest
 
 from rates_engine.cli import main
-from rates_engine.conventions import imm_date, next_imm_on_or_after
+from rates_engine.conventions.schedule import (
+    imm_date,
+    next_imm_on_or_after,
+)
 
 
 def _config(as_of, *, price: float = 96.0, long_end_source=None, key_tenors=None) -> dict:
@@ -210,7 +213,7 @@ class TestConfigFormats:
         path.write_text("as_of: 2026-01-15\n", encoding="utf-8")
         monkeypatch.setitem(sys.modules, "yaml", None)
         from rates_engine.cli import load_config
-        from rates_engine.errors import MissingDependencyError
+        from rates_engine.core.errors import MissingDependencyError
 
         with pytest.raises(MissingDependencyError, match=r"finport-ratesengine\[config\]"):
             load_config(path)

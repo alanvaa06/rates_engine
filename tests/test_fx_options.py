@@ -17,9 +17,9 @@ import math
 
 import pytest
 
-from rates_engine.fx import garman_kohlhagen as gk
-from rates_engine.fx.quote import USDMXN
-from rates_engine.volatility.kinds import OptionKind
+from rates_engine.conventions.currency_pair import USDMXN
+from rates_engine.conventions.option_kind import OptionKind
+from rates_engine.models import garman_kohlhagen as gk
 
 SPOT = 18.50
 EXPIRY = 0.25
@@ -257,15 +257,15 @@ class TestTheCurrencyPair:
         assert 2000 < points < 3000
 
     def test_a_pair_of_one_currency_refuses(self):
-        from rates_engine.fx.quote import CurrencyPair
-        from rates_engine.money import Currency
+        from rates_engine.conventions.currency_pair import CurrencyPair
+        from rates_engine.core.money import Currency
 
         with pytest.raises(ValueError, match="two currencies"):
             CurrencyPair(Currency.USD, Currency.USD, pip=1e-4)
 
     def test_a_non_positive_pip_refuses(self):
-        from rates_engine.fx.quote import CurrencyPair
-        from rates_engine.money import Currency
+        from rates_engine.conventions.currency_pair import CurrencyPair
+        from rates_engine.core.money import Currency
 
         with pytest.raises(ValueError, match="pip size"):
             CurrencyPair(Currency.USD, Currency.MXN, pip=0.0)

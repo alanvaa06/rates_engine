@@ -1,21 +1,8 @@
-"""Market data: series, snapshots, the SOFR compounding rules, and providers."""
+"""What was observed, and where it came from (layer 2).
 
-from rates_engine.market.classify import classify_series
-from rates_engine.market.providers import (
-    FuturesSettlement,
-    load_series_csv,
-    load_settlements_csv,
-    load_snapshot_csv,
-)
-from rates_engine.market.snapshot import CompoundedRate, MarketSnapshot, Series
-
-__all__ = [
-    "CompoundedRate",
-    "FuturesSettlement",
-    "MarketSnapshot",
-    "Series",
-    "classify_series",
-    "load_series_csv",
-    "load_settlements_csv",
-    "load_snapshot_csv",
-]
+Series and snapshots with per-series provenance, the SOFR compounding and
+averaging rules, statistics estimated from history, and the providers that
+fill a snapshot. ``providers.file`` is offline; ``fred`` and ``banxico``
+touch the network inside the call and never at import. Depends on
+:mod:`rates_engine.conventions` and below; knows nothing about curves.
+"""

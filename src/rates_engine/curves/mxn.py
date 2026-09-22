@@ -11,7 +11,7 @@ price rest on an unmarked assumption, or build the machinery and carry the
 gap in the evidence. AC-1.4 chose the second before the research ran, which
 is why this module has the shape it does: every result names the
 conventions it assumed in :data:`UNRESOLVED_MXN`, carries a
-:class:`~rates_engine.evidence.Degradation` per convention that pushes
+:class:`~rates_engine.core.evidence.Degradation` per convention that pushes
 ``worst_quality`` to ``ASSUMED``, and refuses outright under
 ``strict_conventions=True``.
 
@@ -34,8 +34,22 @@ from datetime import date, timedelta
 from enum import StrEnum
 from typing import Any
 
-from rates_engine.conventions.calendar import BMV, BusinessDayConvention
-from rates_engine.conventions.daycount import DayCount, year_fraction
+from rates_engine.conventions.calendar import (
+    BMV,
+    BusinessDayConvention,
+)
+from rates_engine.conventions.daycount import (
+    DayCount,
+    year_fraction,
+)
+from rates_engine.core.errors import UnresolvedConventionError
+from rates_engine.core.evidence import (
+    DataQuality,
+    Degradation,
+    Evidence,
+)
+from rates_engine.core.money import Currency
+from rates_engine.core.results import EngineResult
 from rates_engine.curves.bootstrap import (
     DEFAULT_TOLERANCE_BP,
     CalibrationInstrument,
@@ -43,10 +57,6 @@ from rates_engine.curves.bootstrap import (
     bootstrap_discount_curve,
 )
 from rates_engine.curves.discount import DiscountCurve
-from rates_engine.errors import UnresolvedConventionError
-from rates_engine.evidence import DataQuality, Degradation, Evidence
-from rates_engine.money import Currency
-from rates_engine.results import EngineResult
 
 __all__ = [
     "TIIEBenchmark",
@@ -106,7 +116,7 @@ UNRESOLVED_MXN: tuple[tuple[str, str], ...] = (
 """Every MXN convention this build assumes rather than knows.
 
 A tuple of ``(name, why)``. Each one becomes a
-:class:`~rates_engine.evidence.Degradation` on every result, and
+:class:`~rates_engine.core.evidence.Degradation` on every result, and
 ``strict_conventions=True`` turns the set into a refusal. When Banxico
 becomes reachable this tuple shrinks and nothing else changes.
 """

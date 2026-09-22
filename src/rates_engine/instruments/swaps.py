@@ -19,11 +19,21 @@ from dataclasses import dataclass, replace
 from datetime import date
 from typing import TYPE_CHECKING
 
-from rates_engine.conventions.calendar import SIFMA_US, BusinessDayConvention, SIFMAUSCalendar
-from rates_engine.conventions.daycount import DayCount, year_fraction
+from rates_engine.conventions.calendar import (
+    SIFMA_US,
+    BusinessDayConvention,
+    SIFMAUSCalendar,
+)
+from rates_engine.conventions.daycount import (
+    DayCount,
+    year_fraction,
+)
 from rates_engine.conventions.schedule import Schedule
+from rates_engine.conventions.side import (
+    Side,
+    fixed_leg_sign,
+)
 from rates_engine.instruments.cashflow import Cashflow
-from rates_engine.instruments.side import Side, fixed_leg_sign
 
 if TYPE_CHECKING:  # pragma: no cover - import for typing only, avoids a cycle
     from rates_engine.curves.discount import CurveSet
@@ -76,7 +86,7 @@ class OISSwap:
     def with_terms(self, **changes: object) -> OISSwap:
         """A copy with some terms changed; the original is untouched.
 
-        Exists so that :mod:`rates_engine.pricing` can build the unit-rate and
+        Exists so that :mod:`rates_engine.pricing.linear` can build the unit-rate and
         single-side variants a par rate needs without reaching for
         ``dataclasses.replace`` on a protocol, which is not something a type
         checker can verify.
@@ -284,7 +294,7 @@ class IRSwap:
 
         This is the whole multi-curve story in four lines. The forward comes
         from ``curve_set.projection``; the discounting, applied in
-        :mod:`rates_engine.pricing`, comes from ``curve_set.discount``. When
+        :mod:`rates_engine.pricing.linear`, comes from ``curve_set.discount``. When
         the two are the same object the basis is zero and the result collapses
         onto the OIS answer.
         """

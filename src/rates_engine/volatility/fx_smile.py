@@ -16,7 +16,7 @@ from the criterion rather than from taste.
 
 **Two conventions, both refused rather than assumed.** A delta does not
 name a strike until the convention is stated — that is
-:mod:`rates_engine.fx.delta`'s problem. "At the money" does not name one
+:mod:`rates_engine.models.fx_delta`'s problem. "At the money" does not name one
 either: the market uses the delta-neutral straddle, the forward, and
 occasionally the spot, and they differ by ``exp(±sigma^2 T / 2)``, which at
 30% volatility and a year is over four hundred pips. Both have to be given.
@@ -37,12 +37,19 @@ from typing import Any
 
 import numpy as np
 
-from rates_engine.errors import CalibrationError
-from rates_engine.evidence import DataQuality, Degradation, Evidence
-from rates_engine.fx import garman_kohlhagen as gk
-from rates_engine.fx.delta import DeltaConvention, strike_from_delta
-from rates_engine.results import EngineResult
-from rates_engine.volatility.kinds import OptionKind
+from rates_engine.conventions.option_kind import OptionKind
+from rates_engine.core.errors import CalibrationError
+from rates_engine.core.evidence import (
+    DataQuality,
+    Degradation,
+    Evidence,
+)
+from rates_engine.core.results import EngineResult
+from rates_engine.models import garman_kohlhagen as gk
+from rates_engine.models.fx_delta import (
+    DeltaConvention,
+    strike_from_delta,
+)
 
 __all__ = [
     "ATMConvention",
@@ -74,7 +81,7 @@ class ATMConvention(StrEnum):
         The spot rate. Rare, and included because a quote sheet that means
         it should not have to be translated by hand.
 
-    No default, for the same reason :class:`~rates_engine.fx.delta.
+    No default, for the same reason :class:`~rates_engine.models.fx_delta.
     DeltaConvention` has none: the research gate could not establish which
     one USD/MXN quotes on.
     """

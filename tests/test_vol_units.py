@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from rates_engine.errors import VolUnitsError
+from rates_engine.core.errors import VolUnitsError
 from rates_engine.volatility.units import (
     LOGNORMAL_MAX_DECIMAL,
     LOGNORMAL_MIN_DECIMAL,

@@ -6,17 +6,22 @@ from datetime import date
 
 import pytest
 
-from rates_engine.conventions import SIFMA_US
-from rates_engine.errors import MissingFixingError
-from rates_engine.evidence import DataQuality, Provenance
-from rates_engine.market import (
-    MarketSnapshot,
-    Series,
+from rates_engine.conventions.calendar import SIFMA_US
+from rates_engine.core.errors import MissingFixingError
+from rates_engine.core.evidence import (
+    DataQuality,
+    Provenance,
+)
+from rates_engine.market.classify import TREASURY_PAR_YIELD
+from rates_engine.market.providers.file import (
     load_series_csv,
     load_settlements_csv,
     load_snapshot_csv,
 )
-from rates_engine.market.classify import TREASURY_PAR_YIELD
+from rates_engine.market.snapshot import (
+    MarketSnapshot,
+    Series,
+)
 
 
 class TestLoading:

@@ -6,7 +6,7 @@ ICE Swap Rate and the commercial CME Term SOFR feeds are licensed. So v1
 validates the *solver* rather than a market — the inputs are constructed with
 a known basis, and the tests assert the properties that must hold whatever the
 basis is. Asking for a real quote source raises
-:class:`~rates_engine.errors.NoTenorQuoteSourceError` rather than quietly
+:class:`~rates_engine.core.errors.NoTenorQuoteSourceError` rather than quietly
 substituting something plausible, and every result declares
 ``inputs_origin="synthetic"`` so a reader cannot mistake it for a market fit.
 
@@ -28,16 +28,26 @@ from typing import Any, Protocol, runtime_checkable
 import numpy as np
 from scipy.optimize import least_squares
 
-from rates_engine.conventions.daycount import DayCount, year_fraction
+from rates_engine.conventions.daycount import (
+    DayCount,
+    year_fraction,
+)
+from rates_engine.core.errors import (
+    NoTenorQuoteSourceError,
+    UnderdeterminedCurveError,
+)
+from rates_engine.core.evidence import (
+    DataQuality,
+    Evidence,
+    Provenance,
+)
+from rates_engine.core.money import Currency
+from rates_engine.core.results import EngineResult
 from rates_engine.curves.bootstrap import (
     CalibrationInstrument,
     bootstrap_discount_curve,
 )
 from rates_engine.curves.discount import DiscountCurve
-from rates_engine.errors import NoTenorQuoteSourceError, UnderdeterminedCurveError
-from rates_engine.evidence import DataQuality, Evidence, Provenance
-from rates_engine.money import Currency
-from rates_engine.results import EngineResult
 
 __all__ = [
     "DualCalibrationInstrument",

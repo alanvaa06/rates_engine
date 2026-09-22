@@ -27,7 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
-from rates_engine.errors import VolUnitsError
+from rates_engine.core.errors import VolUnitsError
 
 __all__ = [
     "VolUnits",

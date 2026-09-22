@@ -8,10 +8,23 @@ from datetime import date, timedelta
 
 import pytest
 
-from rates_engine.conventions import DayCount
-from rates_engine.curves import CurveSet, DiscountCurve
-from rates_engine.instruments import FRA, IRSwap, OISSwap, Side
-from rates_engine.pricing import annuity, dv01, par_rate, pv
+from rates_engine.conventions.daycount import DayCount
+from rates_engine.conventions.side import Side
+from rates_engine.curves.discount import (
+    CurveSet,
+    DiscountCurve,
+)
+from rates_engine.instruments.fra import FRA
+from rates_engine.instruments.swaps import (
+    IRSwap,
+    OISSwap,
+)
+from rates_engine.pricing.linear import (
+    annuity,
+    dv01,
+    par_rate,
+    pv,
+)
 
 
 def _flat(as_of: date, rate: float, years: int = 6) -> DiscountCurve:

@@ -8,9 +8,9 @@ then a one-dimensional option formula.
 underlying, and computing them needs ``par_rate`` and ``annuity``, which live
 a layer above instruments. Reaching up for them would make the module graph
 cyclic — instruments importing pricing importing instruments — so they live
-in :mod:`rates_engine.optionpricing` as
-:func:`~rates_engine.optionpricing.forward_swap_rate` and
-:func:`~rates_engine.optionpricing.swaption_annuity`. What stays here is the
+in :mod:`rates_engine.pricing.options` as
+:func:`~rates_engine.pricing.options.forward_swap_rate` and
+:func:`~rates_engine.pricing.options.swaption_annuity`. What stays here is the
 contract: dates, strike, side, and the option's own expiry.
 
 **Why the annuity is the numeraire.** Under the annuity measure the forward
@@ -26,11 +26,17 @@ from dataclasses import dataclass
 from datetime import date
 from typing import TYPE_CHECKING, Any
 
-from rates_engine.conventions.daycount import DayCount, year_fraction
+from rates_engine.conventions.daycount import (
+    DayCount,
+    year_fraction,
+)
+from rates_engine.conventions.option_kind import OptionKind
+from rates_engine.conventions.side import Side
 from rates_engine.curves.discount import CURVE_TIME_BASIS
-from rates_engine.instruments.side import Side
-from rates_engine.instruments.swaps import IRSwap, OISSwap
-from rates_engine.volatility.kinds import OptionKind
+from rates_engine.instruments.swaps import (
+    IRSwap,
+    OISSwap,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     pass

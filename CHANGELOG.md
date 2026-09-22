@@ -9,6 +9,40 @@ claims, so it belongs here too.
 
 ## [Unreleased]
 
+A reorganisation into layers. No number moves, and every name exported from
+`rates_engine` is still exported from it.
+
+### Changed
+
+- **Module paths.** The package is now ten layers of subpackages instead of
+  fourteen loose modules beside seven packages
+  (`docs/architecture/ARCHITECTURE.md`). Import from `rates_engine` or from
+  the module that defines a name; the old deep paths are gone:
+  `errors`, `evidence`, `results`, `money` and `diagnostics` moved to
+  `core`; `pricing` became `pricing.linear`, `optionpricing` became
+  `pricing.options`, `fx.forward` became `pricing.fx_forward`; `risk`
+  became `risk.sensitivities`; `hedging`, `hedging_structures` and
+  `hedge_program` became `hedging.futures_strip`, `hedging.fx_structures`
+  and `hedging.program`. The closed forms moved to `models` (`black`,
+  `bachelier`, `sabr`, `garman_kohlhagen`, `fx_delta`, `convexity`,
+  `gaussian`). `fx.vannavolga` became `volatility.fx_smile`. `Side`,
+  `OptionKind` and `CurrencyPair` moved to `conventions`. The `fx` package
+  no longer exists.
+- **`realized_sofr_sigma`** and `SigmaEstimate` moved from `convexity` to
+  `market.estimators`: measuring sigma from history is market data, and the
+  convexity formula no longer imports a snapshot.
+- **Subpackage `__init__` files re-export nothing.** `from
+  rates_engine.curves import DiscountCurve` now fails; the package root and
+  the defining module are the two homes of a name.
+- **`tests/test_layering.py`** checks layers rather than a total order of
+  modules: nothing imports sideways or upward except two declared, dated
+  exceptions (`instruments -> curves`, `mcp_server -> cli`).
+
+### Added
+
+- `benchmarks/bench_core.py`: hot-path timings through the public API, run
+  before and after a structural change.
+
 ## [0.3.0] - 2026-09-18
 
 A second currency, FX forwards and options, and a hedge-structure

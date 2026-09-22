@@ -7,15 +7,17 @@ from datetime import date, timedelta
 
 import pytest
 
-from rates_engine.conventions import DayCount, year_fraction
-from rates_engine.curves import (
-    DiscountCurve,
+from rates_engine.conventions.daycount import (
+    DayCount,
+    year_fraction,
+)
+from rates_engine.core.errors import UnsupportedConventionError
+from rates_engine.curves.discount import CURVE_TIME_BASIS, DiscountCurve
+from rates_engine.curves.views import (
     all_views,
     par_curve,
     zero_curve,
 )
-from rates_engine.curves.discount import CURVE_TIME_BASIS
-from rates_engine.errors import UnsupportedConventionError
 
 
 class TestZeroCurve:
@@ -92,8 +94,8 @@ class TestParCurve:
     """PRD-001 AC-4.3: the par rate is the rate that prices a swap at zero."""
 
     def test_par_rate_prices_its_own_swap_at_zero(self, flat_curve, curve_set):
-        from rates_engine.instruments import OISSwap
-        from rates_engine.pricing import pv
+        from rates_engine.instruments.swaps import OISSwap
+        from rates_engine.pricing.linear import pv
 
         curve = flat_curve.curve
         view = par_curve(curve, (curve.nodes[-1],), frequency_months=12, payment_lag_days=0)
@@ -109,8 +111,8 @@ class TestParCurve:
     def test_it_agrees_with_pricing_par_rate_on_the_same_schedule(self, flat_curve, curve_set):
         # The two live in different modules and must not drift: one schedule
         # generator, one answer.
-        from rates_engine.instruments import OISSwap
-        from rates_engine.pricing import par_rate
+        from rates_engine.instruments.swaps import OISSwap
+        from rates_engine.pricing.linear import par_rate
 
         curve = flat_curve.curve
         view = par_curve(curve, (curve.nodes[-1],), frequency_months=12, payment_lag_days=2)

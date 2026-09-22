@@ -12,7 +12,7 @@ from datetime import date
 
 import pytest
 
-from rates_engine.evidence import DataQuality
+from rates_engine.core.evidence import DataQuality
 from rates_engine.market.providers import fred
 
 CSV = "observation_date,SOFR\n2026-01-13,4.31\n2026-01-14,4.32\n2026-01-15,.\n"

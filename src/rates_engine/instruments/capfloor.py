@@ -9,7 +9,7 @@ identity, and it only holds when the cap's periods are the swap's periods, so
 the test builds both from one schedule.
 
 **Where it refuses.** A period whose forward the projection curve does not
-reach raises :class:`~rates_engine.errors.MissingForwardError`. The curve
+reach raises :class:`~rates_engine.core.errors.MissingForwardError`. The curve
 will happily extrapolate a flat forward past its last node, and for a
 discount factor that is a defensible convention; for a caplet it would mean
 pricing an option on a rate the market never quoted, inside a total that
@@ -22,11 +22,18 @@ from dataclasses import dataclass
 from datetime import date
 from typing import TYPE_CHECKING, Any
 
-from rates_engine.conventions.calendar import SIFMA_US, BusinessDayConvention, SIFMAUSCalendar
-from rates_engine.conventions.daycount import DayCount, year_fraction
+from rates_engine.conventions.calendar import (
+    SIFMA_US,
+    BusinessDayConvention,
+    SIFMAUSCalendar,
+)
+from rates_engine.conventions.daycount import (
+    DayCount,
+    year_fraction,
+)
+from rates_engine.conventions.option_kind import OptionKind
 from rates_engine.conventions.schedule import Schedule
-from rates_engine.errors import MissingForwardError
-from rates_engine.volatility.kinds import OptionKind
+from rates_engine.core.errors import MissingForwardError
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from rates_engine.curves.discount import CurveSet

@@ -6,10 +6,14 @@ from dataclasses import replace
 
 import pytest
 
-from rates_engine.curves import FuturesNode
-from rates_engine.errors import IncompleteStripError
-from rates_engine.hedging import SR3_DV01, shock_table, strip_hedge
-from rates_engine.risk import money_convexity
+from rates_engine.core.errors import IncompleteStripError
+from rates_engine.curves.bootstrap import FuturesNode
+from rates_engine.hedging.futures_strip import (
+    SR3_DV01,
+    shock_table,
+    strip_hedge,
+)
+from rates_engine.risk.sensitivities import money_convexity
 
 
 class TestSizing:
@@ -36,7 +40,7 @@ class TestSizing:
         assert all(count > 0 for count in hedge.contracts.values())
 
     def test_a_receiver_swap_is_hedged_short(self, par_swap, strip, as_of):
-        from rates_engine.instruments import Side
+        from rates_engine.conventions.side import Side
 
         hedge = strip_hedge(replace(par_swap, side=Side.RECEIVER), strip, as_of=as_of)
         assert hedge.total_contracts < 0
@@ -167,7 +171,7 @@ class TestConvexityReconciliation:
     """PRD-001 AC-10.10: DV01 and money convexity reproduce the full reprice."""
 
     def test_the_swap_pnl_is_dv01_plus_half_convexity(self, par_swap, strip, curve_set, as_of):
-        from rates_engine.pricing import dv01
+        from rates_engine.pricing.linear import dv01
 
         table = shock_table(strip_hedge(par_swap, strip, as_of=as_of)).table
         first_order = dv01(par_swap, curve_set).value
@@ -182,7 +186,7 @@ class TestConvexityReconciliation:
     def test_it_is_far_tighter_than_the_tolerance_at_small_shocks(
         self, par_swap, strip, curve_set, as_of
     ):
-        from rates_engine.pricing import dv01
+        from rates_engine.pricing.linear import dv01
 
         table = shock_table(strip_hedge(par_swap, strip, as_of=as_of), (10.0,)).table
         row = table.iloc[0]

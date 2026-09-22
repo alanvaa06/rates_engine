@@ -16,9 +16,15 @@ from dataclasses import dataclass
 from datetime import date
 from typing import TYPE_CHECKING
 
-from rates_engine.conventions.daycount import DayCount, year_fraction
+from rates_engine.conventions.daycount import (
+    DayCount,
+    year_fraction,
+)
+from rates_engine.conventions.side import (
+    Side,
+    fixed_leg_sign,
+)
 from rates_engine.instruments.cashflow import Cashflow
-from rates_engine.instruments.side import Side, fixed_leg_sign
 
 if TYPE_CHECKING:  # pragma: no cover - import for typing only, avoids a cycle
     from rates_engine.curves.discount import CurveSet

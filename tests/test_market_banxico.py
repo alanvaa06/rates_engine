@@ -18,8 +18,11 @@ from datetime import date
 
 import pytest
 
-from rates_engine.errors import ConfigurationError, InsufficientDataError
-from rates_engine.evidence import DataQuality
+from rates_engine.core.errors import (
+    ConfigurationError,
+    InsufficientDataError,
+)
+from rates_engine.core.evidence import DataQuality
 from rates_engine.market.providers import banxico
 
 

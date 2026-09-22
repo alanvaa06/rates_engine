@@ -8,13 +8,18 @@ from datetime import timedelta
 import pytest
 from conftest import AS_OF
 
-from rates_engine.errors import MissingForwardError
-from rates_engine.instruments import CapFloor, IRSwap, Side
-from rates_engine.optionpricing import cap_floor_pv, caplet_pv
-from rates_engine.pricing import pv
-from rates_engine.risk import option_greeks
-from rates_engine.volatility import Volatility
-from rates_engine.volatility.kinds import OptionKind
+from rates_engine.conventions.option_kind import OptionKind
+from rates_engine.conventions.side import Side
+from rates_engine.core.errors import MissingForwardError
+from rates_engine.instruments.capfloor import CapFloor
+from rates_engine.instruments.swaps import IRSwap
+from rates_engine.pricing.linear import pv
+from rates_engine.pricing.options import (
+    cap_floor_pv,
+    caplet_pv,
+)
+from rates_engine.risk.sensitivities import option_greeks
+from rates_engine.volatility.units import Volatility
 
 STRIKE = 0.042
 VOL = Volatility.normal_bp(80.0)

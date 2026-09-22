@@ -65,7 +65,7 @@ def test_every_name_a_fragment_uses_is_one_the_package_exports(readme):
     # The failure this catches is a fragment quietly going stale: it renames
     # nothing and still refers to an attribute that no longer exists.
     import rates_engine
-    from rates_engine import diagnostics
+    from rates_engine.core import diagnostics
 
     for block in _python_blocks(readme):
         if _is_complete_program(block):

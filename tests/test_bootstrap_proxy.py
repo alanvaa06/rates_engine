@@ -12,11 +12,20 @@ from datetime import date
 
 import pytest
 
-from rates_engine.curves import ParSwapNode, bootstrap_discount_curve
-from rates_engine.curves.bootstrap import TREASURY_PROXY
-from rates_engine.errors import ProxySourceNotDeclaredError
-from rates_engine.evidence import DataQuality, Provenance
-from rates_engine.market.classify import TREASURY_PAR_YIELD, TREASURY_PROXY_NOTE
+from rates_engine.core.errors import ProxySourceNotDeclaredError
+from rates_engine.core.evidence import (
+    DataQuality,
+    Provenance,
+)
+from rates_engine.curves.bootstrap import (
+    TREASURY_PROXY,
+    ParSwapNode,
+    bootstrap_discount_curve,
+)
+from rates_engine.market.classify import (
+    TREASURY_PAR_YIELD,
+    TREASURY_PROXY_NOTE,
+)
 
 
 def _treasury_node(as_of: date, label: str = "DGS2", rate: float = 0.0405) -> ParSwapNode:
@@ -103,9 +112,9 @@ class TestLabelling:
         assert proxied.evidence.worst_quality is DataQuality.PROXY
 
     def test_it_propagates_into_a_price_built_on_the_curve(self, proxied, strip_span):
-        from rates_engine.curves import CurveSet
-        from rates_engine.instruments import OISSwap
-        from rates_engine.pricing import pv
+        from rates_engine.curves.discount import CurveSet
+        from rates_engine.instruments.swaps import OISSwap
+        from rates_engine.pricing.linear import pv
 
         swap = OISSwap(
             effective=strip_span[0], maturity=date(2028, 1, 17), fixed_rate=0.04,

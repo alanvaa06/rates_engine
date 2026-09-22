@@ -6,9 +6,12 @@ from dataclasses import replace
 
 import pytest
 
-from rates_engine.errors import UndefinedDurationError
-from rates_engine.pricing import dv01, pv
-from rates_engine.risk import (
+from rates_engine.core.errors import UndefinedDurationError
+from rates_engine.pricing.linear import (
+    dv01,
+    pv,
+)
+from rates_engine.risk.sensitivities import (
     ZERO_PRICE_TOLERANCE,
     effective_convexity,
     effective_duration,
@@ -77,7 +80,7 @@ class TestMoneyConvexity:
         assert money_convexity(par_swap, curve_set).value == pytest.approx(expected, rel=1e-12)
 
     def test_a_payer_and_a_receiver_have_opposite_convexity(self, par_swap, curve_set):
-        from rates_engine.instruments import Side
+        from rates_engine.conventions.side import Side
 
         payer = money_convexity(replace(par_swap, side=Side.PAYER), curve_set).value
         receiver = money_convexity(replace(par_swap, side=Side.RECEIVER), curve_set).value

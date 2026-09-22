@@ -23,7 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from rates_engine.money import Currency
+from rates_engine.core.money import Currency
 
 __all__ = ["CurrencyPair", "USDMXN"]
 

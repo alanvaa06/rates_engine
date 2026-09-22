@@ -193,7 +193,7 @@ class TestTheyReachMCPUnchanged:
 
     @pytest.mark.parametrize("name", ["fx-forward", "hedge-structures"])
     def test_calling_without_a_config_refuses_by_name(self, name):
-        from rates_engine.errors import ConfigurationError
+        from rates_engine.core.errors import ConfigurationError
 
         with pytest.raises(ConfigurationError, match=name):
             mcp_server.call_tool(name)

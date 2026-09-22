@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from rates_engine import errors
+from rates_engine.core import errors
 
 DOC = Path(__file__).resolve().parents[1] / "docs" / "ERRORS.md"
 

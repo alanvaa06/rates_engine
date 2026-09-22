@@ -15,20 +15,58 @@ from pathlib import Path
 
 import pytest
 
-from rates_engine.convexity import convexity_adjustment, realized_sofr_sigma
-from rates_engine.curves import all_views
+from rates_engine.core.results import (
+    SCHEMA_VERSION,
+    EngineResult,
+)
 from rates_engine.curves.comparison import compare_interpolations
-from rates_engine.curves.discount import CurveSet, DiscountCurve
-from rates_engine.curves.dual import BasisSwapNode, TenorParSwapNode, solve_dual_curve
-from rates_engine.curves.parametric import fit_fomc_step_curve, fit_nelson_siegel
-from rates_engine.hedging import shock_table, strip_hedge
-from rates_engine.optionpricing import swaption_pv
-from rates_engine.pricing import annuity, dv01, par_rate, price_on_parametric, pv
-from rates_engine.reporting import dumps, error_payload, result_payload
-from rates_engine.results import SCHEMA_VERSION, EngineResult
-from rates_engine.risk import key_rate_dv01, money_convexity, option_greeks, pvbp
-from rates_engine.volatility.cube import CubePoint, VolCube
-from rates_engine.volatility.units import Volatility, VolUnits
+from rates_engine.curves.discount import (
+    CurveSet,
+    DiscountCurve,
+)
+from rates_engine.curves.dual import (
+    BasisSwapNode,
+    TenorParSwapNode,
+    solve_dual_curve,
+)
+from rates_engine.curves.parametric import (
+    fit_fomc_step_curve,
+    fit_nelson_siegel,
+)
+from rates_engine.curves.views import all_views
+from rates_engine.hedging.futures_strip import (
+    shock_table,
+    strip_hedge,
+)
+from rates_engine.market.estimators import realized_sofr_sigma
+from rates_engine.models.convexity import convexity_adjustment
+from rates_engine.pricing.linear import (
+    annuity,
+    dv01,
+    par_rate,
+    price_on_parametric,
+    pv,
+)
+from rates_engine.pricing.options import swaption_pv
+from rates_engine.reporting.payloads import (
+    dumps,
+    error_payload,
+    result_payload,
+)
+from rates_engine.risk.sensitivities import (
+    key_rate_dv01,
+    money_convexity,
+    option_greeks,
+    pvbp,
+)
+from rates_engine.volatility.cube import (
+    CubePoint,
+    VolCube,
+)
+from rates_engine.volatility.units import (
+    Volatility,
+    VolUnits,
+)
 
 NS_TIMES = (0.5, 1.0, 2.0, 3.0, 5.0, 10.0)
 NS_RATES = (0.0445, 0.0432, 0.0417, 0.0413, 0.0413, 0.0422)
@@ -47,7 +85,11 @@ def _parametric(as_of, par_swap):
 
 def _program_audit():
     """A non-compliant audit, so the violations list is populated."""
-    from rates_engine.hedge_program import HedgeProgram, RebalanceFrequency, audit_hedge
+    from rates_engine.hedging.program import (
+        HedgeProgram,
+        RebalanceFrequency,
+        audit_hedge,
+    )
 
     program = HedgeProgram(0.80, 0.10, RebalanceFrequency.MONTHLY, frozenset({"forward"}))
     return audit_hedge(program, 0.30, proposed_instrument="seagull")
@@ -55,8 +97,8 @@ def _program_audit():
 
 def _hedge_structures():
     """A structure comparison and one of its rows."""
-    from rates_engine.fx.quote import USDMXN
-    from rates_engine.hedging_structures import (
+    from rates_engine.conventions.currency_pair import USDMXN
+    from rates_engine.hedging.fx_structures import (
         Exposure,
         ExposureDirection,
         StructureQuote,
@@ -74,7 +116,10 @@ def _hedge_structures():
 def _mxn():
     """A peso curve and a benchmark comparison, as test_mxn_curve.py builds them."""
     from rates_engine.conventions.daycount import year_fraction
-    from rates_engine.curves.bootstrap import ParSwapNode, RealizedStubNode
+    from rates_engine.curves.bootstrap import (
+        ParSwapNode,
+        RealizedStubNode,
+    )
     from rates_engine.curves.mxn import (
         TIIE_DAY_COUNT,
         TIIEBenchmark,
@@ -113,9 +158,9 @@ def _fx_forward(as_of):
     """A forward with a basis, so both halves of the payload are populated."""
     from datetime import timedelta
 
-    from rates_engine.fx.forward import forward_from_curves
-    from rates_engine.fx.quote import USDMXN
-    from rates_engine.money import Currency
+    from rates_engine.conventions.currency_pair import USDMXN
+    from rates_engine.core.money import Currency
+    from rates_engine.pricing.fx_forward import forward_from_curves
 
     nodes = tuple(as_of + timedelta(days=365 * k) for k in (1, 2))
     usd = DiscountCurve(
@@ -131,8 +176,16 @@ def _fx_forward(as_of):
 
 def _fx_smile():
     """A vanna-volga reading, as `test_fx_smile.py` builds the smile."""
-    from rates_engine.fx.delta import DeltaBasis, DeltaConvention, PremiumAdjustment
-    from rates_engine.fx.vannavolga import ATMConvention, SmileQuotes, VannaVolgaSmile
+    from rates_engine.models.fx_delta import (
+        DeltaBasis,
+        DeltaConvention,
+        PremiumAdjustment,
+    )
+    from rates_engine.volatility.fx_smile import (
+        ATMConvention,
+        SmileQuotes,
+        VannaVolgaSmile,
+    )
 
     smile = VannaVolgaSmile(
         spot=18.50,
@@ -169,8 +222,14 @@ def _volatility(option_curve_set, atm_swaption, forward_swap_rate):
 
 def _dual_curve(as_of):
     """A dual-curve solve on constructed inputs, as `TestDualCurvePayload` builds it."""
-    from rates_engine.conventions import DayCount, year_fraction
-    from rates_engine.curves import ParSwapNode, RealizedStubNode
+    from rates_engine.conventions.daycount import (
+        DayCount,
+        year_fraction,
+    )
+    from rates_engine.curves.bootstrap import (
+        ParSwapNode,
+        RealizedStubNode,
+    )
 
     maturities = (date(2027, 1, 15), date(2028, 1, 17))
     ois = (
@@ -351,7 +410,7 @@ class TestErrorPayloads:
     """PRD-001 AC-9.3's shape: a failure is a document too."""
 
     def test_an_engine_error_carries_its_exit_code(self):
-        from rates_engine.errors import MissingFixingError
+        from rates_engine.core.errors import MissingFixingError
 
         payload = error_payload(MissingFixingError("no fixing for 2026-01-14"))
         assert payload["exit_code"] == 1
@@ -360,7 +419,7 @@ class TestErrorPayloads:
         assert payload["result_type"] is None
 
     def test_an_impossible_calculation_is_exit_code_two(self):
-        from rates_engine.errors import CurveArbitrageError
+        from rates_engine.core.errors import CurveArbitrageError
 
         payload = error_payload(CurveArbitrageError("rising discount factors"))
         assert payload["exit_code"] == 2
@@ -412,8 +471,14 @@ class TestDualCurvePayload:
     def test_it_serialises_with_both_curves(self, as_of):
         from datetime import date
 
-        from rates_engine.conventions import DayCount, year_fraction
-        from rates_engine.curves import ParSwapNode, RealizedStubNode
+        from rates_engine.conventions.daycount import (
+            DayCount,
+            year_fraction,
+        )
+        from rates_engine.curves.bootstrap import (
+            ParSwapNode,
+            RealizedStubNode,
+        )
 
         maturities = (date(2027, 1, 15), date(2028, 1, 17))
         ois = (

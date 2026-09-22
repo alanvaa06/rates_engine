@@ -16,19 +16,37 @@ import pytest
 from hypothesis import HealthCheck, assume, given, settings
 from hypothesis import strategies as st
 
-from rates_engine.conventions import DayCount, imm_date, next_imm_on_or_after, year_fraction
-from rates_engine.curves import (
-    CurveSet,
-    DiscountCurve,
+from rates_engine.conventions.daycount import (
+    DayCount,
+    year_fraction,
+)
+from rates_engine.conventions.schedule import (
+    imm_date,
+    next_imm_on_or_after,
+)
+from rates_engine.conventions.side import Side
+from rates_engine.curves.bootstrap import (
     FuturesNode,
     RealizedStubNode,
     bootstrap_discount_curve,
-    par_curve,
 )
-from rates_engine.curves.discount import CURVE_TIME_BASIS
-from rates_engine.instruments import OISSwap, Side
-from rates_engine.pricing import dv01, par_rate, pv
-from rates_engine.risk import key_rate_dv01, money_convexity, tent_weights
+from rates_engine.curves.discount import (
+    CURVE_TIME_BASIS,
+    CurveSet,
+    DiscountCurve,
+)
+from rates_engine.curves.views import par_curve
+from rates_engine.instruments.swaps import OISSwap
+from rates_engine.pricing.linear import (
+    dv01,
+    par_rate,
+    pv,
+)
+from rates_engine.risk.sensitivities import (
+    key_rate_dv01,
+    money_convexity,
+    tent_weights,
+)
 
 AS_OF = date(2026, 1, 15)
 SETTINGS = settings(

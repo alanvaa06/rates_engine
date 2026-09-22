@@ -17,19 +17,30 @@ from dataclasses import replace
 import pytest
 from scipy.stats import norm
 
-from rates_engine.errors import ShiftRequiredError
-from rates_engine.instruments import OISSwap, Side, Swaption
-from rates_engine.optionpricing import (
+from rates_engine.conventions.option_kind import OptionKind
+from rates_engine.conventions.side import Side
+from rates_engine.core.errors import ShiftRequiredError
+from rates_engine.instruments.swaps import OISSwap
+from rates_engine.instruments.swaption import Swaption
+from rates_engine.models import (
+    bachelier,
+    black,
+)
+from rates_engine.pricing.linear import dv01
+from rates_engine.pricing.options import (
     forward_swap_rate,
     model_for,
     swaption_annuity,
     swaption_pv,
 )
-from rates_engine.pricing import dv01
-from rates_engine.risk import money_convexity, option_greeks
-from rates_engine.volatility import bachelier, black
-from rates_engine.volatility.kinds import OptionKind
-from rates_engine.volatility.units import Volatility, VolUnits
+from rates_engine.risk.sensitivities import (
+    money_convexity,
+    option_greeks,
+)
+from rates_engine.volatility.units import (
+    Volatility,
+    VolUnits,
+)
 
 # Twenty cases: five strikes across two expiries across two volatilities.
 CASES = [
