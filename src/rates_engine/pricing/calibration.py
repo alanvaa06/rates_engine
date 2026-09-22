@@ -19,7 +19,8 @@ reprices its swaps by construction, not by two implementations happening to
 match.
 
 ``ParSwapNode`` remains for quotes that arrive as a date schedule rather
-than a trade -- the CLI's ``par_swaps`` block, the dual-curve tests. It
+than a trade -- the dual-curve tests, a caller holding only dates. (The
+CLI's ``par_swaps`` block builds ``SwapQuoteNode``s since v0.4.) It
 prices the floating leg as ``P(start) - P(last payment)``, which is exact
 only when each period is paid the day it ends. For a swap with no payment
 lag the two nodes give the same curve; for a SOFR OIS, paid two business
