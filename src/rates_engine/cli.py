@@ -13,6 +13,9 @@ calculation itself is impossible on inputs that are fine.
 
 **Config format.** JSON is native; YAML needs the ``config`` extra. See
 :func:`rates_engine.app.config.load_config`.
+
+The one subcommand outside the table is ``viz``, which writes an HTML page
+and prints a receipt naming what landed.
 """
 
 from __future__ import annotations
@@ -20,8 +23,10 @@ from __future__ import annotations
 import argparse
 import sys
 import traceback
+from pathlib import Path
+from typing import Any
 
-from rates_engine.app.commands import COMMANDS
+from rates_engine.app.commands import COMMANDS, viz
 from rates_engine.app.config import load_config
 from rates_engine.reporting.payloads import dumps, error_payload
 
@@ -34,7 +39,9 @@ def build_parser() -> argparse.ArgumentParser:
     """The argument parser for ``rateng``.
 
     Returns:
-        The parser, with one subcommand per entry in the command table.
+        The parser, with one subcommand per entry in the command table and
+        ``viz``, which is not a table entry because it writes a file rather
+        than printing a payload.
     """
     parser = argparse.ArgumentParser(
         prog="rateng",
@@ -54,7 +61,32 @@ def build_parser() -> argparse.ArgumentParser:
             action="store_true",
             help="write one JSON document to stdout and all narration to stderr",
         )
+    page = subparsers.add_parser("viz", help="draw the payloads on one HTML page")
+    page.add_argument(
+        "--config", required=True, help="JSON or YAML configuration for the curve, swap and hedge"
+    )
+    page.add_argument(
+        "--fx-config",
+        required=False,
+        help="configuration with the fx block; without it the FX panels stay empty",
+    )
+    page.add_argument("--out", required=True, help="path of the HTML file to write")
+    page.add_argument(
+        "--json",
+        action="store_true",
+        help="write one JSON receipt to stdout and all narration to stderr",
+    )
     return parser
+
+
+def _write_page(args: argparse.Namespace, config: dict[str, Any] | None) -> dict[str, Any]:
+    """Render the page, write it, and return the receipt with ``path`` filled in."""
+    fx_config = load_config(args.fx_config) if args.fx_config else None
+    page, receipt = viz(config, fx_config)
+    out = Path(args.out)
+    out.write_text(page, encoding="utf-8")
+    receipt["path"] = str(out)
+    return receipt
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -71,7 +103,10 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         config = load_config(args.config) if args.config else None
-        payload = COMMANDS[args.command](config)
+        if args.command == "viz":
+            payload = _write_page(args, config)
+        else:
+            payload = COMMANDS[args.command](config)
     except BaseException as exc:  # noqa: BLE001 - re-raised below unless --json
         if not args.json:
             raise
@@ -80,11 +115,10 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.write(dumps(failure) + "\n")
         return int(failure["exit_code"])
 
-    if args.json:
-        sys.stdout.write(dumps(payload) + "\n")
-    else:
-        print(f"{args.command}: ok", file=sys.stderr)
-        sys.stdout.write(dumps(payload) + "\n")
+    if not args.json:
+        where = f" -> {args.out}" if args.command == "viz" else ""
+        print(f"{args.command}: ok{where}", file=sys.stderr)
+    sys.stdout.write(dumps(payload) + "\n")
     return _EXIT_OK
 
 

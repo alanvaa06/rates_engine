@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
+import sys
 from datetime import date, timedelta
 from importlib import resources
 
 import pytest
 
 from rates_engine.app.commands import COMMANDS, interpolation_gap, viz
+from rates_engine.cli import main
 from rates_engine.conventions.schedule import imm_date, next_imm_on_or_after
 from rates_engine.core.errors import ConfigurationError, CurveArbitrageError
 from rates_engine.reporting.viz import DATA_MARKER, PANELS, render_page
@@ -88,6 +91,12 @@ FX_CONFIG = {
         "allowed_instruments": ["forward", "collar"],
     },
 }
+
+
+def _run(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-m", "rates_engine.cli", *args], capture_output=True, text=True
+    )
 
 
 class TestTemplate:
@@ -217,3 +226,93 @@ class TestVizUseCase:
     def test_it_refuses_without_a_config(self):
         with pytest.raises(ConfigurationError, match="viz"):
             viz(None)
+
+
+class TestCommand:
+    """rateng viz: one file written, one receipt on stdout, the same exit codes as everything else."""
+
+    def test_writes_the_page_and_reports_the_panels(self, tmp_path):
+        config_path = tmp_path / "c.json"
+        config_path.write_text(json.dumps(_rates_config()), encoding="utf-8")
+        out = tmp_path / "desk.html"
+        done = _run("viz", "--config", str(config_path), "--out", str(out), "--json")
+        assert done.returncode == 0, done.stderr
+        assert done.stderr == ""
+        assert done.stdout.count("\n") == 1
+        receipt = json.loads(done.stdout)
+        assert receipt["result_type"] == "VizResult"
+        assert receipt["path"] == str(out)
+        assert receipt["panels"]["fx"] == "absent"
+        page = out.read_text(encoding="utf-8")
+        assert receipt["bytes"] == len(page.encode("utf-8"))
+        assert _embedded(page)["bootstrap"]["result_type"] == "BootstrapResult"
+
+    def test_with_an_fx_config_every_panel_is_ok(self, tmp_path):
+        config_path = tmp_path / "c.json"
+        config_path.write_text(json.dumps(_rates_config()), encoding="utf-8")
+        fx_path = tmp_path / "fx.json"
+        fx_path.write_text(json.dumps(FX_CONFIG), encoding="utf-8")
+        out = tmp_path / "desk.html"
+        done = _run(
+            "viz",
+            "--config",
+            str(config_path),
+            "--fx-config",
+            str(fx_path),
+            "--out",
+            str(out),
+            "--json",
+        )
+        assert done.returncode == 0, done.stderr
+        assert json.loads(done.stdout)["panels"] == dict.fromkeys(PANELS, "ok")
+        assert "recommend" not in out.read_text(encoding="utf-8").lower()
+
+    def test_a_refused_config_writes_no_file(self, tmp_path):
+        config = _rates_config()
+        del config["swap"]
+        config_path = tmp_path / "c.json"
+        config_path.write_text(json.dumps(config), encoding="utf-8")
+        out = tmp_path / "desk.html"
+        done = _run("viz", "--config", str(config_path), "--out", str(out), "--json")
+        assert done.returncode == 1
+        payload = json.loads(done.stdout)
+        assert payload["result_type"] is None
+        assert payload["error"]["type"] == "KeyError"
+        assert not out.exists()
+
+    def test_a_reported_interpolation_refusal_still_writes_the_file(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        import rates_engine.app.commands as commands
+
+        def refuse(*args, **kwargs):
+            raise CurveArbitrageError(
+                "monotone convex went non-monotone between 2026-03-18 and 2026-06-17"
+            )
+
+        monkeypatch.setattr(commands, "compare_interpolations", refuse)
+        config_path = tmp_path / "c.json"
+        config_path.write_text(json.dumps(_rates_config()), encoding="utf-8")
+        out = tmp_path / "desk.html"
+        code = main(["viz", "--config", str(config_path), "--out", str(out), "--json"])
+        assert code == 0
+        receipt = json.loads(capsys.readouterr().out)
+        assert receipt["panels"]["interp"] == "reported: CurveArbitrageError"
+        assert "went non-monotone" in out.read_text(encoding="utf-8")
+
+    def test_without_json_the_narration_names_the_file_in_ascii(self, tmp_path):
+        config_path = tmp_path / "c.json"
+        config_path.write_text(json.dumps(_rates_config()), encoding="utf-8")
+        out = tmp_path / "desk.html"
+        done = _run("viz", "--config", str(config_path), "--out", str(out))
+        assert done.returncode == 0, done.stderr
+        assert f"viz: ok -> {out}" in done.stderr
+        done.stderr.encode("ascii")
+        assert json.loads(done.stdout)["result_type"] == "VizResult"
+
+    def test_out_is_required(self, tmp_path):
+        config_path = tmp_path / "c.json"
+        config_path.write_text(json.dumps(_rates_config()), encoding="utf-8")
+        done = _run("viz", "--config", str(config_path), "--json")
+        assert done.returncode == 2
+        assert "--out" in done.stderr
