@@ -155,6 +155,13 @@ instrument is valued, not to what it is worth.
   ten-year OIS x10 (x22 on monotone convex), pricing a newly built one x5,
   DV01 x9, key rate DV01 x5.6, bootstrap x3, shock table x3.3, strip hedge
   x1.8.
+- **`fx_forward` says which basis it takes.** `basis_bp` is a flat
+  zero-coupon spread on the quote-currency leg at one delivery, which is
+  not the par spread a cross-currency swap quotes; the two agree at one
+  coupon period and drift apart after it. The module docstring,
+  `AGENTS.md` and `docs/RESEARCH.md` now say so, and say that no
+  cross-currency swap instrument, implied discount curve or calibration
+  node exists here to convert between them. No number changes.
 
 ### Fixed
 

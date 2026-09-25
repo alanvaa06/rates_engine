@@ -41,6 +41,22 @@ and Banxico are all unreachable from this build environment, which is the
 same gap `docs/forge/research/003-mxn-conventions.md` records for TIIE. It
 is the standard one, stated explicitly so that a caller who knows better
 can negate their input rather than discover the disagreement in a P&L.
+
+**Which basis, and therefore which curve.** ``basis_bp`` is a flat,
+continuously compounded spread on the quote-currency zero rate at the one
+delivery being priced: ``outright = S * P_f(T) / (P_d(T) exp(-b T))``, so
+the curve the forward implicitly discounts on is ``P_d(T) exp(-b T)``. A
+cross-currency swap quotes its basis differently — as a *par* spread on
+the coupon leg of a swap that exchanges notional at both ends, the spread
+that prices the swap to zero when the leg is projected on the OIS curve and
+discounted on a second curve built for flows collateralised in the other
+currency (Fujii, Shimada and Takahashi). Par and zero spreads agree at one
+coupon period and drift apart after it, the way par and zero rates do.
+This module takes the zero spread and never the par one, and there is no
+cross-currency swap instrument, implied discount curve or calibration node
+elsewhere in the package that would convert between them.
+:func:`implied_basis` reads the zero spread off a single quoted forward,
+and that is the whole of what this build says about the basis.
 """
 
 from __future__ import annotations
@@ -200,6 +216,9 @@ def forward_from_curves(
             sign against the dollar — lowers the outright. Zero means the
             parity forward, and the result says so rather than implying
             parity holds.
+            A flat zero-coupon spread at this delivery, not the par spread
+            a cross-currency swap quotes; the module docstring says how the
+            two differ.
         source_evidence: Evidence of the curves, chained in.
 
     Returns:
@@ -294,7 +313,8 @@ def implied_basis(
 
     Returns:
         An :class:`FXForwardResult` whose ``outright`` is the quote and
-        whose ``basis_bp`` is what it implies.
+        whose ``basis_bp`` is what it implies, as a zero-coupon spread at
+        ``delivery``.
 
     Raises:
         CurrencyMismatchError: A curve is in the wrong currency.

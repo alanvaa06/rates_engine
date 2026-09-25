@@ -167,6 +167,23 @@ of another currency raises `CurrencyMismatchError` before any arithmetic.
 There is no conversion here at all: that needs a spot rate, a date and a
 quoting convention, and `rates_engine.pricing.fx_forward` is where those are stated.
 
+**`basis_bp` is a zero-coupon spread, not the basis a screen quotes.**
+`forward_from_curves` writes the outright as `cip_forward * exp(+b T)`,
+which is the same as discounting the quote leg on `P_d(T) * exp(-b T)`: a
+flat, continuously compounded spread over the domestic OIS zero rate at
+that one tenor. A cross-currency swap quotes its basis as a *par* spread
+on the coupon leg of a swap that exchanges notional at both ends, and a par
+spread differs from a zero spread the way a par rate differs from a zero
+rate — close at one period, apart beyond it. Nothing here converts one
+into the other, because nothing here builds the curve that would: there is
+no cross-currency swap instrument, no notional exchange, no discount curve
+for peso flows under dollar collateral, and no calibration node that strips
+such a curve from basis quotes. `solve_dual_curve` is not that either — its
+two curves are OIS and Term SOFR in one currency. `implied_basis` reads the
+zero spread off one forward, and that is as far as this build goes. The
+piece it would plug into exists: `CurveSet` already projects on one curve
+and discounts on another of the same currency.
+
 **`holidays(year)` returns dates observed *for* that year, not dates *in*
 it.** With New Year's Day on a Saturday, the observed holiday is 31
 December of the year before, and it lives in `holidays(next_year)`. Use
