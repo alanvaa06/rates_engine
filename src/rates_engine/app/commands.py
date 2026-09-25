@@ -11,17 +11,25 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import replace
+from datetime import UTC, datetime
+from importlib import metadata
 from typing import Any
 
 from rates_engine.app.builders import calibration_nodes, flat_curve, fx_inputs, ois_swap
 from rates_engine.app.config import as_date, require_config
 from rates_engine.conventions.currency_pair import USDMXN
 from rates_engine.conventions.indices import INDICES, UNRESOLVED_MXN
-from rates_engine.core.errors import ConfigurationError, UndefinedDurationError
+from rates_engine.core.errors import (
+    BootstrapResidualError,
+    ConfigurationError,
+    CurveArbitrageError,
+    UndefinedDurationError,
+)
 from rates_engine.core.errors import __all__ as EXCEPTION_NAMES
 from rates_engine.core.money import Currency
 from rates_engine.core.results import SCHEMA_VERSION
 from rates_engine.curves.bootstrap import bootstrap_discount_curve
+from rates_engine.curves.comparison import compare_interpolations
 from rates_engine.curves.discount import CurveSet
 from rates_engine.curves.views import all_views
 from rates_engine.hedging.futures_strip import DEFAULT_SHOCKS_BP, SR3_DV01, shock_table, strip_hedge
@@ -36,6 +44,7 @@ from rates_engine.models.fx_delta import DeltaBasis, PremiumAdjustment
 from rates_engine.pricing.fx_forward import forward_from_curves
 from rates_engine.pricing.linear import annuity, par_rate, pv
 from rates_engine.reporting.payloads import result_payload
+from rates_engine.reporting.viz import PANELS, render_page
 from rates_engine.risk.sensitivities import (
     INTERPOLATION_CAVEAT,
     dv01,
@@ -59,6 +68,8 @@ __all__ = [
     "hedge",
     "fx_forward",
     "hedge_structures",
+    "interpolation_gap",
+    "viz",
 ]
 
 
@@ -390,6 +401,129 @@ def hedge_structures(config: dict[str, Any] | None) -> dict[str, Any]:
             evidence=comparison.evidence.with_sources(audit.evidence),
         )
     return result_payload(comparison, **payload)
+
+
+def interpolation_gap(config: dict[str, Any] | None) -> dict[str, Any]:
+    """Both interpolations on the config's calibration nodes, and the gap between them.
+
+    The one number the commands do not print. Both fits reprice every
+    instrument; they differ only in the instantaneous forward between nodes,
+    which no instrument constrains.
+
+    Args:
+        config: The whole configuration mapping. ``None`` is refused by name.
+
+    Returns:
+        A mapping with ``kind`` ``"interpolation_comparison"``, the sampled
+        ``dates``, the instantaneous forward under ``log_linear`` and
+        ``monotone_convex`` on each, their difference ``diff_bp``, and the
+        comparison's own maxima.
+
+    Raises:
+        ConfigurationError: No config, or a malformed calibration block.
+        CurveArbitrageError: Either bootstrap produced a non-monotone curve.
+        BootstrapResidualError: Either bootstrap missed its tolerance.
+    """
+    config = require_config(config, "viz")
+    as_of = as_date(config["as_of"])
+    comparison = compare_interpolations(
+        as_of,
+        calibration_nodes(config, as_of),
+        step_days=7,
+        long_end_source=(config.get("curve") or {}).get("long_end_source"),
+    )
+    dates = comparison.sample_dates
+    log_linear = [comparison.log_linear.instantaneous_forward(day) for day in dates]
+    monotone = [comparison.monotone_convex.instantaneous_forward(day) for day in dates]
+    return {
+        "kind": "interpolation_comparison",
+        "as_of": as_of.isoformat(),
+        "dates": [day.isoformat() for day in dates],
+        "log_linear": log_linear,
+        "monotone_convex": monotone,
+        "diff_bp": [(b - a) * 1e4 for a, b in zip(log_linear, monotone, strict=True)],
+        "max_residual_bp": comparison.max_residual_bp,
+        "max_forward_difference_bp": comparison.max_forward_difference_bp,
+        "max_forward_difference_date": comparison.max_forward_difference_date.isoformat(),
+        "max_df_difference": comparison.max_df_difference,
+    }
+
+
+def _engine_version() -> str:
+    """The installed distribution's version, or ``"unknown"`` outside an install.
+
+    Read from the distribution metadata rather than from the package root,
+    because nothing inside the package imports the package root.
+    """
+    try:
+        return metadata.version("finport-ratesengine")
+    except metadata.PackageNotFoundError:
+        return "unknown"
+
+
+def viz(
+    config: dict[str, Any] | None, fx_config: dict[str, Any] | None = None
+) -> tuple[str, dict[str, Any]]:
+    """The payloads drawn on one HTML page, and a receipt naming every panel.
+
+    Not a :data:`Command`: it takes two configs and returns HTML, so it hangs
+    off the CLI parser directly and the MCP server does not serve it.
+
+    Args:
+        config: The curve, swap and hedge configuration. ``None`` is refused.
+        fx_config: The configuration with the ``fx`` block. ``None`` leaves
+            the FX and structures panels absent.
+
+    Returns:
+        ``(page, receipt)``. The receipt is a ``VizResult`` payload whose
+        ``panels`` maps each panel to ``"ok"``, ``"absent"`` or
+        ``"reported: <ExceptionType>"``; ``path`` is ``None`` here and the
+        CLI fills it after writing.
+
+    Raises:
+        ConfigurationError: No config.
+        RatesEngineError: Whatever an inner command raises, unchanged. Only
+            the interpolation gap's own refusals are reported instead.
+    """
+    config = require_config(config, "viz")
+    payloads: dict[str, dict[str, Any] | None] = {}
+    panels: dict[str, str] = {}
+    payloads["bootstrap"] = bootstrap(config)
+    payloads["price"] = price(config)
+    payloads["hedge"] = hedge(config)
+    panels.update(bootstrap="ok", price="ok", hedge="ok")
+    try:
+        payloads["interp"] = interpolation_gap(config)
+        panels["interp"] = "ok"
+    except (CurveArbitrageError, BootstrapResidualError) as exc:
+        payloads["interp"] = {
+            "kind": "interpolation_comparison",
+            "error": {"type": type(exc).__name__, "message": str(exc)},
+        }
+        panels["interp"] = f"reported: {type(exc).__name__}"
+    if fx_config is None:
+        payloads["fx"] = None
+        payloads["structures"] = None
+        panels.update(fx="absent", structures="absent")
+    else:
+        payloads["fx"] = fx_forward(fx_config)
+        payloads["structures"] = hedge_structures(fx_config)
+        panels.update(fx="ok", structures="ok")
+    payloads["meta"] = {
+        "engine_version": _engine_version(),
+        "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "as_of": as_date(config["as_of"]).isoformat(),
+    }
+    page = render_page(payloads)
+    receipt = {
+        "schema_version": SCHEMA_VERSION,
+        "result_type": "VizResult",
+        "path": None,
+        "bytes": len(page.encode("utf-8")),
+        "panels": {key: panels[key] for key in PANELS},
+        "evidence": None,
+    }
+    return page, receipt
 
 
 Command = Callable[[dict[str, Any] | None], dict[str, Any]]

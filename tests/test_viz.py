@@ -4,8 +4,14 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import date, timedelta
 from importlib import resources
 
+import pytest
+
+from rates_engine.app.commands import COMMANDS, interpolation_gap, viz
+from rates_engine.conventions.schedule import imm_date, next_imm_on_or_after
+from rates_engine.core.errors import ConfigurationError, CurveArbitrageError
 from rates_engine.reporting.viz import DATA_MARKER, PANELS, render_page
 
 
@@ -14,6 +20,74 @@ def _embedded(page: str) -> dict:
     match = re.search(r"const DATA = (.*?);\n", page)
     assert match, "no DATA assignment in the page"
     return json.loads(match.group(1))
+
+
+AS_OF = date(2026, 1, 15)
+
+
+def _rates_config() -> dict:
+    """Two years of IMM quarters at a flat futures price, a payer swap across them."""
+    start = imm_date(2026, 3)
+    futures = []
+    period = start
+    for index in range(9):
+        following = next_imm_on_or_after(period + timedelta(days=1))
+        futures.append(
+            {
+                "label": f"SR3-{index + 1}",
+                "start": period.isoformat(),
+                "end": following.isoformat(),
+                "price": 96.0,
+            }
+        )
+        period = following
+    return {
+        "as_of": AS_OF.isoformat(),
+        "curve": {
+            "stub": {
+                "end": start.isoformat(),
+                "accrual_factor": 1.0 + 0.04 * ((start - AS_OF).days / 360.0),
+            },
+            "futures": futures,
+        },
+        "swap": {
+            "effective": start.isoformat(),
+            "maturity": period.isoformat(),
+            "fixed_rate": 0.04,
+            "notional": 100_000_000.0,
+            "side": "payer",
+        },
+        "risk": {"key_tenors": [0.5, 1.0, 2.0]},
+        "hedge": {"shocks_bp": [-100, -10, 10, 100]},
+    }
+
+
+FX_CONFIG = {
+    "as_of": AS_OF.isoformat(),
+    "fx": {
+        "spot": 18.50,
+        "delivery": "2026-12-15",
+        "r_domestic": 0.0950,
+        "r_foreign": 0.0420,
+        "basis_bp": -25.0,
+        "volatility": 0.115,
+    },
+    "exposure": {
+        "amount": 1_000_000.0,
+        "direction": "payable",
+        "hedge_ratio": 0.8,
+        "correlation": -0.30,
+        "foreign_asset_volatility": 0.10,
+        "proposed_instrument": "collar",
+    },
+    "hedge_program": {
+        "name": "treasury_2026",
+        "target_hedge_ratio": 0.80,
+        "discretion_band": 0.10,
+        "rebalance_frequency": "monthly",
+        "allowed_instruments": ["forward", "collar"],
+    },
+}
 
 
 class TestTemplate:
@@ -58,3 +132,88 @@ class TestRenderPage:
 
     def test_the_marker_is_gone_from_the_rendered_page(self):
         assert DATA_MARKER not in render_page({})
+
+
+class TestInterpolationGap:
+    """The one number the commands do not print, from the same calibration nodes."""
+
+    def test_it_samples_both_curves_on_the_comparison_dates(self):
+        gap = interpolation_gap(_rates_config())
+        assert gap["kind"] == "interpolation_comparison"
+        assert gap["as_of"] == AS_OF.isoformat()
+        n = len(gap["dates"])
+        assert n > 10
+        assert len(gap["log_linear"]) == len(gap["monotone_convex"]) == len(gap["diff_bp"]) == n
+        assert gap["max_forward_difference_date"] in gap["dates"]
+        assert max(abs(x) for x in gap["diff_bp"]) == pytest.approx(
+            gap["max_forward_difference_bp"], rel=1e-9
+        )
+
+    def test_it_refuses_without_a_config(self):
+        with pytest.raises(ConfigurationError, match="viz"):
+            interpolation_gap(None)
+
+
+class TestVizUseCase:
+    """Three commands, the gap, the renderer, and a receipt that names every panel."""
+
+    def test_without_an_fx_config_the_fx_panels_are_absent(self):
+        page, receipt = viz(_rates_config())
+        assert receipt["result_type"] == "VizResult"
+        assert receipt["path"] is None
+        assert receipt["bytes"] == len(page.encode("utf-8"))
+        assert receipt["panels"] == {
+            "bootstrap": "ok",
+            "price": "ok",
+            "hedge": "ok",
+            "interp": "ok",
+            "fx": "absent",
+            "structures": "absent",
+        }
+        data = _embedded(page)
+        assert data["bootstrap"] == COMMANDS["bootstrap"](_rates_config())
+        assert data["price"]["result_type"] == "PriceResult"
+        assert data["hedge"]["result_type"] == "HedgeResult"
+        assert data["interp"]["kind"] == "interpolation_comparison"
+        assert data["fx"] is None and data["structures"] is None
+        assert data["meta"]["as_of"] == AS_OF.isoformat()
+        assert data["meta"]["engine_version"]
+        assert data["meta"]["generated_at"].endswith("+00:00")
+
+    def test_with_an_fx_config_every_panel_is_ok(self):
+        page, receipt = viz(_rates_config(), FX_CONFIG)
+        assert receipt["panels"] == dict.fromkeys(PANELS, "ok")
+        data = _embedded(page)
+        assert data["fx"]["result_type"] == "FXForwardResult"
+        assert data["structures"]["result_type"] == "StructureComparison"
+
+    def test_nothing_on_the_page_recommends(self):
+        page, _ = viz(_rates_config(), FX_CONFIG)
+        assert "recommend" not in page.lower()
+
+    def test_an_interpolation_refusal_is_reported_not_raised(self, monkeypatch):
+        import rates_engine.app.commands as commands
+
+        def refuse(*args, **kwargs):
+            raise CurveArbitrageError(
+                "monotone convex went non-monotone between 2026-03-18 and 2026-06-17"
+            )
+
+        monkeypatch.setattr(commands, "compare_interpolations", refuse)
+        page, receipt = viz(_rates_config())
+        assert receipt["panels"]["interp"] == "reported: CurveArbitrageError"
+        assert receipt["panels"]["bootstrap"] == "ok"
+        interp = _embedded(page)["interp"]
+        assert interp["kind"] == "interpolation_comparison"
+        assert interp["error"]["type"] == "CurveArbitrageError"
+        assert "went non-monotone" in interp["error"]["message"]
+
+    def test_a_refusal_from_an_inner_command_raises(self):
+        config = _rates_config()
+        del config["swap"]
+        with pytest.raises(KeyError):
+            viz(config)
+
+    def test_it_refuses_without_a_config(self):
+        with pytest.raises(ConfigurationError, match="viz"):
+            viz(None)
