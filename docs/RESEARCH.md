@@ -141,6 +141,30 @@ them, carries a degradation that reaches `ASSUMED`, and can be made to
 refuse outright. Resolving them shortens a tuple; no code changes. See
 `docs/forge/research/003-mxn-conventions.md` for what was tried.
 
+**The cross-currency basis.** The CIP row is read and the basis row is
+secondary, and the gap between them is visible in the code. The market
+quotes the basis as a par spread on the non-USD leg of a cross-currency
+swap: two loans, notional exchanged at both ends, the spread chosen so the
+swap prices to zero. Making that swap price to zero forces a second peso
+curve — the one Fujii, Shimada and Takahashi derive for flows
+collateralised in another currency, secondary here via the same vault note
+as the collateral row — and the basis is the residual of projecting on the
+peso OIS curve and discounting on that one, divided by the annuity.
+Covered interest parity then holds with the second curve in place of the
+OIS curve, which is how the basis and the FX forward carry the same
+information. This derivation was read directly, in Hugo Castro's note *El
+Cross Currency Basis* (The Rates Lab), which works it for USD/CLP with
+SOFR and Cámara. `pricing/fx_forward.py` implements only the last step,
+and with a shortcut: `basis_bp` is a flat continuously compounded spread
+on the quote-currency zero rate at one tenor, so the implied curve is
+`P_d(T) exp(-b T)` by construction rather than stripped from quotes. That
+is a zero spread where the market quotes a par spread; the two agree at
+one coupon period and drift apart after it, and no code here converts
+between them. There is no cross-currency swap instrument, no implied
+curve, and no calibration node for one. The sign convention agrees with
+the note — a basis above zero puts the implied curve above the OIS curve
+— which is the one point of contact between what was read and what runs.
+
 ## What is validated against nothing external
 
 The dual-curve solver. There is no free source of Term SOFR par rates or
@@ -177,6 +201,7 @@ something it cannot reach by construction.
 | Every MXN convention: TIIE day count, coupon period, benchmark distinction, SIE identifiers, and that the calendar is the BMV's | `curves/mxn.py` | `UNRESOLVED_MXN`, one `Degradation` each on every peso result; `strict_conventions=True` refuses |
 | The USD/MXN pip is 1e-4 | `conventions/currency_pair.py` | Declared on `CurrencyPair` with no default, and serialised into every payload that reports forward points |
 | A cross-currency basis beyond ±500 bp is not a quote | `pricing/fx_forward.py` | `MAX_PLAUSIBLE_BASIS_BP`, a named constant; the refusal says the band is a plausibility check rather than a measurement |
+| The cross-currency basis enters as a flat zero-coupon spread on the quote-currency leg, not as the par spread a cross-currency swap quotes | `pricing/fx_forward.py` | `BASIS_LEG` names the leg; the module docstring names the spread as a zero spread; no instrument or curve here takes the par basis |
 
 ## Vault notes behind this package
 
