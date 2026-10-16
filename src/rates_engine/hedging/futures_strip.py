@@ -19,6 +19,7 @@ points of carry the convexity is worth over the life of the hedge.
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, replace
 from datetime import date
 from typing import Any
@@ -57,7 +58,10 @@ class HedgeResult(EngineResult):
     Attributes:
         swap: The instrument being hedged.
         curve_set: The base curves the hedge was sized on.
-        contracts: Contract count per futures label, signed. Positive is long.
+        contracts: Contract count per futures contract, signed. Positive is
+            long. Keyed by the contract's label, or by ``label@period-end``
+            where two contracts share a label, so no contract is ever folded
+            into another; every dict below uses the same keys.
         bucketed_delta_by_instrument: The swap's DV01 attributable to each
             futures quote, in USD per basis point. ``bump_basis`` for these is
             ``"instrument_quote"``, not a curve node.
@@ -166,7 +170,9 @@ def strip_hedge(
         IncompleteStripError: The strip has no contract covering part of the
             swap's span, and ``require_full_coverage`` is set. A missing
             contract is never interpolated from its neighbours.
-        ValueError: There are no futures among ``instruments``.
+        ValueError: There are no futures among ``instruments``, or two
+            contracts' labels cannot be told apart even with the period end
+            appended.
     """
     futures = tuple(i for i in instruments if isinstance(i, FuturesNode))
     if not futures:
@@ -178,6 +184,13 @@ def strip_hedge(
     if require_full_coverage:
         _check_coverage(futures, start, end)
 
+    # Every dict below is keyed per contract, not per label. Two futures with
+    # the same label -- the default "future", or "SR3" on every row of a CLI
+    # config -- once shared one entry, so each overwrote the last and the
+    # README strip without labels was sized as a single contract: 101.6
+    # contracts instead of 878, with no error.
+    keys = _contract_keys(futures)
+
     base = bootstrap_discount_curve(as_of, instruments, long_end_source=long_end_source)
     curve_set = CurveSet(base.curve)
     swap_dv01 = dv01(swap, curve_set, source_evidence=(base.evidence,)).value
@@ -185,13 +198,13 @@ def strip_hedge(
     deltas: dict[str, float] = {}
     contracts: dict[str, float] = {}
     periods: dict[str, tuple[date, date]] = {}
-    for contract in futures:
+    for key, contract in zip(keys, futures, strict=True):
         up = _reprice_with_quote_bump(swap, instruments, contract, +BASIS_POINT, as_of, long_end_source)
         down = _reprice_with_quote_bump(swap, instruments, contract, -BASIS_POINT, as_of, long_end_source)
         delta = (down - up) / 2.0
-        deltas[contract.label] = delta
-        contracts[contract.label] = -delta / contract_dv01
-        periods[contract.label] = (contract.start, contract.end)
+        deltas[key] = delta
+        contracts[key] = -delta / contract_dv01
+        periods[key] = (contract.start, contract.end)
 
     total = sum(contracts.values())
     strip_dv01 = total * contract_dv01
@@ -199,8 +212,8 @@ def strip_hedge(
         swap, instruments, futures, as_of, long_end_source
     )
     base_forwards = {
-        contract.label: base.curve.forward(contract.start, contract.end)
-        for contract in futures
+        key: base.curve.forward(contract.start, contract.end)
+        for key, contract in zip(keys, futures, strict=True)
     }
 
     evidence = Evidence(
@@ -270,6 +283,34 @@ def _quote_parallel_dv01(
         return discounted_value(swap, CurveSet(curve))
 
     return (repriced(-BASIS_POINT) - repriced(+BASIS_POINT)) / 2.0
+
+
+def _contract_keys(futures: tuple[FuturesNode, ...]) -> list[str]:
+    """Each contract's label, made unique with its period end where two collide.
+
+    The rule the bootstrap applies to its residuals: a label that appears once
+    is its own key, so every labelled strip reports exactly as it did, and
+    colliding labels become ``"future@2026-06-17"`` and so on. The period end
+    is the node the contract pins, and the bootstrap has already refused two
+    instruments pinning one node, so the suffix separates any two futures.
+
+    Raises:
+        ValueError: A label made unique this way equals another contract's
+            label as given, e.g. one contract labelled ``"X@2026-06-17"`` and
+            two labelled ``"X"``. Picking one would merge two contracts again.
+    """
+    counts = Counter(contract.label for contract in futures)
+    keys = [
+        contract.label if counts[contract.label] == 1 else f"{contract.label}@{contract.end.isoformat()}"
+        for contract in futures
+    ]
+    clashes = sorted(key for key, count in Counter(keys).items() if count > 1)
+    if clashes:
+        raise ValueError(
+            f"futures labels {clashes} still collide after appending the period end to "
+            "repeated labels; give every futures contract a distinct label"
+        )
+    return keys
 
 
 def _check_coverage(futures: tuple[FuturesNode, ...], start: date, end: date) -> None:

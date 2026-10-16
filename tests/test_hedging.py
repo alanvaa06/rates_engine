@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import timedelta
 
 import pytest
 
+from rates_engine.app import commands
+from rates_engine.conventions.schedule import imm_date, next_imm_on_or_after
 from rates_engine.core.errors import IncompleteStripError
 from rates_engine.curves.bootstrap import FuturesNode
 from rates_engine.hedging.futures_strip import SR3_DV01, shock_table, strip_hedge
@@ -65,6 +68,78 @@ class TestSizing:
         assert payload["swap_dv01_bump_basis"] == "zero_curve_parallel"
         assert payload["quote_parallel_dv01"] != payload["swap_dv01"]
         assert "different derivatives" in payload["node_vs_instrument_note"]
+
+
+def _relabelled(strip, label: str | None) -> tuple:
+    """The suite's strip with every futures label replaced, or dropped for the default."""
+    return tuple(
+        (replace(i, label=label) if label is not None else FuturesNode(i.start, i.end, i.forward_rate))
+        if isinstance(i, FuturesNode)
+        else i
+        for i in strip
+    )
+
+
+class TestContractsThatShareALabel:
+    """A label names a contract for the report; it must not decide how many there are.
+
+    ``FuturesNode.label`` defaults to ``"future"``, so the README strip built
+    without labels gives nine contracts the same name. Keying the hedge's
+    dicts by label let each overwrite the last: the sizing kept one
+    contract's delta for the whole strip and reported 101.6 contracts against
+    the 878 the swap needs, a hedge ratio of -0.116, and no error.
+    """
+
+    def test_unlabelled_futures_are_sized_one_by_one(self, par_swap, strip, as_of):
+        hedge = strip_hedge(par_swap, _relabelled(strip, None), as_of=as_of)
+        assert len(hedge.contracts) == 9
+        # The two identities the sizing has to satisfy whatever the labels
+        # are, each against a number computed by a separate route: the
+        # bucketed deltas sum to the all-quotes-at-once DV01, and the strip
+        # offsets it.
+        assert sum(hedge.bucketed_delta_by_instrument.values()) == pytest.approx(
+            hedge.quote_parallel_dv01, rel=1e-6
+        )
+        assert hedge.hedge_ratio == pytest.approx(-1.0, abs=1e-6)
+        assert hedge.total_contracts == pytest.approx(
+            abs(hedge.quote_parallel_dv01) / SR3_DV01, rel=1e-6
+        )
+
+    def test_a_shared_label_is_made_unique_with_the_period_end(self, par_swap, strip, as_of):
+        # The same rule the bootstrap applies to its residuals.
+        hedge = strip_hedge(par_swap, _relabelled(strip, "SR3"), as_of=as_of)
+        ends = [i.end.isoformat() for i in strip if isinstance(i, FuturesNode)]
+        assert list(hedge.contracts) == [f"SR3@{end}" for end in ends]
+        assert set(hedge.periods) == set(hedge.contracts) == set(hedge.base_forwards)
+
+    def test_the_labels_do_not_change_a_single_number(self, par_swap, strip, as_of):
+        labelled = strip_hedge(par_swap, strip, as_of=as_of)
+        for label in (None, "SR3"):
+            other = strip_hedge(par_swap, _relabelled(strip, label), as_of=as_of)
+            assert list(other.contracts.values()) == list(labelled.contracts.values())
+            assert other.total_contracts == labelled.total_contracts
+            assert other.strip_dv01 == labelled.strip_dv01
+
+    def test_the_shock_table_nets_every_contract(self, par_swap, strip, as_of):
+        # README strip at +10 bp: the labelled hedge nets to -310 USD of
+        # convexity; the merged one netted to +193,078.
+        labelled = shock_table(strip_hedge(par_swap, strip, as_of=as_of), (10.0,))
+        merged = shock_table(strip_hedge(par_swap, _relabelled(strip, None), as_of=as_of), (10.0,))
+        assert merged.table.net_pnl.iloc[0] == labelled.table.net_pnl.iloc[0]
+        assert abs(merged.table.net_pnl.iloc[0]) < 1_000.0
+
+    def test_a_label_that_collides_after_disambiguation_refuses(self, par_swap, strip, as_of):
+        futures = [i for i in strip if isinstance(i, FuturesNode)]
+        clash = f"X@{futures[1].end.isoformat()}"
+        relabelled = []
+        for i in strip:
+            if i is futures[0]:
+                i = replace(i, label=clash)
+            elif i is futures[1] or i is futures[2]:
+                i = replace(i, label="X")
+            relabelled.append(i)
+        with pytest.raises(ValueError, match="label"):
+            strip_hedge(par_swap, tuple(relabelled), as_of=as_of)
 
 
 class TestIncompleteStrip:
@@ -190,3 +265,52 @@ class TestConvexityReconciliation:
             par_swap, curve_set
         ).value * (10.0 * 1e-4) ** 2
         assert predicted == pytest.approx(row.swap_pnl, rel=1e-5)
+
+
+def _hedge_config(as_of, *, label=None) -> dict:
+    """A ``hedge`` command config over the suite's two years of IMM quarters at 96.00."""
+    start = imm_date(2026, 3)
+    futures = []
+    period = start
+    for index in range(9):
+        following = next_imm_on_or_after(period + timedelta(days=1))
+        futures.append(
+            {
+                "label": label if label is not None else f"SR3-{index + 1}",
+                "start": period.isoformat(),
+                "end": following.isoformat(),
+                "price": 96.0,
+            }
+        )
+        period = following
+    return {
+        "as_of": as_of.isoformat(),
+        "curve": {
+            "stub": {
+                "end": start.isoformat(),
+                "accrual_factor": 1.0 + 0.04 * ((start - as_of).days / 360.0),
+            },
+            "futures": futures,
+        },
+        "swap": {
+            "effective": start.isoformat(),
+            "maturity": period.isoformat(),
+            "fixed_rate": 0.04,
+            "notional": 100_000_000.0,
+            "side": "payer",
+        },
+        "hedge": {"shocks_bp": [-10, 10]},
+    }
+
+
+class TestTheHedgeCommand:
+    """The CLI's ``hedge`` body: what the config can say, and what it refuses."""
+
+    def test_futures_rows_that_share_a_label_are_sized_one_by_one(self, as_of):
+        # Every row labelled "SR3" used to come back as one contract of 101.6
+        # with a hedge ratio of -0.116, and exit code 0.
+        payload = commands.hedge(_hedge_config(as_of, label="SR3"))
+        assert len(payload["contracts"]) == 9
+        assert payload["hedge_ratio"] == pytest.approx(-1.0, abs=1e-6)
+        labelled = commands.hedge(_hedge_config(as_of))
+        assert payload["total_contracts"] == labelled["total_contracts"]
