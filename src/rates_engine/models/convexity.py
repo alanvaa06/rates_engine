@@ -39,7 +39,7 @@ from enum import StrEnum
 from typing import Any
 
 from rates_engine.conventions.indices import SOFR
-from rates_engine.core.errors import UnsupportedConventionError
+from rates_engine.core.errors import ImplausibleInputError, UnsupportedConventionError
 from rates_engine.core.evidence import DataQuality, Evidence, Provenance
 from rates_engine.core.results import EngineResult
 
@@ -47,7 +47,20 @@ __all__ = [
     "ConvexityModel",
     "ConvexityResult",
     "convexity_adjustment",
+    "MAX_PLAUSIBLE_SIGMA",
 ]
+
+MAX_PLAUSIBLE_SIGMA = 0.10
+"""Largest normal volatility accepted, as a decimal annual rate: 1000 bp a year.
+
+The same ceiling :class:`~rates_engine.volatility.units.Volatility` puts on a
+normal volatility. SOFR's realised normal vol has run at tens of basis points
+a year, and a few hundred in a stressed window, so this sits well beyond any
+market. What it catches is units: a sigma typed in percent (``1.0`` for 1%)
+gave 22,500 bp of adjustment at two years, and one typed in basis points
+(``100``) gave 225,000,000 bp, both without a word. It is a plausibility band,
+not a measurement; widen it deliberately if you mean it.
+"""
 
 _KAPPA_FLOOR = 1e-8
 """Below this, the Hull-White expression is evaluated as its Ho-Lee limit.
@@ -88,11 +101,15 @@ class ConvexityResult(EngineResult):
 
     Attributes:
         adjustment_bp: Futures rate minus forward rate, in basis points.
-            Always non-negative for non-negative sigma.
+            Non-negative: sigma is refused below zero, and a period that has
+            already started (``time_to_start < 0``) is given zero, the value
+            both models take at ``time_to_start = 0``.
         model: Which model produced it.
-        sigma: Normal volatility as an absolute annual rate, so 1% is ``0.01``.
+        sigma: Normal volatility as an absolute annual rate, so 1% (100 bp a
+            year) is ``0.01``.
         kappa: Mean reversion, ``None`` for Ho-Lee.
-        time_to_start: Years to the reference period start.
+        time_to_start: Years to the reference period start, as given; negative
+            for a period already under way.
         time_to_end: Years to the reference period end.
     """
 
@@ -120,6 +137,17 @@ class ConvexityResult(EngineResult):
         }
 
 
+def _require_kappa(kappa: float | None) -> float:
+    """Hull-White's mean reversion, refused when missing or negative."""
+    if kappa is None:
+        raise UnsupportedConventionError(
+            "hull_white needs a kappa; pass one or use model='ho_lee'"
+        )
+    if kappa < 0.0:
+        raise ValueError(f"kappa must be non-negative, got {kappa!r}")
+    return kappa
+
+
 def _b(kappa: float, span: float) -> float:
     """Hull-White ``B(t, t + span) = (1 - exp(-kappa * span)) / kappa``, stable at small kappa."""
     if kappa == 0.0:
@@ -139,11 +167,23 @@ def convexity_adjustment(
 ) -> ConvexityResult:
     """The futures-minus-forward adjustment for one reference period.
 
+    **A period that has started has none.** Both models price the convexity
+    of a rate not yet fixed at the period start, and both vanish at ``T1 =
+    0``. Below zero the Ho-Lee product ``T1 T2`` went negative and so did the
+    adjustment, against the promise that it never is. QuantLib's
+    ``HullWhite.convexityBias`` refuses a negative ``T1``; this takes the
+    limit instead and records ``period_started`` in the evidence, because a
+    front contract already in its reference period is an ordinary input to
+    a futures strip and refusing it would refuse the strip.
+
     Args:
-        time_to_start: Years from valuation to the period start (``T1``).
+        time_to_start: Years from valuation to the period start (``T1``);
+            negative once the period is under way.
         time_to_end: Years from valuation to the period end (``T2``).
         model: ``"none"``, ``"ho_lee"`` or ``"hull_white"``.
-        sigma: Normal volatility as an absolute annual rate; 1% is ``0.01``.
+        sigma: Normal volatility as a decimal annual rate: 1% a year, 100 bp,
+            is ``0.01``. Refused above :data:`MAX_PLAUSIBLE_SIGMA`, which is
+            where a sigma given in percent or in basis points lands.
         kappa: Mean reversion for Hull-White, in inverse years. Required for
             that model, ignored by the others.
         sigma_source: ``"explicit"`` or ``"realized_sofr"``, recorded in the
@@ -156,32 +196,48 @@ def convexity_adjustment(
     Raises:
         UnsupportedConventionError: ``model`` is not implemented, or
             Hull-White was asked for without a ``kappa``.
-        ValueError: Sigma is negative, or the period is not ordered.
+        ImplausibleInputError: Sigma is above :data:`MAX_PLAUSIBLE_SIGMA`, or
+            sigma, kappa or a time is NaN or infinite.
+        ValueError: Sigma or kappa is negative, or the period is not ordered.
     """
     if model not in _MODELS:
         raise UnsupportedConventionError(
             f"convexity model {model!r} is not implemented; "
             f"supported: {', '.join(m.value for m in ConvexityModel)}"
         )
+    for name, value in (("time_to_start", time_to_start), ("time_to_end", time_to_end)):
+        if not math.isfinite(value):
+            raise ImplausibleInputError(f"{name} is {value!r}; a time is a finite number of years")
     if sigma < 0.0:
         raise ValueError(f"sigma must be non-negative, got {sigma!r}")
+    if not sigma <= MAX_PLAUSIBLE_SIGMA:
+        raise ImplausibleInputError(
+            f"sigma {sigma!r} is outside the [0, {MAX_PLAUSIBLE_SIGMA}] band this build "
+            f"accepts. Sigma is a decimal normal volatility a year: 1% (100 bp) is 0.01, so "
+            f"{sigma!r} would be {sigma * 1e4:,.0f} bp a year. A sigma in percent or in basis "
+            "points lands here; divide it by 100 or 10,000. Widen MAX_PLAUSIBLE_SIGMA "
+            "deliberately if you mean it."
+        )
+    if kappa is not None and not math.isfinite(kappa):
+        raise ImplausibleInputError(f"kappa is {kappa!r}; mean reversion is a finite rate")
     if time_to_end < time_to_start:
         raise ValueError(
             f"period end {time_to_end} precedes start {time_to_start}"
         )
 
+    started = time_to_start < 0.0
     took_limit = False
-    if model == ConvexityModel.NONE:
+    if model == ConvexityModel.NONE or started:
+        # A started period: both models are zero at T1 = 0, which is the
+        # limit taken here. Hull-White still needs a valid kappa, checked
+        # below, so a bad configuration does not hide behind a front month.
         adjustment = 0.0
+        if model == ConvexityModel.HULL_WHITE:
+            _require_kappa(kappa)
     elif model == ConvexityModel.HO_LEE:
         adjustment = 0.5 * sigma * sigma * time_to_start * time_to_end
     else:
-        if kappa is None:
-            raise UnsupportedConventionError(
-                "hull_white needs a kappa; pass one or use model='ho_lee'"
-            )
-        if kappa < 0.0:
-            raise ValueError(f"kappa must be non-negative, got {kappa!r}")
+        kappa = _require_kappa(kappa)
         if kappa < _KAPPA_FLOOR:
             took_limit = True
             adjustment = 0.5 * sigma * sigma * time_to_start * time_to_end
@@ -219,6 +275,8 @@ def convexity_adjustment(
             "time_to_start": time_to_start,
             "time_to_end": time_to_end,
             "hull_white_evaluated_as_ho_lee_limit": took_limit,
+            "period_started": started,
+            "sigma_units": "decimal normal volatility per year (0.01 = 100 bp)",
             # SOFR futures are a dollar product, so the collateral index is
             # SOFR by construction rather than read from a curve.
             "discounting": f"collateral_rate_ois_{SOFR.slug}",

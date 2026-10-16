@@ -6,11 +6,19 @@ import csv
 
 import pytest
 
-from rates_engine.core.errors import InsufficientDataError, UnsupportedConventionError
+from rates_engine.core.errors import (
+    ImplausibleInputError,
+    InsufficientDataError,
+    UnsupportedConventionError,
+)
 from rates_engine.core.evidence import DataQuality
 from rates_engine.market.estimators import MIN_REALIZED_OBSERVATIONS, realized_sofr_sigma
 from rates_engine.market.snapshot import MarketSnapshot, Series
-from rates_engine.models.convexity import ConvexityModel, convexity_adjustment
+from rates_engine.models.convexity import (
+    MAX_PLAUSIBLE_SIGMA,
+    ConvexityModel,
+    convexity_adjustment,
+)
 
 
 class TestHoLee:
@@ -162,6 +170,87 @@ class TestSigmaSource:
     def test_unknown_model_refuses(self):
         with pytest.raises(UnsupportedConventionError, match="sabr"):
             convexity_adjustment(1.0, 1.25, model="sabr", sigma=0.01)
+
+
+class TestStartedPeriods:
+    """A contract whose reference period has already started has no adjustment.
+
+    Ho-Lee and Hull-White price the convexity of a rate that is not yet
+    fixed at the period start; both vanish at ``T1 = 0``. Below zero the
+    Ho-Lee product ``T1 T2`` turned negative and so did the adjustment,
+    against a docstring that promised "always non-negative". QuantLib's
+    ``HullWhite.convexityBias`` refuses a negative ``T1`` outright; this
+    build takes the limit instead, because a front contract in progress is
+    an ordinary input to the futures bootstrap and refusing it would refuse
+    the strip.
+    """
+
+    @pytest.mark.parametrize(
+        ("model", "kappa"), [(ConvexityModel.HO_LEE, None), (ConvexityModel.HULL_WHITE, 0.03)]
+    )
+    def test_a_started_period_is_zero_not_negative(self, model, kappa):
+        result = convexity_adjustment(-0.10, 0.15, model=model, sigma=0.01, kappa=kappa)
+        assert result.adjustment_bp == 0.0
+        assert result.evidence.fields["period_started"] is True
+
+    @pytest.mark.parametrize(
+        ("model", "kappa"), [(ConvexityModel.HO_LEE, None), (ConvexityModel.HULL_WHITE, 0.03)]
+    )
+    def test_it_is_the_limit_at_the_start(self, model, kappa):
+        at_start = convexity_adjustment(0.0, 0.25, model=model, sigma=0.01, kappa=kappa)
+        assert at_start.adjustment_bp == 0.0
+        assert at_start.evidence.fields["period_started"] is False
+
+    def test_a_future_period_is_untouched(self):
+        result = convexity_adjustment(2.0, 2.25, model=ConvexityModel.HO_LEE, sigma=0.01)
+        assert result.adjustment_bp == pytest.approx(0.5 * 0.01**2 * 2.0 * 2.25 * 1e4)
+        assert result.evidence.fields["period_started"] is False
+
+
+class TestSigmaUnits:
+    """Sigma is a decimal normal volatility, and a magnitude band says so.
+
+    Without one, a sigma typed in percent (1.0 for 1%) gave a 22,500 bp
+    adjustment at two years and one typed in basis points (100) gave
+    225,000,000 bp, both without complaint. The band matches the normal
+    band ``Volatility`` already enforces, 1000 bp a year.
+    """
+
+    @pytest.mark.parametrize("sigma", [1.0, 100.0, 0.5])
+    def test_a_sigma_in_the_wrong_units_refuses(self, sigma):
+        with pytest.raises(ImplausibleInputError, match="0.01"):
+            convexity_adjustment(2.0, 2.25, model=ConvexityModel.HO_LEE, sigma=sigma)
+
+    @pytest.mark.parametrize("sigma", [float("nan"), float("inf")])
+    def test_a_non_finite_sigma_refuses(self, sigma):
+        with pytest.raises(ImplausibleInputError):
+            convexity_adjustment(2.0, 2.25, model=ConvexityModel.HO_LEE, sigma=sigma)
+
+    def test_the_band_edge_is_accepted(self):
+        result = convexity_adjustment(
+            2.0, 2.25, model=ConvexityModel.HO_LEE, sigma=MAX_PLAUSIBLE_SIGMA
+        )
+        assert result.adjustment_bp == pytest.approx(
+            0.5 * MAX_PLAUSIBLE_SIGMA**2 * 2.0 * 2.25 * 1e4
+        )
+
+    def test_the_band_is_a_thousand_basis_points_a_year(self):
+        assert MAX_PLAUSIBLE_SIGMA == 0.10
+
+    def test_the_band_applies_even_with_no_model(self):
+        """A sigma in the wrong units is a wrong input whatever it feeds."""
+        with pytest.raises(ImplausibleInputError):
+            convexity_adjustment(2.0, 2.25, model=ConvexityModel.NONE, sigma=1.0)
+
+    def test_a_non_finite_kappa_refuses(self):
+        with pytest.raises(ImplausibleInputError, match="kappa"):
+            convexity_adjustment(
+                2.0, 2.25, model=ConvexityModel.HULL_WHITE, sigma=0.01, kappa=float("nan")
+            )
+
+    def test_non_finite_times_refuse(self):
+        with pytest.raises(ImplausibleInputError, match="time"):
+            convexity_adjustment(float("nan"), 2.25, model=ConvexityModel.HO_LEE, sigma=0.01)
 
 
 class TestDiscountingDeclared:
