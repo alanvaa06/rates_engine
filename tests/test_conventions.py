@@ -77,8 +77,9 @@ class TestCalendar:
 
     def test_fixture_matches_the_implemented_calendar(self, fixtures_dir):
         # Generated from the same rules, so this catches an accidental edit to
-        # either side, not a wrong rule. The wrong-rule check is the
-        # [manual-check] recorded in the fixture's provenance.
+        # either side, not a wrong rule. The wrong-rule check is
+        # tests/test_sifma_publication_record.py, against the SOFR publication
+        # record; v0.3's fixture agreed with v0.3's wrong rules.
         import csv
 
         with (fixtures_dir / "sifma_holidays.csv").open(encoding="utf-8") as handle:

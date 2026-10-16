@@ -5,20 +5,38 @@ written out one function per holiday rather than compressed: a mis-entered rule
 produces a curve that is wrong by a day's accrual on some nodes and right on
 others, and that is far easier to review as twelve named rules than as a table.
 
-**The manual check.** ``SIFMA_US`` encodes the twelve recommended US holidays
-and the observance rule used for the government bond market: a Sunday
-holiday is observed on the following Monday, and a Saturday one on the
-preceding Friday for Independence Day, Juneteenth and Christmas only -- New
-Year's Day and Veterans Day on a Saturday close nothing. That observance
-rule, and nothing else here, is what PRD-001 AC-1.2 marks
-``[manual-check]``: it must be confirmed once against SIFMA's published
-calendar. Until it is, the fixture generated from these rules carries
-``data_quality="assumed"``.
+**The manual check, done against the record.** ``SIFMA_US`` encodes the
+twelve recommended US holidays and the observance rule used for the
+government bond market: a Sunday holiday is observed on the following
+Monday, and a Saturday one on the preceding Friday for Independence Day,
+Juneteenth and Christmas only -- New Year's Day and Veterans Day on a
+Saturday close nothing. PRD-001 AC-1.2 marked that rule ``[manual-check]``,
+to be confirmed against SIFMA's published calendar, which the build
+environment cannot reach. It has been confirmed instead against something
+stricter: the New York Fed publishes SOFR for every U.S. government
+securities business day, and the calendar agrees with that publication
+record (FRED series ``SOFR``) on every weekday from
+:attr:`SIFMAUSCalendar.VERIFIED_FROM` to
+:attr:`SIFMAUSCalendar.VERIFIED_THROUGH`. The check found three wrong rules
+in v0.3 -- Memorial Day, the Saturday rule for two of the five holidays, a
+missing special closure -- and ``tests/test_sifma_publication_record.py``
+now holds the calendar to the record.
+
+**What the record cannot cover.** Dates after
+:attr:`SIFMAUSCalendar.VERIFIED_THROUGH` come from the rules alone, and an
+unscheduled closure -- a national day of mourning, a storm -- cannot be
+known before it is announced. Juneteenth on a Saturday, first due on 19
+June 2027, has not happened since SIFMA began observing it, so its Friday
+rule is the one rule here the record has not exercised; QuantLib 1.44
+applies the same one. Before April 2018 there is no SOFR record, and the
+special closures of those years are not encoded.
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import date, timedelta
+from types import MappingProxyType
 from typing import Protocol, runtime_checkable
 
 from rates_engine.conventions.daycount import DayCount, year_fraction
@@ -280,9 +298,47 @@ class SIFMAUSCalendar(HolidayCalendar):
 
     Twelve holidays. Juneteenth only from 2022, the year it became a federal
     holiday; asking about 2021 correctly reports 19 June as a business day.
+
+    **It is the calendar SOFR fixes on**, and where that and SIFMA's
+    recommendation part, it follows SOFR. The one place they do is Good
+    Friday in a year when the employment report comes out that morning --
+    2021, 2023 and 2026 so far. QuantLib's ``UnitedStates.GovernmentBond``
+    keeps those days open, for SIFMA's early close, but the New York Fed
+    published no SOFR on any of the three, so here they are holidays like
+    every other Good Friday, as in QuantLib's ``UnitedStates.SOFR``. A
+    fixing that was never published cannot be compounded, and a calendar
+    that asks for one turns a valid period into ``MissingFixingError``.
+
+    **Special closures** are listed in :attr:`SPECIAL_CLOSURES`, one date
+    each with the reason, because no rule produces them. A day the market
+    stayed open in spite of an occasion is not listed: 9 January 2025, the
+    national day of mourning for President Carter, was one, and SOFR was
+    published for it (4.30%).
     """
 
     name = "SIFMA_US"
+
+    #: Closures no rule produces, each with the reason and the record that
+    #: shows it. Only the stretch the publication record covers is listed;
+    #: closures before SOFR began in April 2018 are not encoded.
+    SPECIAL_CLOSURES: Mapping[date, str] = MappingProxyType(
+        {
+            date(2018, 12, 5): (
+                "National day of mourning for President George H. W. Bush. No SOFR "
+                "was published for it (FRED series SOFR); QuantLib 1.44 closes it in "
+                "both UnitedStates.GovernmentBond and UnitedStates.SOFR."
+            ),
+        }
+    )
+
+    #: First weekday checked against the SOFR publication record: 3 April
+    #: 2018, the first SOFR in FRED's series.
+    VERIFIED_FROM = date(2018, 4, 3)
+
+    #: Last weekday checked against the record, as downloaded from FRED on
+    #: 15 October 2026. Moving it later needs the record extended to match;
+    #: ``tests/test_sifma_publication_record.py`` fails until it is.
+    VERIFIED_THROUGH = date(2026, 10, 14)
 
     def holidays(self, year: int) -> frozenset[date]:
         """Every holiday observed in ``year``, as observed dates.
@@ -292,8 +348,9 @@ class SIFMAUSCalendar(HolidayCalendar):
 
         Returns:
             The observed dates, already rolled off weekends where the rule
-            applies. Good Friday and the n-th-weekday holidays never need it.
-            New Year's Day and Veterans Day on a Saturday are returned on the
+            applies, plus any :attr:`SPECIAL_CLOSURES` in the year. Good
+            Friday and the n-th-weekday holidays never need a roll. New
+            Year's Day and Veterans Day on a Saturday are returned on the
             Saturday, which closes no business day.
         """
         days = {
@@ -311,6 +368,7 @@ class SIFMAUSCalendar(HolidayCalendar):
         }
         if year >= 2022:
             days.add(_observed(date(year, 6, 19)))
+        days.update(day for day in self.SPECIAL_CLOSURES if day.year == year)
         return frozenset(days)
 
 
