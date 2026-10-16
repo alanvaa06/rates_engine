@@ -66,14 +66,15 @@ def forward_swap_rate(swaption: Swaption, curve_set: CurveSet) -> float:
 
 
 def swaption_annuity(swaption: Swaption, curve_set: CurveSet) -> float:
-    """The numeraire: discounted fixed-leg accrual times notional, in USD.
+    """The numeraire: discounted fixed-leg accrual times notional, in the swap's currency.
 
     Args:
         swaption: The contract.
         curve_set: Discount and projection curves.
 
     Returns:
-        The annuity in USD per unit of rate.
+        The annuity in the underlying swap's currency per unit of rate --
+        USD for a SOFR swaption, MXN for a TIIE one.
     """
     from rates_engine.pricing.linear import annuity as leg_annuity
 
@@ -171,13 +172,17 @@ class OptionPriceResult(EngineResult):
     """An option price and everything the model needed to produce it.
 
     Attributes:
-        value: Present value in USD.
+        value: Present value, in :attr:`currency`.
         model: ``"bachelier"`` or ``"black"``.
         volatility: The quote used, carrying its units.
         forward: The forward rate the option is on, as a decimal.
         strike: The strike as a decimal.
         expiry: Time to expiry in years.
-        numeraire: The annuity or discounted accrual the payoff scaled by.
+        numeraire: The annuity or discounted accrual the payoff scaled by,
+            in :attr:`currency` per unit of rate.
+        currency: What :attr:`value` and :attr:`numeraire` are in, taken
+            from the curves the option was priced on -- the payload's
+            ``unit`` used to say ``"USD"`` for a peso swaption too.
     """
 
     value: float
@@ -187,12 +192,13 @@ class OptionPriceResult(EngineResult):
     strike: float
     expiry: float
     numeraire: float
+    currency: str
 
     def payload_fields(self) -> dict[str, Any]:
         """The price and the full set of model inputs behind it."""
         return {
             "value": self.value,
-            "unit": "USD",
+            "unit": self.currency,
             "model": self.model,
             "volatility": self.volatility.to_dict(),
             "forward": self.forward,
@@ -285,6 +291,7 @@ def swaption_pv(
         strike=swaption.strike,
         expiry=expiry,
         numeraire=numeraire,
+        currency=curve_set.currency.value,
     )
 
 
@@ -295,7 +302,7 @@ def caplet_pv(
     *,
     as_of: date | None = None,
 ) -> float:
-    """Price one caplet or floorlet, in USD.
+    """Price one caplet or floorlet, in the caplet's currency.
 
     Args:
         caplet: The period.
@@ -304,7 +311,7 @@ def caplet_pv(
         as_of: Valuation date. Defaults to the curve's.
 
     Returns:
-        The present value in USD.
+        The present value in the caplet's currency.
 
     Raises:
         MissingForwardError: The period ends past the projection curve.
@@ -396,4 +403,5 @@ def cap_floor_pv(
         strike=cap.strike,
         expiry=expiries[-1],
         numeraire=sum(numeraires),
+        currency=curve_set.currency.value,
     )

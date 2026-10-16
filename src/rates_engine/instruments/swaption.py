@@ -48,7 +48,8 @@ class Swaption:
         strike: The fixed rate the option is struck at, as a decimal.
         side: ``"payer"`` for the right to pay fixed, ``"receiver"`` for the
             right to receive it.
-        notional: Notional in USD.
+        notional: Notional in the underlying swap's currency, which its
+            index fixes: USD on SOFR, MXN on TIIE.
     """
 
     expiry: date

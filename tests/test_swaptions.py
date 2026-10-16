@@ -395,6 +395,37 @@ class TestSwaptionPricing:
                 side="long",
             )
 
+    def test_a_peso_swaption_says_its_value_is_in_pesos(self):
+        # The payload said "unit": "USD" for every option, while the greeks
+        # of the same TIIE swaption said MXN_per_bp.
+        from datetime import date, timedelta
+
+        from rates_engine.conventions.indices import TIIE_FONDEO
+        from rates_engine.core.money import Currency
+        from rates_engine.curves.discount import CurveSet, DiscountCurve
+
+        as_of = date(2026, 1, 15)
+        nodes = tuple(as_of + timedelta(days=365 * k) for k in range(1, 11))
+        pesos = CurveSet(
+            DiscountCurve(
+                as_of, nodes, tuple(math.exp(-0.085 * k) for k in range(1, 11)),
+                currency=Currency.MXN,
+            )
+        )
+        swap = OISSwap(
+            date(2027, 1, 15), date(2032, 1, 15), 0.085, 100_000_000.0, index=TIIE_FONDEO
+        )
+        swaption = Swaption(date(2027, 1, 15), swap, 0.085, Side.PAYER, 100_000_000.0)
+        vol = Volatility.normal_bp(120.0)
+        payload = swaption_pv(swaption, pesos, vol).to_dict()
+        assert payload["unit"] == "MXN"
+        assert option_greeks(swaption, pesos, vol).to_dict()["vega_unit"].startswith("MXN_")
+
+    def test_a_dollar_swaption_still_says_usd(self, atm_swaption, option_curve_set):
+        result = swaption_pv(atm_swaption, option_curve_set, Volatility.normal_bp(80.0))
+        assert result.to_dict()["unit"] == "USD"
+        assert result.currency == "USD"
+
     def test_the_payload_carries_every_model_input(self, atm_swaption, option_curve_set):
         payload = swaption_pv(
             atm_swaption, option_curve_set, Volatility.normal_bp(80.0)
