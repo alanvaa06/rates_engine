@@ -803,7 +803,14 @@ def compare_structures(
         currency = float(quote.vol_at(outright))
         cross = 2.0 * float(correlation) * asset * currency
         total = asset * asset + currency * currency + cross
-        hedged = total - hedge_ratio * (currency * currency + cross)
+        # A hedge ratio h leaves (1 - h) of the currency return in the
+        # domestic return, R_FC + (1 - h) R_FX, so the currency variance
+        # scales with (1 - h)^2 and the cross term with (1 - h). This
+        # subtracted h (sigma^2(RFX) + cross), linear in h: right at h = 0
+        # and h = 1, the two ends the tests checked, and 0.011265 against
+        # 0.009149 at h = 0.8 on the PRD's market.
+        left = 1.0 - hedge_ratio
+        hedged = asset * asset + left * left * currency * currency + left * cross
         decomposition = {
             "asset_variance": asset * asset,
             "currency_variance": currency * currency,

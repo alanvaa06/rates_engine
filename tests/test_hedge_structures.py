@@ -397,6 +397,43 @@ class TestTheVarianceDecomposition:
             math.sqrt(decomposed["total_variance_unhedged"])
         )
 
+    @pytest.mark.parametrize("hedge_ratio", [0.2, 0.5, 0.8])
+    def test_a_partial_hedge_leaves_the_variance_of_what_is_left(self, hedge_ratio):
+        """The hedged return is the asset's plus the unhedged share of the
+        currency's, `r_a + (1 - h) r_x`, so its variance is
+        `s_a^2 + (1 - h)^2 s_x^2 + 2 (1 - h) rho s_a s_x` -- quadratic in h.
+        The engine subtracted `h (s_x^2 + 2 rho s_a s_x)`, linear in h, which
+        is right only at h = 0 and h = 1, the two points tested. At h = 0.8
+        it gave 0.011265 against 0.009149 (a two-million-path Monte Carlo in
+        `REVISION-rates_engine-2026-10-15-repro/risk-app/r04_fx_cli.py`
+        gives 0.009143)."""
+        result = compare_structures(
+            _exposure(), QUOTE, hedge_ratio=hedge_ratio, correlation=-0.30,
+            foreign_asset_volatility=0.10,
+        ).residual_variance
+        sa, sx, rho, left = 0.10, 0.115, -0.30, 1.0 - hedge_ratio
+        closed_form = sa**2 + left**2 * sx**2 + 2.0 * left * rho * sa * sx
+        assert result["residual_variance_at_hedge_ratio"] == pytest.approx(closed_form, rel=1e-12)
+        assert result["residual_volatility_at_hedge_ratio"] == pytest.approx(
+            math.sqrt(closed_form), rel=1e-12
+        )
+
+    def test_the_partial_hedge_matches_a_simulation(self):
+        """The same number without the algebra: simulate the two correlated
+        returns and measure the variance of what the hedge leaves."""
+        import numpy as np
+
+        h, sa, sx, rho = 0.8, 0.10, 0.115, -0.30
+        z1, z2 = np.random.default_rng(20261015).standard_normal((2, 400_000))
+        asset = sa * z1
+        currency = sx * (rho * z1 + math.sqrt(1.0 - rho * rho) * z2)
+        simulated = float(np.var(asset + (1.0 - h) * currency))
+        result = compare_structures(
+            _exposure(), QUOTE, hedge_ratio=h, correlation=rho, foreign_asset_volatility=sa
+        ).residual_variance
+        assert result["residual_variance_at_hedge_ratio"] == pytest.approx(simulated, rel=0.01)
+        assert result["residual_variance_at_hedge_ratio"] == pytest.approx(0.009149, abs=5e-7)
+
     def test_it_is_absent_rather_than_assumed_when_not_asked_for(self, payable):
         assert payable.residual_variance is None
 
