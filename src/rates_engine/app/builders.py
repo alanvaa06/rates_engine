@@ -24,6 +24,7 @@ from rates_engine.curves.discount import DiscountCurve
 from rates_engine.instruments.swaps import OISSwap
 from rates_engine.models.convexity import ConvexityModel, convexity_adjustment
 from rates_engine.pricing.calibration import SwapQuoteNode
+from rates_engine.pricing.fx_forward import require_plausible_rate
 
 __all__ = ["calibration_nodes", "ois_swap", "flat_curve", "fx_inputs"]
 
@@ -264,6 +265,9 @@ def fx_inputs(config: dict[str, Any]) -> FXInputs:
     Raises:
         ConfigurationError: The ``fx`` block is missing or empty, or lacks
             one of ``spot``, ``delivery``, ``r_domestic`` and ``r_foreign``.
+        ImplausibleInputError: A rate is outside
+            :data:`~rates_engine.pricing.fx_forward.MAX_PLAUSIBLE_RATE`,
+            which is what a rate written in percent looks like.
     """
     block = config.get("fx") or {}
     if not block:
@@ -281,6 +285,8 @@ def fx_inputs(config: dict[str, Any]) -> FXInputs:
     delivery = as_date(block["delivery"])
     r_domestic = float(block["r_domestic"])
     r_foreign = float(block["r_foreign"])
+    require_plausible_rate(r_domestic, "r_domestic")
+    require_plausible_rate(r_foreign, "r_foreign")
     provenance = tuple(
         Provenance(
             source="config",

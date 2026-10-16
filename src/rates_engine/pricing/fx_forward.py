@@ -103,7 +103,9 @@ __all__ = [
     "forward_from_curves",
     "implied_basis",
     "require_plausible_basis",
+    "require_plausible_rate",
     "MAX_PLAUSIBLE_BASIS_BP",
+    "MAX_PLAUSIBLE_RATE",
     "CIP_BROKEN_NOTE",
 ]
 
@@ -122,6 +124,19 @@ Five hundred basis points of cross-currency basis is a currency crisis, not
 a quote. The number is a plausibility band and not a market observation —
 the research gate could not reach a basis time series — so it is named,
 documented and adjustable rather than buried in a comparison.
+"""
+
+MAX_PLAUSIBLE_RATE = 1.0
+"""Beyond this, as a decimal a year, a rate is refused rather than used.
+
+A continuously compounded rate of 100% a year is a hyperinflation, not a
+deposit rate; USD/MXN rates live between zero and fifteen percent. What the
+band is for is the rate typed in percent — 9.5 for 9.5% — which as a decimal
+is 950% a year and, read as one, turned a three-month USD/MXN forward into
+an absurd number with an ``observed`` stamp on it. A plausibility band and
+not a market observation, named and adjustable like
+:data:`MAX_PLAUSIBLE_BASIS_BP`. It cannot catch a percent rate below one
+percent, which is why the convention is stated wherever a rate is taken.
 """
 
 CIP_BROKEN_NOTE = (
@@ -238,6 +253,27 @@ def _spot_date(pair: CurrencyPair, delivery: date, as_of: date) -> date:
             "by a swap this module does not model; price a delivery after the spot date."
         )
     return spot_date
+
+
+def require_plausible_rate(rate: float, name: str) -> None:
+    """Refuse an interest rate outside :data:`MAX_PLAUSIBLE_RATE`.
+
+    Args:
+        rate: A continuously compounded rate, as a decimal a year.
+        name: What to call it in the message, e.g. ``"r_domestic"``.
+
+    Raises:
+        ImplausibleInputError: It is not finite or its magnitude is above the
+            band, which almost always means a rate written in percent.
+    """
+    if not math.isfinite(rate) or abs(rate) > MAX_PLAUSIBLE_RATE:
+        raise ImplausibleInputError(
+            f"{name} = {rate!r} is outside the ±{MAX_PLAUSIBLE_RATE:.0%} a year this "
+            "build will accept. Rates here are continuously compounded decimals on "
+            "ACT/365F, so 9.5% is 0.095, not 9.5. The band is a plausibility check "
+            "rather than a measurement; widen MAX_PLAUSIBLE_RATE deliberately if you "
+            "mean it."
+        )
 
 
 def require_plausible_basis(basis_bp: float) -> None:

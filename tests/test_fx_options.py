@@ -272,3 +272,33 @@ class TestTheCurrencyPair:
 
     def test_the_pip_travels_in_the_payload(self):
         assert USDMXN.to_dict()["pip"] == 1e-4
+
+
+class TestNegativeInputsAreNotLimits:
+    """Zero expiry and zero volatility are limits the formula has; negative
+    ones are not. `price` used to read a volatility of -0.115 as zero and an
+    expiry three months gone as the intrinsic value today
+    (`REVISION-rates_engine-2026-10-15-repro/risk-app/r14_fx_inputs.py`)."""
+
+    FUNCTIONS = ("price", "delta_spot", "vega", "gamma", "vanna", "volga", "theta")
+
+    @pytest.mark.parametrize("name", FUNCTIONS)
+    def test_a_negative_volatility_refuses(self, name):
+        with pytest.raises(ValueError, match="volatility"):
+            getattr(gk, name)(SPOT, 19.0, EXPIRY, R_MXN, R_USD, -0.115)
+
+    @pytest.mark.parametrize("name", FUNCTIONS)
+    def test_a_negative_expiry_refuses(self, name):
+        with pytest.raises(ValueError, match="expiry"):
+            getattr(gk, name)(SPOT, 19.0, -0.25, R_MXN, R_USD, VOL)
+
+    @pytest.mark.parametrize("name", FUNCTIONS)
+    @pytest.mark.parametrize("field", ["expiry", "volatility"])
+    def test_a_nan_refuses_rather_than_pricing_nan(self, name, field):
+        args = {"expiry": EXPIRY, "volatility": VOL, field: float("nan")}
+        with pytest.raises(ValueError, match=field):
+            getattr(gk, name)(SPOT, 19.0, args["expiry"], R_MXN, R_USD, args["volatility"])
+
+    def test_the_zero_limits_still_hold(self):
+        assert gk.price(SPOT, 18.0, 0.0, R_MXN, R_USD, VOL) == pytest.approx(0.5)
+        assert gk.vega(SPOT, 18.0, EXPIRY, R_MXN, R_USD, 0.0) == 0.0

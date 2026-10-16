@@ -845,3 +845,79 @@ class TestTheBoundsAreTheStructuresNotTheGrids:
         payload = json.loads(json.dumps(payable.by_name("unhedged").to_dict()))
         assert payload["worst_case_rate"] is None
         assert payload["best_case_rate"] is None
+
+
+class TestTheMarketIsCheckedBeforeItIsUsed:
+    """The review's finding on FX inputs: every one of these was priced.
+
+    `REVISION-rates_engine-2026-10-15-repro/risk-app/r14_fx_inputs.py`: a
+    volatility typed in percent (11.5) priced an at-the-money call at about
+    eight pesos a dollar; a negative one priced it as if it were zero; a
+    settlement three months in the past gave an intrinsic value; a rate
+    typed in percent (9.5) gave an absurd forward. The README's promise --
+    a volatility is never a bare float, and the magnitude band catches what
+    is left -- now holds here too.
+    """
+
+    @staticmethod
+    def _quote(**kw):
+        args = {"spot": 18.50, "expiry": 0.25, "r_domestic": 0.0950, "r_foreign": 0.0420,
+                "volatility": 0.115}
+        args.update(kw)
+        return StructureQuote(**args)
+
+    def test_a_volatility_in_percent_refuses(self):
+        from rates_engine.core.errors import VolUnitsError
+
+        with pytest.raises(VolUnitsError, match="lognormal"):
+            self._quote(volatility=11.5)
+
+    def test_a_volatility_below_the_band_refuses(self):
+        """0.0115 is 115 bp, a normal-vol number in the wrong place."""
+        from rates_engine.core.errors import VolUnitsError
+
+        with pytest.raises(VolUnitsError):
+            self._quote(volatility=0.0115)
+
+    @pytest.mark.parametrize("bad", [-0.115, float("nan"), float("inf")])
+    def test_a_volatility_that_is_not_one_refuses(self, bad):
+        with pytest.raises(ValueError, match="volatility"):
+            self._quote(volatility=bad)
+
+    @pytest.mark.parametrize("bad", [-0.25, 0.0, float("nan")])
+    def test_a_settlement_that_is_not_ahead_refuses(self, bad):
+        with pytest.raises(ValueError, match="expiry"):
+            self._quote(expiry=bad)
+
+    @pytest.mark.parametrize("bad", [0.0, -18.5, float("nan")])
+    def test_a_spot_that_is_not_positive_refuses(self, bad):
+        with pytest.raises(ValueError, match="spot"):
+            self._quote(spot=bad)
+
+    @pytest.mark.parametrize(
+        ("key", "bad"),
+        [("r_domestic", 9.5), ("r_foreign", 4.2), ("r_domestic", -1.5), ("r_foreign", float("nan"))],
+    )
+    def test_a_rate_outside_the_band_refuses(self, key, bad):
+        with pytest.raises(ImplausibleInputError, match=key):
+            self._quote(**{key: bad})
+
+    def test_zero_volatility_is_still_the_degenerate_case(self):
+        assert self._quote(volatility=0.0).price(18.0, OptionKind.CALL) > 0.0
+
+    def test_a_callable_volatility_is_the_escape_hatch_and_is_not_banded(self):
+        assert self._quote(volatility=lambda k: 0.115).price(18.8, OptionKind.CALL) > 0.0
+
+    @pytest.mark.parametrize("bad", [1.5, -1.01, float("nan")])
+    def test_a_correlation_outside_minus_one_to_one_refuses(self, bad):
+        with pytest.raises(ValueError, match="correlation"):
+            compare_structures(_exposure(), QUOTE, correlation=bad, foreign_asset_volatility=0.10)
+
+    @pytest.mark.parametrize("bad", [-0.10, float("nan")])
+    def test_a_foreign_asset_volatility_that_is_not_one_refuses(self, bad):
+        with pytest.raises(ValueError, match="foreign_asset_volatility"):
+            compare_structures(_exposure(), QUOTE, correlation=-0.3, foreign_asset_volatility=bad)
+
+    def test_a_nan_amount_refuses(self):
+        with pytest.raises(ValueError, match="positive size"):
+            Exposure(float("nan"), ExposureDirection.PAYABLE, SETTLEMENT, USDMXN)

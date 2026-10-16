@@ -12,6 +12,13 @@ Reversing them produces a well-formed price that is wrong by the interest
 differential, which for this pair is several hundred basis points, so both
 are named rather than positional-by-habit.
 
+**Zero is a limit; below zero is an error.** At zero expiry the option is
+its payoff and at zero volatility it is the discounted payoff on the
+forward, so every function here takes those values and returns the limit.
+A negative expiry or volatility is not a limit of anything: ``price`` used
+to read a volatility of -0.115 as zero and an expiry three months gone as
+the intrinsic value today, so both now raise, as does a NaN.
+
 **No volatility type here.** Unlike the rate options in
 :mod:`rates_engine.volatility`, an FX volatility is unambiguously lognormal
 — the market quotes it in percent and there is no normal-vol convention to
@@ -37,6 +44,22 @@ __all__ = [
     "volga",
     "theta",
 ]
+
+
+def _require_domain(expiry: float, volatility: float) -> None:
+    """Refuse a negative or non-finite expiry or volatility; zero is a limit."""
+    if not 0.0 <= expiry < math.inf:
+        raise ValueError(
+            f"expiry is a time to expiry in years, zero or more; got {expiry!r}. A "
+            "negative one is an option that has already expired, whose value is not "
+            "its intrinsic value today."
+        )
+    if not 0.0 <= volatility < math.inf:
+        raise ValueError(
+            f"volatility is a lognormal volatility as a decimal, zero or more; got "
+            f"{volatility!r}. A negative volatility is not a limit of the formula, and "
+            "reading it as zero prices the option as if the rate could not move."
+        )
 
 
 def forward(spot: float, expiry: float, r_domestic: float, r_foreign: float) -> float:
@@ -81,6 +104,7 @@ def d1_d2(
             this function could return; the limits are handled in
             :func:`price`, where they are payoffs rather than arguments.
     """
+    _require_domain(expiry, volatility)
     if spot <= 0.0 or strike <= 0.0:
         raise ValueError(
             f"Garman-Kohlhagen is lognormal, so spot and strike must be positive; "
@@ -122,7 +146,12 @@ def price(
 
     Returns:
         The premium, in quote currency per one unit of base.
+
+    Raises:
+        ValueError: ``expiry`` or ``volatility`` is negative or not finite.
+            Zero is the limit described above; below zero is not one.
     """
+    _require_domain(expiry, volatility)
     sign = kind.sign
     if expiry <= 0.0:
         return max(sign * (spot - strike), 0.0)
@@ -168,7 +197,11 @@ def delta_spot(
         call and ``[-e^{-r_f T}, 0]`` for a put. The discount factor, not
         one, is the bound — which is why a "90 delta" spot option can be
         unattainable.
+
+    Raises:
+        ValueError: ``expiry`` or ``volatility`` is negative or not finite.
     """
+    _require_domain(expiry, volatility)
     if expiry <= 0.0 or volatility <= 0.0:
         intrinsic = 1.0 if kind.sign * (spot - strike) > 0.0 else 0.0
         return kind.sign * intrinsic
@@ -199,7 +232,11 @@ def vega(
         Quote currency per unit of base per **one unit** of volatility, not
         per volatility point. Divide by 100 for the per-point figure a
         trader quotes.
+
+    Raises:
+        ValueError: ``expiry`` or ``volatility`` is negative or not finite.
     """
+    _require_domain(expiry, volatility)
     if expiry <= 0.0 or volatility <= 0.0:
         return 0.0
     first, _ = d1_d2(spot, strike, expiry, r_domestic, r_foreign, volatility)
@@ -228,7 +265,11 @@ def gamma(
 
     Returns:
         Change in delta per unit change in spot, per unit of base.
+
+    Raises:
+        ValueError: ``expiry`` or ``volatility`` is negative or not finite.
     """
+    _require_domain(expiry, volatility)
     if expiry <= 0.0 or volatility <= 0.0:
         return 0.0
     first, _ = d1_d2(spot, strike, expiry, r_domestic, r_foreign, volatility)
@@ -264,7 +305,11 @@ def vanna(
         Change in delta per **one unit** of volatility, equivalently change
         in vega per unit of spot. Zero at the strike where ``d2`` is, which
         is near but not at the at-the-money.
+
+    Raises:
+        ValueError: ``expiry`` or ``volatility`` is negative or not finite.
     """
+    _require_domain(expiry, volatility)
     if expiry <= 0.0 or volatility <= 0.0:
         return 0.0
     first, second = d1_d2(spot, strike, expiry, r_domestic, r_foreign, volatility)
@@ -295,7 +340,11 @@ def volga(
         Change in vega per **one unit** of volatility. Zero at the two
         strikes where ``d1`` or ``d2`` is, and positive in both wings, which
         is why a butterfly is long it.
+
+    Raises:
+        ValueError: ``expiry`` or ``volatility`` is negative or not finite.
     """
+    _require_domain(expiry, volatility)
     if expiry <= 0.0 or volatility <= 0.0:
         return 0.0
     first, second = d1_d2(spot, strike, expiry, r_domestic, r_foreign, volatility)
@@ -330,7 +379,11 @@ def theta(
     Returns:
         Quote currency per unit of base **per year**. Divide by 365 for the
         per-day figure, which is how it is usually read.
+
+    Raises:
+        ValueError: ``expiry`` or ``volatility`` is negative or not finite.
     """
+    _require_domain(expiry, volatility)
     if expiry <= 0.0 or volatility <= 0.0:
         return 0.0
     sign = kind.sign

@@ -293,3 +293,62 @@ class TestTheRatesSayWhatTheyAre:
         for function in (fx_inputs, flat_curve):
             doc = function.__doc__ or ""
             assert "continuously compounded" in doc and "ACT/365F" in doc
+
+
+class TestTheFxBlockIsCheckedBeforeItIsUsed:
+    """`REVISION-rates_engine-2026-10-15-repro/risk-app/r14_fx_inputs.py`:
+    every one of these was priced and reported exit 0."""
+
+    @staticmethod
+    def _config(**fx):
+        config = json.loads(json.dumps(FX_CONFIG))
+        config["fx"].update(fx)
+        return config
+
+    def test_a_volatility_in_percent_refuses(self):
+        from rates_engine.core.errors import VolUnitsError
+
+        with pytest.raises(VolUnitsError):
+            commands.COMMANDS["hedge-structures"](self._config(volatility=11.5))
+
+    def test_a_negative_volatility_refuses(self):
+        with pytest.raises(ValueError, match="volatility"):
+            commands.COMMANDS["hedge-structures"](self._config(volatility=-0.115))
+
+    @pytest.mark.parametrize("command", ["fx-forward", "hedge-structures"])
+    def test_a_delivery_in_the_past_refuses(self, command):
+        with pytest.raises(ValueError, match="not after"):
+            commands.COMMANDS[command](self._config(delivery="2026-06-15"))
+
+    @pytest.mark.parametrize("command", ["fx-forward", "hedge-structures"])
+    def test_a_rate_in_percent_refuses(self, command):
+        from rates_engine.core.errors import ImplausibleInputError
+
+        with pytest.raises(ImplausibleInputError, match="r_domestic"):
+            commands.COMMANDS[command](self._config(r_domestic=9.5))
+
+    def test_a_rate_in_percent_is_exit_one_with_a_document(self, tmp_path):
+        path = tmp_path / "percent.json"
+        path.write_text(json.dumps(self._config(r_domestic=9.5)), encoding="utf-8")
+        done = _run("fx-forward", "--config", str(path), "--json")
+        assert done.returncode == 1
+        error = json.loads(done.stdout)["error"]
+        assert error["type"] == "ImplausibleInputError"
+        assert "ACT/365F" in error["message"]
+
+    @pytest.mark.parametrize("missing", ["spot", "r_foreign"])
+    def test_a_missing_key_refuses_by_name(self, missing):
+        from rates_engine.core.errors import ConfigurationError
+
+        config = json.loads(json.dumps(FX_CONFIG))
+        del config["fx"][missing]
+        with pytest.raises(ConfigurationError, match=missing):
+            commands.COMMANDS["fx-forward"](config)
+
+    def test_a_missing_volatility_refuses_by_name(self):
+        from rates_engine.core.errors import ConfigurationError
+
+        config = json.loads(json.dumps(FX_CONFIG))
+        del config["fx"]["volatility"]
+        with pytest.raises(ConfigurationError, match="volatility"):
+            commands.COMMANDS["hedge-structures"](config)

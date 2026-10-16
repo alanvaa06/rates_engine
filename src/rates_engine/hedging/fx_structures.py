@@ -37,11 +37,16 @@ from typing import Any, Protocol, runtime_checkable
 
 from rates_engine.conventions.currency_pair import CurrencyPair
 from rates_engine.conventions.option_kind import OptionKind
-from rates_engine.core.errors import ImplausibleInputError
+from rates_engine.core.errors import ImplausibleInputError, VolUnitsError
 from rates_engine.core.evidence import Evidence
 from rates_engine.core.results import EngineResult
 from rates_engine.models import garman_kohlhagen as gk
-from rates_engine.pricing.fx_forward import BASIS_LEG, require_plausible_basis
+from rates_engine.pricing.fx_forward import (
+    BASIS_LEG,
+    require_plausible_basis,
+    require_plausible_rate,
+)
+from rates_engine.volatility.units import Volatility, VolUnits
 
 __all__ = [
     "STRUCTURE_NAMES",
@@ -149,7 +154,7 @@ class Exposure:
     pair: CurrencyPair
 
     def __post_init__(self) -> None:
-        if self.amount <= 0.0:
+        if not 0.0 < self.amount < math.inf:
             raise ValueError(
                 f"an exposure's amount is a positive size in {self.pair.base.value}; "
                 f"its direction says which way it hurts. Got {self.amount!r}."
@@ -177,6 +182,28 @@ class ReadableSmile(Protocol):
     def volatility_at(self, strike: float) -> Any:
         """The reading at a strike: ``.volatility`` and ``.evidence``."""
         ...
+
+
+def _check_volatility(value: float) -> None:
+    """A single volatility, held to the lognormal band :class:`Volatility` applies.
+
+    FX volatility is lognormal and quoted in percent, so a decimal outside
+    ``[5%, 500%]`` is almost certainly a unit slip: 11.5 for 11.5%, or a
+    normal-vol number such as 0.0115. Zero is allowed, as the degenerate
+    case. A smile or a callable is not checked here: a smile carries its own
+    evidence, and a callable is the escape hatch.
+    """
+    if not 0.0 <= value < math.inf:
+        raise ValueError(
+            f"volatility is a lognormal volatility as a decimal, zero or more; got "
+            f"{value!r}"
+        )
+    try:
+        Volatility(value, VolUnits.LOGNORMAL_DECIMAL)
+    except VolUnitsError as exc:
+        raise VolUnitsError(
+            f"{exc} An FX volatility is a lognormal decimal: 0.115 for 11.5%."
+        ) from exc
 
 
 @dataclass(frozen=True)
@@ -226,7 +253,23 @@ class StructureQuote:
     basis_bp: float = 0.0
 
     def __post_init__(self) -> None:
+        # Every number here used to be priced whatever it was: a volatility
+        # typed in percent, a negative one, a settlement in the past, a rate
+        # typed in percent (REVISION risk-app/r14_fx_inputs.py).
+        if not 0.0 < self.spot < math.inf:
+            raise ValueError(f"a spot rate is positive and finite; got spot={self.spot!r}")
+        if not 0.0 < self.expiry < math.inf:
+            raise ValueError(
+                f"expiry is the years from the spot date to settlement and must be "
+                f"positive; got expiry={self.expiry!r}. A settlement on or before the "
+                "spot date has nothing left to hedge."
+            )
+        require_plausible_rate(self.r_domestic, "r_domestic")
+        require_plausible_rate(self.r_foreign, "r_foreign")
         require_plausible_basis(self.basis_bp)
+        source = self.volatility
+        if not isinstance(source, ReadableSmile) and not callable(source):
+            _check_volatility(float(source))
 
     @property
     def r_domestic_effective(self) -> float:
@@ -758,7 +801,9 @@ def compare_structures(
 
     Raises:
         ValueError: ``hedge_ratio`` is outside ``[0, 1]``, an offset is not
-            positive, or only one of the two variance inputs was given.
+            positive, only one of the two variance inputs was given, the
+            correlation is outside ``[-1, 1]``, or the asset volatility is
+            negative or not finite.
     """
     if not 0.0 <= hedge_ratio <= 1.0:
         raise ValueError(f"a hedge ratio is a fraction in [0, 1]; got {hedge_ratio!r}")
@@ -774,6 +819,13 @@ def compare_structures(
             "the residual-variance decomposition needs both a correlation and the "
             "foreign asset's volatility, or neither. Supplying one and defaulting "
             "the other would report a number nobody asked for."
+        )
+    if correlation is not None and not -1.0 <= correlation <= 1.0:
+        raise ValueError(f"a correlation is in [-1, 1]; got correlation={correlation!r}")
+    if foreign_asset_volatility is not None and not 0.0 <= foreign_asset_volatility < math.inf:
+        raise ValueError(
+            "foreign_asset_volatility is a volatility as a decimal, zero or more; got "
+            f"{foreign_asset_volatility!r}"
         )
 
     grid = _grid(quote.spot, grid_points, grid_width)
