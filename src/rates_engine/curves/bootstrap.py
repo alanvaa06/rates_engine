@@ -43,10 +43,11 @@ from typing import Any, Protocol, runtime_checkable
 
 from scipy.optimize import brentq
 
-from rates_engine.conventions.daycount import DayCount, year_fraction
+from rates_engine.conventions.daycount import CURVE_TIME_BASIS, DayCount, year_fraction
 from rates_engine.core.errors import (
     BootstrapResidualError,
     CurveArbitrageError,
+    ImplausibleInputError,
     ProxySourceNotDeclaredError,
     UnderdeterminedCurveError,
 )
@@ -100,6 +101,13 @@ For these the first, sequential pass is already the fixed point and no sweep
 runs, so their curves are what this function returned before sweeps
 existed, to the bit. Anything not listed is swept. QuantLib draws the same
 line with its ``Interpolator::global`` flag.
+"""
+
+_PROBE_RATE = 0.04
+"""Flat zero rate of the trial curve each quote is checked against before solving.
+
+Any finite, ordinary curve would do: the check is that a quote produces a
+finite residual at all, not what the residual is.
 """
 
 _SOLVER_XTOL = 1e-16
@@ -362,6 +370,9 @@ def bootstrap_discount_curve(
             the same node date, which leaves a node without its own quote.
         ProxySourceNotDeclaredError: A proxy instrument was supplied without
             ``long_end_source="treasury_proxy"``.
+        ImplausibleInputError: An instrument's quote (or a term it is priced
+            from) is NaN or infinite, so it has no residual to solve. Every
+            such instrument is named, before anything is solved.
         CurveArbitrageError: An instrument implies a non-decreasing discount
             factor, so no admissible node solves it.
         BootstrapResidualError: Under ``strict``, an instrument does not
@@ -407,6 +418,8 @@ def bootstrap_discount_curve(
             f"long_end_source {long_end_source!r} is not recognised; "
             f"the only accepted value is {TREASURY_PROXY!r}"
         )
+
+    _require_finite_quotes(as_of, ordered, interpolation, currency)
 
     curve = DiscountCurve(
         as_of, (ordered[0].node_date,), (1.0,), interpolation, currency=currency
@@ -566,6 +579,46 @@ def _solve_node(
         )
     solved = brentq(residual, lower, upper, xtol=_SOLVER_XTOL, rtol=_SOLVER_RTOL, maxiter=200)
     return curve.with_node(node, float(solved))
+
+
+def _require_finite_quotes(
+    as_of: date,
+    ordered: Sequence[CalibrationInstrument],
+    interpolation: str,
+    currency: Currency,
+) -> None:
+    """Refuse, naming each one, any instrument whose residual is not a finite number.
+
+    The protocol exposes a residual rather than a quote, so the residual is
+    what is checked: on an ordinary flat curve a finite quote gives a finite
+    residual, and a NaN or infinite one cannot. Without this a NaN reached
+    the root finder, whose bracket search never sees a positive residual,
+    and came out as ``CurveArbitrageError`` -- exit code 2, "the calculation
+    is impossible" -- about a quote that was simply not a number.
+    """
+    nodes = tuple(inst.node_date for inst in ordered)
+    probe = DiscountCurve(
+        as_of,
+        nodes,
+        tuple(
+            math.exp(-_PROBE_RATE * year_fraction(as_of, node, CURVE_TIME_BASIS))
+            for node in nodes
+        ),
+        interpolation,
+        currency=currency,
+    )
+    broken: list[tuple[str, float]] = []
+    for inst in ordered:
+        residual = inst.residual_bp(probe)
+        if not math.isfinite(residual):
+            broken.append((inst.label, residual))
+    if broken:
+        raise ImplausibleInputError(
+            "these calibration instruments have no finite residual, so a quote or a "
+            "term they are priced from is NaN or infinite: "
+            + ", ".join(f"{label!r} ({value!r} bp)" for label, value in broken)
+            + ". Fix or drop them; a missing quote is not a number to solve for."
+        )
 
 
 def _settle(

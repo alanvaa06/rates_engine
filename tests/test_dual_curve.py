@@ -16,6 +16,7 @@ import pytest
 from rates_engine.conventions.daycount import DayCount, year_fraction
 from rates_engine.core.errors import (
     BootstrapResidualError,
+    ImplausibleInputError,
     NoTenorQuoteSourceError,
     UnderdeterminedCurveError,
 )
@@ -279,6 +280,16 @@ class TestTheSolverIsChecked:
         tenor, basis_nodes = _dual_instruments(0.0015)
         result = solve_dual_curve(AS_OF, _ois_instruments(), tenor, basis_nodes)
         assert result.evidence.fields["ois_max_abs_residual_bp"] < 0.01
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+    def test_a_non_finite_quote_refuses_by_name(self, bad):
+        """It used to reach scipy, which raised a bare ``ValueError``."""
+        tenor, basis_nodes = _dual_instruments(0.0015)
+        broken = BasisSwapNode(
+            float_periods=basis_nodes[0].float_periods, quoted_spread=bad, label="basis_nan"
+        )
+        with pytest.raises(ImplausibleInputError, match="basis_nan"):
+            solve_dual_curve(AS_OF, _ois_instruments(), tenor, (broken, basis_nodes[1]))
 
 
 class TestPayload:

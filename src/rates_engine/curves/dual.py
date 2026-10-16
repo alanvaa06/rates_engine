@@ -40,6 +40,7 @@ from scipy.optimize import least_squares
 from rates_engine.conventions.daycount import DayCount, year_fraction
 from rates_engine.core.errors import (
     BootstrapResidualError,
+    ImplausibleInputError,
     NoTenorQuoteSourceError,
     UnderdeterminedCurveError,
 )
@@ -286,6 +287,8 @@ def solve_dual_curve(
             ``"synthetic"``.
         UnderdeterminedCurveError: There are more tenor-curve nodes than
             instruments to pin them, naming the nodes left without a quote.
+        ImplausibleInputError: A tenor or basis quote is NaN or infinite,
+            naming each one. (OIS quotes are checked by the bootstrap.)
         BootstrapResidualError: A least-squares solve reported it did not
             converge, or an instrument misses ``tolerance_bp``.
         ValueError: ``mode`` is not one of the two.
@@ -321,6 +324,22 @@ def solve_dual_curve(
 
     ois_result = bootstrap_discount_curve(as_of, ois_instruments, currency=currency)
     ois_curve = ois_result.curve
+
+    # A NaN quote used to reach least_squares, which raised a bare ValueError
+    # about residuals "not finite in the initial point". Checked here, on the
+    # starting curves, so every offender is named in the error.
+    start = _initial_tenor(as_of, ois_curve, node_dates)
+    broken: list[tuple[str, float]] = []
+    for instrument in dual:
+        residual = instrument.residual_bp(ois_curve, start)
+        if not math.isfinite(residual):
+            broken.append((instrument.label, residual))
+    if broken:
+        raise ImplausibleInputError(
+            "these tenor and basis instruments have no finite residual, so a quote or a "
+            "term they are priced from is NaN or infinite: "
+            + ", ".join(f"{label!r} ({value!r} bp)" for label, value in broken)
+        )
 
     sequential = _solve_tenor(as_of, ois_curve, dual, node_dates)
     if mode == "simultaneous":
