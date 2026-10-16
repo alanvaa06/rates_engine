@@ -426,3 +426,25 @@ class TestSerialisation:
 
     def test_the_smile_is_json_serialisable(self, smile):
         json.dumps(smile.to_dict())
+
+
+class TestTheInversionDoesNotClampInSilence:
+    """`_implied` bisected inside `[1e-6, 5.0]` and returned whichever end it
+    reached, so a premium worth more than a 500% volatility read back as
+    500% (`REVISION-rates_engine-2026-10-15-repro/options/09_vanna_volga.py`
+    gave 4.99999999... for a premium priced at 700%). Outside the bracket
+    no volatility in it reproduces the premium, and that is an error."""
+
+    def test_a_premium_above_the_top_of_the_bracket_refuses(self, smile):
+        premium = gk.price(SPOT, 19.0, EXPIRY, R_MXN, R_USD, 7.0, OptionKind.CALL)
+        with pytest.raises(CalibrationError, match="500%"):
+            smile._implied(19.0, premium, OptionKind.CALL)
+
+    def test_a_premium_below_the_bottom_of_the_bracket_refuses(self, smile):
+        intrinsic = gk.price(SPOT, 18.0, EXPIRY, R_MXN, R_USD, 0.0, OptionKind.CALL)
+        with pytest.raises(CalibrationError, match="premium"):
+            smile._implied(18.0, 0.5 * intrinsic, OptionKind.CALL)
+
+    def test_a_premium_inside_it_inverts_exactly(self, smile):
+        premium = gk.price(SPOT, 19.0, EXPIRY, R_MXN, R_USD, 0.137, OptionKind.CALL)
+        assert smile._implied(19.0, premium, OptionKind.CALL) == pytest.approx(0.137, abs=1e-12)

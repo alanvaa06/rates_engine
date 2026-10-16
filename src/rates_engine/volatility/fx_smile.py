@@ -311,9 +311,24 @@ class VannaVolgaSmile:
         return flat + correction
 
     def _implied(self, strike: float, premium: float, kind: OptionKind) -> float:
-        """Invert Garman-Kohlhagen for the volatility, in a maintained bracket."""
+        """Invert Garman-Kohlhagen for the volatility, in a maintained bracket.
+
+        The bracket is ``[1e-6, 5.0]``. A premium outside what those two
+        volatilities price is refused: the bisection used to converge on
+        whichever end it was pushed against and return it as if it were the
+        answer, so a premium worth 700% volatility read back as 500%.
+        """
         low, high = 1e-6, 5.0
         args = (self.expiry, self.r_domestic, self.r_foreign)
+        floor = gk.price(self.spot, strike, *args, low, kind)
+        ceiling = gk.price(self.spot, strike, *args, high, kind)
+        if not floor <= premium <= ceiling:
+            raise CalibrationError(
+                f"no volatility between {low:g} and {high:.0%} gives the {kind.value} at "
+                f"strike {strike} a premium of {premium:.10f}: that range prices it from "
+                f"{floor:.10f} to {ceiling:.10f}. The vanna-volga correction has taken the "
+                f"price where no lognormal volatility reaches. {NOT_ARBITRAGE_FREE}"
+            )
         for _ in range(200):
             mid = 0.5 * (low + high)
             if gk.price(self.spot, strike, *args, mid, kind) < premium:
