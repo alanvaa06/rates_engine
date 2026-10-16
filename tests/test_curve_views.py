@@ -123,6 +123,57 @@ class TestParCurve:
         with pytest.raises(ValueError, match="after"):
             par_curve(curve, (curve.as_of,))
 
+    def test_it_declares_its_start_and_payment_lag(self, flat_curve):
+        """The default par view starts on ``as_of`` and pays on the period end.
+        A quoted SOFR OIS starts two business days later and pays two business
+        days after each period, so the two differ -- by 0.02 to 0.47 bp on the
+        review's strip -- and the payload used to give no hint why."""
+        curve = flat_curve.curve
+        payload = par_curve(curve).to_dict()
+        assert payload["start"] == curve.as_of.isoformat()
+        assert payload["payment_lag_days"] == 0
+
+    def test_on_the_quoted_conventions_it_reproduces_the_quotes(self):
+        """Spot start and a two-day lag, as the swaps were quoted: the par view
+        then returns the quotes the curve was built from."""
+        from rates_engine.conventions.schedule import add_months
+        from rates_engine.curves.bootstrap import bootstrap_discount_curve
+        from rates_engine.instruments.swaps import OISSwap
+        from rates_engine.pricing.calibration import SwapQuoteNode
+
+        as_of, spot = date(2026, 1, 15), date(2026, 1, 20)
+        quotes = ((1, 0.0431), (6, 0.0419), (12, 0.0402), (24, 0.0375), (60, 0.0358))
+        nodes = tuple(
+            SwapQuoteNode(
+                OISSwap(effective=spot, maturity=add_months(spot, months), fixed_rate=q), q
+            )
+            for months, q in quotes
+        )
+        curve = bootstrap_discount_curve(as_of, nodes).curve
+        maturities = tuple(add_months(spot, months) for months, _ in quotes)
+        quoted = par_curve(curve, maturities, start=spot, payment_lag_days=2)
+        for value, (_, expected) in zip(quoted.values, quotes, strict=True):
+            assert abs(value - expected) * 1e4 < 1e-8
+        plain = par_curve(curve, maturities)
+        assert max(abs(v - q) for v, (_, q) in zip(plain.values, quotes, strict=True)) > 1e-6
+
+    def test_all_views_passes_the_par_conventions_through(self, flat_curve):
+        curve = flat_curve.curve
+        start = curve.as_of + timedelta(days=5)
+        views = all_views(curve, par_start=start, par_payment_lag_days=2)
+        payload = views.to_dict()
+        assert payload["par"]["start"] == start.isoformat()
+        assert payload["par"]["payment_lag_days"] == 2
+        assert views.evidence.fields["par_start"] == start.isoformat()
+        assert views.evidence.fields["par_payment_lag_days"] == 2
+
+    def test_the_default_all_views_says_what_its_par_view_is(self, flat_curve):
+        views = all_views(flat_curve.curve)
+        fields = views.evidence.fields
+        assert fields["par_start"] == flat_curve.curve.as_of.isoformat()
+        assert fields["par_payment_lag_days"] == 0
+        assert "not the quoted" in fields["par_note"]
+
 
 class TestRoundTrip:
     """PRD-001 AC-4.4: par to zero to par returns the curve it started from."""
