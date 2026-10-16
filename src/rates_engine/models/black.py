@@ -117,15 +117,26 @@ def vega(
         annuity: The numeraire.
 
     Returns:
-        ``d(price) / d(sigma)``, the same for a call and a put.
+        ``d(price) / d(sigma)``, the same for a call and a put. At
+        ``sigma = 0`` it is the limit from above: ``annuity F sqrt(T) n(0)``
+        at the money and zero away from it.
 
     Raises:
         ShiftRequiredError: The forward is not positive or the strike negative.
     """
     _check_positive(forward, strike)
-    dispersion = sigma * math.sqrt(expiry)
-    if dispersion == 0.0 or strike == 0.0:
+    if strike == 0.0:
+        # The price is the forward whatever the volatility.
         return 0.0
+    dispersion = sigma * math.sqrt(expiry)
+    if dispersion == 0.0:
+        # The limit sigma -> 0+. ``d1 = ln(F/K) / (sigma sqrt T) + sigma sqrt T / 2``
+        # runs to +-infinity off the money and to zero at it, so vega tends
+        # to zero there and to F sqrt(T) n(0) here -- not to zero, which is
+        # what this returned at the money.
+        if forward != strike:
+            return 0.0
+        return annuity * forward * math.sqrt(expiry) * standard_normal_pdf(0.0)
     d1 = (math.log(forward / strike) + 0.5 * dispersion * dispersion) / dispersion
     return annuity * forward * math.sqrt(expiry) * standard_normal_pdf(d1)
 

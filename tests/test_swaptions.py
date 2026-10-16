@@ -253,6 +253,59 @@ class TestImpliedVol:
             black.implied_lognormal_vol(target, forward, strike, expiry)
 
 
+class TestVegaAtZeroVolatility:
+    """Vega at sigma = 0 is the limit sigma -> 0+, which depends on moneyness.
+
+    The references are the closed forms of the limits, not the code: for
+    Bachelier ``d = (F - K) / (sigma sqrt T)`` runs to +-infinity off the money
+    and is 0 at it, so vega tends to 0 and to ``A sqrt(T) n(0)``; for Black
+    ``d1`` does the same, so vega tends to 0 and to ``A F sqrt(T) n(0)``.
+    """
+
+    FORWARD, EXPIRY, ANNUITY = 0.03, 2.0, 4.2
+    N0 = 1.0 / math.sqrt(2.0 * math.pi)
+
+    def test_bachelier_off_the_money_tends_to_zero(self):
+        # It used to return the at-the-money value, 0.5642 per unit annuity
+        # here, whatever the strike.
+        for strike in (self.FORWARD + 0.01, self.FORWARD - 0.01):
+            assert bachelier.vega(
+                self.FORWARD, strike, self.EXPIRY, 0.0, annuity=self.ANNUITY
+            ) == 0.0
+
+    def test_bachelier_at_the_money_is_the_closed_form(self):
+        expected = self.ANNUITY * math.sqrt(self.EXPIRY) * self.N0
+        assert bachelier.vega(
+            self.FORWARD, self.FORWARD, self.EXPIRY, 0.0, annuity=self.ANNUITY
+        ) == pytest.approx(expected, rel=1e-15)
+
+    def test_black_at_the_money_is_the_closed_form(self):
+        # It used to return 0.
+        expected = self.ANNUITY * self.FORWARD * math.sqrt(self.EXPIRY) * self.N0
+        assert black.vega(
+            self.FORWARD, self.FORWARD, self.EXPIRY, 0.0, annuity=self.ANNUITY
+        ) == pytest.approx(expected, rel=1e-15)
+
+    def test_black_off_the_money_tends_to_zero(self):
+        for strike in (self.FORWARD + 0.01, self.FORWARD - 0.01):
+            assert black.vega(
+                self.FORWARD, strike, self.EXPIRY, 0.0, annuity=self.ANNUITY
+            ) == 0.0
+
+    @pytest.mark.parametrize("model", [bachelier, black])
+    def test_the_value_at_zero_is_where_a_tiny_sigma_goes(self, model):
+        # Continuity, which is what "the limit" means: at sigma = 1e-12 the
+        # formula is already within machine noise of the sigma = 0 answer.
+        for strike in (self.FORWARD, self.FORWARD + 0.01):
+            at_zero = model.vega(self.FORWARD, strike, self.EXPIRY, 0.0)
+            near_zero = model.vega(self.FORWARD, strike, self.EXPIRY, 1e-12)
+            assert near_zero == pytest.approx(at_zero, rel=1e-9, abs=1e-300)
+
+    def test_a_zero_expiry_has_no_vega_either_way(self):
+        assert bachelier.vega(self.FORWARD, self.FORWARD, 0.0, 0.01) == 0.0
+        assert black.vega(self.FORWARD, self.FORWARD, 0.0, 0.2) == 0.0
+
+
 class TestNotANumber:
     """A NaN input is refused by name, never priced into a NaN."""
 
