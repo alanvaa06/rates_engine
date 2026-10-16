@@ -13,8 +13,10 @@ from datetime import date, timedelta
 
 import pytest
 
+from rates_engine.conventions.calendar import SIFMA_US
 from rates_engine.conventions.indices import (
     COLLATERAL_INDEX,
+    INDICES,
     SOFR,
     TIIE_28,
     TIIE_FONDEO,
@@ -73,6 +75,33 @@ class TestTheRegistry:
         assert SOFR.is_verified
         assert not TIIE_FONDEO.is_verified
         assert not TIIE_28.is_verified
+
+    def test_a_verified_index_fixes_on_a_calendar_that_was_checked(self):
+        """An index with no unresolved convention cannot sit on an unchecked calendar.
+
+        Until v0.4 SOFR claimed ``is_verified`` while ``SIFMA_US`` recorded its
+        Saturday rule as an unchecked assumption, and that rule was wrong.
+        The calendar now names the stretch it was checked over against the
+        publication record (``tests/test_sifma_publication_record.py`` ties the
+        stretch to the record), and every verified index has to fix on a
+        calendar that does.
+        """
+        for index in INDICES.values():
+            if not index.is_verified:
+                continue
+            verified_from = getattr(index.calendar, "VERIFIED_FROM", None)
+            verified_through = getattr(index.calendar, "VERIFIED_THROUGH", None)
+            assert verified_from is not None and verified_through is not None, index.name
+            assert verified_from < verified_through, index.name
+
+    def test_sofr_s_calendar_covers_its_whole_published_history_so_far(self):
+        assert SOFR.calendar is SIFMA_US
+        assert SIFMA_US.VERIFIED_FROM == date(2018, 4, 3)
+        assert SIFMA_US.VERIFIED_THROUGH >= date(2026, 10, 14)
+
+    def test_the_peso_calendar_is_still_unverified_and_says_so(self):
+        assert "mxn_calendar_is_bmv_not_banxico" in TIIE_FONDEO.unresolved
+        assert "mxn_calendar_is_bmv_not_banxico" in TIIE_28.unresolved
 
     def test_a_currency_without_an_index_is_refused_rather_than_defaulted(self, monkeypatch):
         monkeypatch.delitem(COLLATERAL_INDEX, Currency.MXN)
