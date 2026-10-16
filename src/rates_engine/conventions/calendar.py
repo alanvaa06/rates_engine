@@ -98,14 +98,19 @@ def _nth_weekday(year: int, month: int, weekday: int, n: int) -> date:
 
 
 def _last_weekday(year: int, month: int, weekday: int) -> date:
-    """The last ``weekday`` of a month, with Monday as 0."""
-    day = date(year, month, 28)
-    while True:
-        nxt = day + timedelta(days=7)
-        if nxt.month != month:
-            break
-        day = nxt
-    return day - timedelta(days=(day.weekday() - weekday) % 7)
+    """The last ``weekday`` of a month, with Monday as 0.
+
+    Counted back from the month's last day, which is the only starting point
+    that cannot miss the answer. Until v0.4 the search started on the 28th
+    and stepped forward a week at a time, but 28 + 7 is always in the next
+    month, so it never stepped: it returned the last ``weekday`` on or before
+    the 28th. For Memorial Day that is a week early whenever the last Monday
+    of May is the 29th, 30th or 31st -- ten years in every twenty-three, 2021
+    to 2023 and 2027 among them.
+    """
+    following = date(year + month // 12, month % 12 + 1, 1)
+    last = following - timedelta(days=1)
+    return last - timedelta(days=(last.weekday() - weekday) % 7)
 
 
 def _observed(day: date) -> date:

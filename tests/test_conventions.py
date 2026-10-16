@@ -95,6 +95,46 @@ class TestCalendar:
         assert easter_sunday(2025) == date(2025, 4, 20)
         assert date(2025, 4, 18) in SIFMA_US.holidays(2025)
 
+    # Every year from 2018 to 2040 in which the last Monday of May falls on the
+    # 29th, 30th or 31st, with that Monday. Taken from QuantLib 1.44,
+    # ``UnitedStates(UnitedStates.SOFR)``, which closes each of these dates and
+    # keeps the Monday a week earlier open. Until v0.4 this package started its
+    # search on 28 May and never stepped forward, so in exactly these ten years
+    # it closed the Monday before and kept Memorial Day itself open. The
+    # publication record agrees for the three that have happened: FRED has no
+    # SOFR for 31 May 2021, 30 May 2022 or 29 May 2023, and has 0.01%, 0.78%
+    # and 5.05% on the Mondays a week earlier.
+    MEMORIAL_DAYS_AFTER_THE_28TH = (
+        date(2021, 5, 31),
+        date(2022, 5, 30),
+        date(2023, 5, 29),
+        date(2027, 5, 31),
+        date(2028, 5, 29),
+        date(2032, 5, 31),
+        date(2033, 5, 30),
+        date(2034, 5, 29),
+        date(2038, 5, 31),
+        date(2039, 5, 30),
+    )
+
+    @pytest.mark.parametrize("memorial_day", MEMORIAL_DAYS_AFTER_THE_28TH)
+    def test_memorial_day_after_the_28th_is_the_holiday(self, memorial_day):
+        assert memorial_day.weekday() == 0
+        assert not SIFMA_US.is_business_day(memorial_day)
+        assert SIFMA_US.is_business_day(memorial_day - timedelta(days=7))
+
+    def test_memorial_day_is_a_monday_in_the_last_seven_days_of_may(self):
+        # The closed form, independent of how the calendar searches for it: the
+        # last Monday of a 31-day month is the one Monday among its last seven
+        # days. Checked over more than a century so that every weekday 31 May
+        # can fall on is covered many times over.
+        for year in range(1990, 2101):
+            in_may = [day for day in SIFMA_US.holidays(year) if day.month == 5]
+            assert len(in_may) == 1, year
+            assert in_may[0].weekday() == 0, year
+            assert 25 <= in_may[0].day <= 31, year
+
+
     def test_saturday_holiday_observed_on_the_friday(self):
         # 4 July 2026 is a Saturday. This is the rule PRD-001 AC-1.2 flags for manual
         # confirmation, so it is asserted explicitly rather than incidentally.
