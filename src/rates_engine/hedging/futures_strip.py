@@ -6,8 +6,14 @@ and reprice the swap. That is deliberately *not* the key-rate profile in
 :mod:`rates_engine.risk.sensitivities`, which bumps curve nodes instead. The two answer
 different questions — how much of the swap's risk this contract can take, and
 how the swap's risk is distributed along the curve — and they are reported
-under different names for that reason. They do sum to the same parallel DV01,
-and ``test_risk_key_rate.py`` checks that they do.
+under different names for that reason. Each sums to its own parallel, and the
+two parallels are different numbers: the key rates sum to the zero-curve DV01,
+the bucketed deltas to :attr:`HedgeResult.quote_parallel_dv01`, the DV01 to
+every futures quote moving at once. On the README strip that is -21,870.07
+against -21,949.91 USD/bp, 0.37% apart, because a basis point on a quoted
+ACT/360 forward is not a basis point on the continuously compounded zero
+rate (the factor is in :func:`shock_table`). ``test_risk_key_rate.py`` checks
+each identity in its own basis and does not compare the two.
 
 **What the shock table is for.** A futures strip pays linearly in the rate and
 a swap does not, so a hedge that is exact at the money is not exact anywhere
@@ -301,8 +307,10 @@ def strip_hedge(
             "bucket_sum": sum(deltas.values()),
             "note": (
                 "Bucketed delta by instrument quote, not a key-rate profile by curve "
-                "node. The two sum to the same parallel DV01 and answer different "
-                "questions; see rates_engine.key_rate_dv01."
+                "node. Each sums to its own parallel: these to quote_parallel_dv01 "
+                "(every futures quote moved at once), the key rates to the zero-curve "
+                "DV01. The two parallels are different derivatives, about 0.4% apart "
+                "at 4%, and answer different questions; see rates_engine.key_rate_dv01."
             ),
         },
         sources=(base.evidence,),
@@ -637,9 +645,12 @@ def shock_table(
         # A long futures position loses when rates rise, linearly in *its own*
         # forward rate. Using a nominal parallel basis point here instead would
         # leave a first-order residual in the net column and make the swap's
-        # convexity unreadable underneath it: a basis point on a continuously
-        # compounded zero rate is not a basis point on an ACT/360 simple
-        # forward, and the difference is roughly 365/360.
+        # convexity unreadable underneath it. One basis point on the
+        # continuously compounded ACT/365F zero rate moves an ACT/360 simple
+        # forward by (1 + F tau) x 360/365 basis points -- 0.9963 on a 4% IMM
+        # quarter -- so the quote parallel DV01 runs about
+        # (365/360) / (1 + F tau) times the zero one: 1.00365 on the README
+        # strip, not the 365/360 (1.0139) the factor is sometimes rounded to.
         strip_pnl = 0.0
         for label, count in hedge.contracts.items():
             start, end = hedge.periods[label]

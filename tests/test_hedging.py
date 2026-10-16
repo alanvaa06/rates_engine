@@ -338,6 +338,47 @@ class TestContractSize:
         assert replace(node, contract="SR3").describe()["contract"] == "SR3"
 
 
+class TestTheNotesSayWhatIsMeasured:
+    """The evidence used to say the bucketed deltas and the key rates "sum to
+    the same parallel DV01". They do not: each sums to its own parallel, and
+    the two parallels differ by about 0.37% on the README strip."""
+
+    def test_the_hedge_note_gives_each_basis_its_own_parallel(self, par_swap, strip, as_of):
+        note = strip_hedge(par_swap, strip, as_of=as_of).evidence.fields["note"]
+        assert "same parallel" not in note
+        assert "quote_parallel_dv01" in note
+        assert "key-rate" in note
+
+    def test_the_two_parallels_differ_on_the_readme_strip(self, par_swap, strip, curve_set, as_of):
+        # The README strip (flat 4%, nine IMM quarters, USD 100m two-year
+        # payer). The figures quoted in the module docstring.
+        from rates_engine.risk.sensitivities import key_rate_dv01
+
+        hedge = strip_hedge(par_swap, strip, as_of=as_of)
+        key_rates = key_rate_dv01(par_swap, curve_set, (0.5, 1.0, 1.5, 2.0)).total
+        buckets = sum(hedge.bucketed_delta_by_instrument.values())
+        assert key_rates == pytest.approx(-21_870.07, abs=0.01)
+        assert buckets == pytest.approx(-21_949.91, abs=0.01)
+        assert buckets / key_rates == pytest.approx(1.00365, abs=1e-5)
+
+    def test_a_zero_rate_basis_point_moves_a_quarterly_forward_by_less_than_one(
+        self, curve_set, strip
+    ):
+        # Closed form for the factor the shock table's comment quotes: with
+        # P(s)/P(e) = 1 + F tau and a parallel shift dy of the ACT/365F zero
+        # rate, dF = (1 + F tau) x (days/365) / tau x dy = (1 + F tau) x
+        # 360/365 x dy. At 4% over a 91-day quarter that is 0.99627, not one
+        # and not 365/360.
+        from rates_engine.risk.bumps import shifted
+
+        moved = shifted(curve_set, 1e-4)
+        for contract in (i for i in strip if isinstance(i, FuturesNode)):
+            base = curve_set.discount.forward(contract.start, contract.end)
+            tau = (contract.end - contract.start).days / 360.0
+            move_bp = (moved.discount.forward(contract.start, contract.end) - base) * 1e4
+            assert move_bp == pytest.approx((1.0 + base * tau) * 360.0 / 365.0, rel=1e-4)
+
+
 class TestIncompleteStrip:
     """PRD-001 AC-8.4: a gap is named, never extrapolated over."""
 
