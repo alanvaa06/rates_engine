@@ -1,5 +1,8 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+# 77 is the first setuptools that reads an SPDX string in `license` and a
+# `license-files` list (PEP 639). Older ones reject the string, and newer
+# ones warn on the table form it replaces and stop accepting it in 2027.
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,7 +10,8 @@ name = "finport-ratesengine"
 version = "0.3.0"
 description = "Deterministic SOFR rates engine: curves, futures convexity, swaps, swaptions and caps under Black and Bachelier, a SABR volatility cube, parametric curves, risk and futures-strip hedging, each result carrying the evidence it rests on."
 readme = "README.md"
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
 # 3.11 rather than optengine's 3.9 (PRD-001 decision D1): 3.9 reached
 # end of life in October 2025 and pins the stack to numpy 1.x, which
 # costs modern typing syntax for nothing this package gains.
@@ -16,7 +20,6 @@ authors = [{ name = "Alan Vazquez" }]
 keywords = ["sofr", "rates", "curve", "swap", "swaption", "sabr", "volatility", "futures", "convexity", "dv01", "quant"]
 classifiers = [
     "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Topic :: Office/Business :: Financial :: Investment",
 ]
