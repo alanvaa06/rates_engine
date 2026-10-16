@@ -223,8 +223,8 @@ class IRSwap:
         fixed_day_count: Fixed leg accrual basis.
         float_day_count: Floating leg accrual basis.
         payment_lag_days: Business days from accrual end to payment. Zero by
-            default: a term rate is known at the period start, so there is
-            nothing to wait for.
+            default: a term rate is known by the period start -- Term SOFR
+            two business days before it -- so there is nothing to wait for.
         calendar: Calendar for payment rolls; ``None`` rolls on the index's.
         convention: Roll rule for payment dates.
         index: The term rate the floating leg pays. ``None`` means Term SOFR

@@ -18,14 +18,15 @@ earlier came back as -4.06m USD. The filter is here rather than
 only in the projections because this is the one place a flow meets the
 valuation date, so a product of the caller's own is covered too.
 
-**A floating period in progress needs its fixings.** Every valuation here
-takes ``fixings``, a :class:`~rates_engine.market.snapshot.MarketSnapshot`
+**A floating coupon already decided needs its fixings.** Every valuation
+here takes ``fixings``, a :class:`~rates_engine.market.snapshot.MarketSnapshot`
 of published rates, and hands it to the projection, which compounds or
-reads the history of the period in progress and refuses with
+reads that history -- an overnight period that has begun, a term period
+whose fixing date has passed -- and refuses with
 :class:`~rates_engine.core.errors.MissingFixingError` when it is absent
 (:mod:`rates_engine.pricing.projection` says exactly what it reads). A
-trade that starts on or after ``as_of`` needs none and prices to the bit as
-it did before; handed fixings anyway, it ignores them. The fixings a price
+trade with no such coupon needs none and prices to the bit as it did
+before; handed fixings anyway, it ignores them. The fixings a price
 did use are in its evidence, as ``realised_fixings`` and as the series'
 provenance among the inputs, so their data quality reaches
 ``worst_quality``.
@@ -299,7 +300,7 @@ def discounted_value(
     Args:
         instrument: Anything :func:`~rates_engine.pricing.projection.project` handles.
         curve_set: Discount and projection curves.
-        fixings: Published fixings for a floating period in progress on
+        fixings: Published fixings for a floating coupon already decided on
             ``curve_set.as_of``; see :func:`pv`.
 
     Returns:
@@ -307,7 +308,7 @@ def discounted_value(
 
     Raises:
         CurrencyMismatchError: A flow is in another currency than the curve.
-        MissingFixingError: A floating period is in progress and ``fixings``
+        MissingFixingError: A floating coupon is already decided and ``fixings``
             does not cover its history.
     """
     return _pv_of(project(instrument, curve_set, **_passing(fixings)), curve_set)
@@ -350,14 +351,14 @@ def par_rate_value(
     Args:
         swap: A two-legged instrument.
         curve_set: Discount and projection curves.
-        fixings: Published fixings for a floating period in progress; see
+        fixings: Published fixings for a floating coupon already decided; see
             :func:`par_rate`.
 
     Returns:
         The par rate as a decimal.
 
     Raises:
-        MissingFixingError: A floating period is in progress and ``fixings``
+        MissingFixingError: A floating coupon is already decided and ``fixings``
             does not cover its history.
     """
     float_pv = _pv_of(_float_leg(swap, curve_set, fixings), curve_set)
@@ -375,8 +376,9 @@ def pv(
 
     A trade that started before ``curve_set.as_of`` is valued on what is
     left of it: paid flows count for nothing, the fixed coupon accruing
-    today counts in full, and the floating one in progress is its published
-    history -- compounded for an overnight index, read for a term one --
+    today counts in full, and a floating coupon already decided is its
+    published history -- compounded for an overnight index over the days
+    before ``as_of``, the fixing itself for a term index that has fixed --
     and the curve's forecast for the rest.
 
     Args:
@@ -384,11 +386,15 @@ def pv(
         curve_set: Discount and projection curves.
         source_evidence: Evidence of the curves, chained in so that a proxied
             curve stays visibly proxied in the price.
-        fixings: Published fixings, needed only when a floating period is in
-            progress on ``curve_set.as_of``: a series named after the index
-            (``"SOFR"``, ``"TERM_SOFR_3M"``, ``"TIIE_FONDEO"``, ``"TIIE_28"``)
-            holding one decimal rate per business day. Fixings dated on or
-            after ``as_of`` are never read.
+        fixings: Published fixings, needed only when a floating coupon is
+            already decided on ``curve_set.as_of``: an overnight period that
+            has begun, or a term period whose fixing date -- two business days
+            before the start for Term SOFR, the start for TIIE 28 -- is on or
+            before ``as_of``, which a swap starting at spot already is. A
+            series named after the index (``"SOFR"``, ``"TERM_SOFR_3M"``,
+            ``"TIIE_FONDEO"``, ``"TIIE_28"``) holding one decimal rate per
+            business day. Overnight fixings dated on or after ``as_of`` are
+            never read, nor term fixings after it.
 
     Returns:
         A :class:`PriceResult` with ``measure="pv"`` and the discount
@@ -397,7 +403,7 @@ def pv(
 
     Raises:
         CurrencyMismatchError: A flow is in another currency than the curve.
-        MissingFixingError: A floating period is in progress and ``fixings``
+        MissingFixingError: A floating coupon is already decided and ``fixings``
             is absent, lacks the index's series, or lacks a business day of
             its history. The message names the period and the series.
     """
@@ -471,7 +477,7 @@ def par_rate(
         swap: A two-legged instrument.
         curve_set: Discount and projection curves.
         source_evidence: Evidence of the curves.
-        fixings: Published fixings for a floating period in progress; see
+        fixings: Published fixings for a floating coupon already decided; see
             :func:`pv`.
 
     Returns:
@@ -481,7 +487,7 @@ def par_rate(
     Raises:
         ZeroDivisionError: The annuity is zero, which means the fixed leg has
             no periods left to discount.
-        MissingFixingError: A floating period is in progress and ``fixings``
+        MissingFixingError: A floating coupon is already decided and ``fixings``
             does not cover its history.
     """
     floating = _float_leg(swap, curve_set, fixings)
@@ -562,7 +568,7 @@ def price_on_parametric(
         bootstrapped: The curves the model was fitted to.
         fit: The fit that produced ``parametric``. Its payload must declare
             ``curve_kind="parametric"``; the model name is read from it.
-        fixings: Published fixings for a floating period in progress; see
+        fixings: Published fixings for a floating coupon already decided; see
             :func:`pv`. The same history enters both prices.
 
     Returns:
@@ -572,7 +578,7 @@ def price_on_parametric(
         ValueError: ``fit`` does not declare itself parametric, so labelling
             the comparison ``curve_kind="parametric"`` would be a claim about
             a curve nothing here has seen.
-        MissingFixingError: A floating period is in progress and ``fixings``
+        MissingFixingError: A floating coupon is already decided and ``fixings``
             does not cover its history.
     """
     # D7: `_pv_of` checks each curve set against its own flows, and nothing

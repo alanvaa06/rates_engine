@@ -32,16 +32,24 @@ today. The pricer drops such flows again whatever projected them, so a
 product of the caller's own that returns its whole history is still
 valued correctly.
 
-A period that began before ``as_of`` and is paid after it is part history.
-Its fixed coupon was known on the trade date and is counted in full. Its
-floating coupon is not, and no curve can say what it was:
+A period paid after ``as_of`` whose coupon is already partly or wholly
+decided is history, and no curve can say what it was. Its fixed coupon was
+known on the trade date and is counted in full. Its floating coupon:
 
-- an overnight rate (SOFR, TIIE de Fondeo) compounds the published fixings
-  from the accrual start up to ``as_of``, exclusive, and the curve's
-  ``P(as_of) / P(end)`` for the rest -- the coupon QuantLib's
-  ``OvernightIndexedCoupon`` pays;
-- a term rate (Term SOFR, TIIE 28) pays the fixing published on its
-  accrual start, which is where this package projects a term rate from.
+- an overnight rate (SOFR, TIIE de Fondeo) is history once its period has
+  begun: the published fixings from the accrual start up to ``as_of``,
+  exclusive, are compounded, and the curve's ``P(as_of) / P(end)`` covers
+  the rest -- the coupon QuantLib's ``OvernightIndexedCoupon`` pays. A
+  period starting on ``as_of`` has no history: the day's rate is published
+  the next morning.
+- a term rate is history once its fixing date is on or before ``as_of``,
+  whether or not its period has begun, and pays that fixing. Term SOFR fixes
+  two SIFMA business days before the accrual start, the ARRC's convention
+  (:data:`_TERM_SOFR_FIXING_LAG_DAYS`): the fixing published on 2025-10-20
+  sets the period that starts on the 22nd, and a swap starting at spot fixed
+  today. TIIE 28 is read on the accrual start itself, where this package has
+  always projected it from; its real lag is not established
+  (``docs/forge/research/003-mxn-conventions.md``) and is pending.
 
 Both come from a :class:`~rates_engine.market.snapshot.MarketSnapshot`
 passed as ``fixings``, read by the series named after the index
@@ -51,9 +59,7 @@ naming what is missing. Until v0.4 it projected the period as
 ``P(start) / P(end)`` on a curve that is one on or before ``as_of``, so the
 part already accrued was worth nothing: a 4% payer over USD 100m started
 six months before valuation came back at -2.24m USD against QuantLib's
--17,348. A period that starts *on* ``as_of`` has no history and is
-projected exactly as before; its fixing, if any, is published that day and
-a curve built that morning already prices it.
+-17,348. A period with no history is projected exactly as before.
 """
 
 from __future__ import annotations
@@ -63,7 +69,13 @@ from functools import singledispatch
 from typing import Any, Protocol, runtime_checkable
 
 from rates_engine.conventions.daycount import DayCount, year_fraction
-from rates_engine.conventions.indices import RateIndex
+from rates_engine.conventions.indices import (
+    TERM_SOFR_1M,
+    TERM_SOFR_3M,
+    TERM_SOFR_6M,
+    TERM_SOFR_12M,
+    RateIndex,
+)
 from rates_engine.conventions.side import fixed_leg_sign
 from rates_engine.core.errors import MissingFixingError, UnsupportedConventionError
 from rates_engine.core.money import Currency
@@ -74,6 +86,19 @@ from rates_engine.instruments.swaps import IRSwap, OISSwap
 from rates_engine.market.snapshot import MarketSnapshot
 
 __all__ = ["Priceable", "Swappable", "project", "float_leg", "fra_fair_rate"]
+
+_TERM_SOFR_FIXING_LAG_DAYS = 2
+"""Business days, on the index's calendar, from a Term SOFR fixing to the
+start of the period it sets: the ARRC's convention, and the same one
+``instruments/capfloor.py`` applies to caplets as ``TERM_RATE_FIXING_LAG_DAYS``.
+Repeated here rather than imported so that the linear pricer does not
+depend on the option products. It belongs on :class:`RateIndex`, as a
+property of the index rather than of each module that reads it; moving it
+there is a follow-up."""
+
+_TERM_SOFR = frozenset(
+    index.name for index in (TERM_SOFR_1M, TERM_SOFR_3M, TERM_SOFR_6M, TERM_SOFR_12M)
+)
 
 
 @runtime_checkable
@@ -181,16 +206,40 @@ def _in_progress(
     end: date,
     pay: date,
     as_of: date,
+    *,
+    fixed_on: date | None = None,
 ) -> str:
     """How the refusals below name the period they could not value."""
     if isinstance(instrument, FRA):
         trade = f"FRA {instrument.start} to {instrument.end}"
     else:
         trade = f"{type(instrument).__name__} {instrument.effective} to {instrument.maturity}"
-    return (
-        f"{trade}: the floating period {start} to {end}, paid {pay}, began before the "
-        f"valuation date {as_of}"
+    when = (
+        f"began before the valuation date {as_of}"
+        if fixed_on is None
+        else f"fixed on {fixed_on}, on or before the valuation date {as_of}"
     )
+    return f"{trade}: the floating period {start} to {end}, paid {pay}, {when}"
+
+
+def _term_fixing_date(index: RateIndex, accrual_start: date) -> date:
+    """The date a term rate's period is fixed on.
+
+    Term SOFR: :data:`_TERM_SOFR_FIXING_LAG_DAYS` business days of its own
+    calendar before the accrual start. Any other term rate -- TIIE 28 --
+    the accrual start itself, which is where the forward has always been
+    taken from and which nothing here has verified against its
+    administrator.
+    """
+    if index.name in _TERM_SOFR:
+        return index.calendar.add_business_days(accrual_start, -_TERM_SOFR_FIXING_LAG_DAYS)
+    return accrual_start
+
+
+def _fixing_rule(index: RateIndex) -> str:
+    if index.name in _TERM_SOFR:
+        return f"{_TERM_SOFR_FIXING_LAG_DAYS} business days before its accrual start"
+    return "its accrual start"
 
 
 def _how_to_pass(index: RateIndex) -> str:
@@ -249,15 +298,15 @@ def _term_fixing(
     """The term fixing published on ``fixing_date``, and the record of it."""
     if fixings is None:
         raise MissingFixingError(
-            f"{context}, so its coupon is the {index.name} fixing of {fixing_date}, its "
-            f"accrual start: history no curve knows. {_how_to_pass(index)}."
+            f"{context}, so its coupon is the {index.name} fixing of {fixing_date}, "
+            f"{_fixing_rule(index)}: history no curve knows. {_how_to_pass(index)}."
         )
     try:
         series = fixings.require(index.name)
         rate = fixings.fixing(index.name, fixing_date)
     except MissingFixingError as error:
         raise MissingFixingError(
-            f"{context}, and it fixes on its accrual start: {error}"
+            f"{context}, and it fixes {_fixing_rule(index)}: {error}"
         ) from error
     return RealisedFixing(
         series_id=index.name,
@@ -336,8 +385,8 @@ def _irs_float(
     ``curve_set.projection``; the discounting, applied in
     :mod:`rates_engine.pricing.linear`, comes from ``curve_set.discount``.
     When the two are the same object the basis is zero and the result
-    collapses onto the OIS answer. A period in progress pays the fixing of
-    its accrual start instead of a forward.
+    collapses onto the OIS answer. A period whose fixing date is on or
+    before ``as_of`` pays that fixing instead of a forward.
     """
     sign = -fixed_leg_sign(swap.side)
     projection = curve_set.projection
@@ -351,9 +400,13 @@ def _irs_float(
             continue
         tau = year_fraction(start, end, swap.float_day_count)
         realised: RealisedFixing | None = None
-        if start < as_of:
+        fixing_date = _term_fixing_date(swap.float_index, start)
+        if fixing_date <= as_of:
             realised = _term_fixing(
-                swap.float_index, start, fixings, _in_progress(swap, start, end, pay, as_of)
+                swap.float_index,
+                fixing_date,
+                fixings,
+                _in_progress(swap, start, end, pay, as_of, fixed_on=fixing_date),
             )
             rate = realised.rate
         else:
@@ -401,11 +454,15 @@ def _project_irs(
 def _fra_rate(
     fra: FRA, curve_set: CurveSet, fixings: MarketSnapshot | None
 ) -> tuple[float, RealisedFixing | None]:
-    """The rate the FRA settles on: its fixing once it has started, else the forward."""
+    """The rate the FRA settles on: its fixing once it has fixed, else the forward."""
     as_of = curve_set.as_of
-    if fra.start < as_of:
+    fixing_date = _term_fixing_date(fra.index, fra.start)
+    if fixing_date <= as_of:
         realised = _term_fixing(
-            fra.index, fra.start, fixings, _in_progress(fra, fra.start, fra.end, fra.end, as_of)
+            fra.index,
+            fixing_date,
+            fixings,
+            _in_progress(fra, fra.start, fra.end, fra.end, as_of, fixed_on=fixing_date),
         )
         return realised.rate, realised
     return curve_set.projection.forward(fra.start, fra.end, day_count=fra.day_count), None
@@ -416,22 +473,25 @@ def fra_fair_rate(
 ) -> float:
     """The rate that makes the FRA worth zero, from the projection curve.
 
-    Once the reference period has started the rate is no longer a forecast:
-    it is the index's fixing on the period start, read from ``fixings``.
+    Once the index has fixed the rate is no longer a forecast: it is the
+    fixing, read from ``fixings``. Term SOFR fixes two business days before
+    the period starts, so a FRA starting up to two business days after
+    ``as_of`` has already fixed; TIIE 28 is read on the period start, a
+    convention still to be verified.
 
     Args:
         fra: The contract.
         curve_set: Discount and projection curves.
-        fixings: Published fixings, needed only once ``fra.start`` is before
-            ``curve_set.as_of``. The series is named after the index, e.g.
-            ``"TERM_SOFR_3M"``.
+        fixings: Published fixings, needed only once the fixing date is on or
+            before ``curve_set.as_of``. The series is named after the index,
+            e.g. ``"TERM_SOFR_3M"``.
 
     Returns:
         The fair rate as a decimal on the FRA's day count.
 
     Raises:
-        MissingFixingError: The period has started and ``fixings`` does not
-            hold the fixing of its start.
+        MissingFixingError: The index has fixed and ``fixings`` does not hold
+            that fixing.
     """
     rate, _ = _fra_rate(fra, curve_set, fixings)
     return rate
