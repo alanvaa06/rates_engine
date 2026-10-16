@@ -10,7 +10,9 @@ the way the estimation literature does it, which matters more than it sounds:
 for a fixed decay the model is **linear in the three betas**, so those come
 from least squares in closed form and only the decay is searched over. Throwing
 all four at a nonlinear optimiser is the standard way to get a fit that
-depends on where the search started.
+depends on where the search started. The one-dimensional search has the same
+problem on a smaller scale -- the profile over the decay can have more than
+one minimum -- so it scans a grid before it refines.
 
 **The FOMC step curve** (Heitfield and Park) says something the smooth models
 cannot: the overnight rate does not drift, it sits still and then jumps on
@@ -36,7 +38,11 @@ from scipy.optimize import minimize_scalar
 
 from rates_engine.conventions.calendar import SIFMA_US, HolidayCalendar
 from rates_engine.conventions.daycount import CURVE_TIME_BASIS, year_fraction
-from rates_engine.core.errors import CalibrationError, UnderdeterminedCurveError
+from rates_engine.core.errors import (
+    CalibrationError,
+    ImplausibleInputError,
+    UnderdeterminedCurveError,
+)
 from rates_engine.core.evidence import DataQuality, Degradation, Evidence
 from rates_engine.core.money import Currency
 from rates_engine.core.results import EngineResult
@@ -58,6 +64,21 @@ TERM_RATE_CAVEAT = (
     "rate. The two agree closely inside a year and diverge after it, because "
     "the adjustment grows with the square of maturity."
 )
+
+_TAU_GRID_POINTS = 100
+"""Log-spaced decays the Nelson-Siegel profile is scanned at before Brent refines.
+
+The profile -- the least-squares error as a function of the decay alone, the
+betas solved in closed form at each -- can have an interior minimum and a
+lower value on a bound, or two interior minima. Bounded Brent on the whole
+range finds one of them, and which one depends on the range. On 300 random
+Svensson curves it was more than 5 bp of RMSE worse than a 4,000-point grid
+on 24 of them. A hundred points, then Brent on the two grid cells around the
+best, matched or beat that grid on all 300, deterministically.
+"""
+
+_AT_BOUND_RELATIVE = 1e-6
+"""How close to a bound, relative to it, a fitted decay counts as sitting on it."""
 
 
 @dataclass(frozen=True)
@@ -202,18 +223,32 @@ def fit_nelson_siegel(
     minima from different starting points and produces betas that jump
     between refits while the fit quality barely moves.
 
+    The one-parameter search is a grid and then a refinement: the profile is
+    evaluated at :data:`_TAU_GRID_POINTS` log-spaced decays across
+    ``tau_bounds`` and bounded Brent polishes the best of them. Brent alone,
+    on the whole range, could settle in the wrong one of two minima -- on one
+    Svensson curve it stopped on the bound at tau = 30 with 7.16 bp RMSE
+    while tau = 2.01 gives 1.60 bp.
+
     Args:
-        times: Maturities in years, at least four.
-        zero_rates: Continuously compounded zero rates as decimals.
-        tau_bounds: Range to search the decay over, in years.
-        tolerance_bp: When set, refuse a fit whose RMSE exceeds this.
+        times: Maturities in years, at least four, all finite.
+        zero_rates: Continuously compounded zero rates as decimals, all finite.
+        tau_bounds: Range to search the decay over, in years; positive and
+            increasing. A fit that lands on either end is returned with a
+            ``nelson_siegel_tau_at_bound`` warning, because the decay was then
+            set by the range rather than by the data.
+        tolerance_bp: When set, refuse a fit whose RMSE exceeds this, in
+            basis points.
 
     Returns:
         The :class:`NelsonSiegelFit`.
 
     Raises:
-        CalibrationError: Fewer than four maturities, mismatched lengths, or
-            an RMSE above ``tolerance_bp``.
+        CalibrationError: Fewer than four maturities, mismatched lengths, a
+            fit whose error is not a finite number, or an RMSE above
+            ``tolerance_bp``.
+        ImplausibleInputError: A time or a rate is NaN or infinite.
+        ValueError: ``tau_bounds`` is not a positive, increasing pair.
     """
     if len(times) != len(zero_rates):
         raise CalibrationError(f"{len(times)} times and {len(zero_rates)} rates do not align")
@@ -223,19 +258,55 @@ def fit_nelson_siegel(
             "A fit through as many points as parameters is interpolation wearing a "
             "model's name."
         )
+    # A NaN used to pass straight through: the fit came back NaN, and
+    # ``rmse > tolerance`` is false for a NaN, so even an explicit tolerance
+    # never fired.
+    for name, values in (("times", times), ("zero_rates", zero_rates)):
+        bad = [index for index, value in enumerate(values) if not math.isfinite(value)]
+        if bad:
+            raise ImplausibleInputError(
+                f"Nelson-Siegel {name} at positions {bad} are not finite numbers "
+                f"({[values[i] for i in bad]}); drop the maturities that have no quote"
+            )
+    lower, upper = (float(b) for b in tau_bounds)
+    if not (math.isfinite(lower) and math.isfinite(upper) and 0.0 < lower < upper):
+        raise ValueError(
+            f"tau_bounds must be a positive, increasing pair of years, got {tau_bounds!r}"
+        )
     observations = np.asarray(zero_rates, dtype=float)
 
     def betas_for(tau: float) -> tuple[np.ndarray, float]:
         design = np.array([NelsonSiegel.loadings(t, tau) for t in times])
-        solution, *_ = np.linalg.lstsq(design, observations, rcond=None)
-        residual = design @ solution - observations
-        return solution, float(residual @ residual)
+        # Overflow is not hidden here: it makes the error infinite, which the
+        # profile treats as no fit at that decay and the RMSE check below
+        # refuses if it survives to the answer.
+        with np.errstate(over="ignore", invalid="ignore"):
+            solution, *_ = np.linalg.lstsq(design, observations, rcond=None)
+            residual = design @ solution - observations
+            error = float(residual @ residual)
+        return solution, error if math.isfinite(error) else math.inf
 
+    grid = np.exp(np.linspace(math.log(lower), math.log(upper), _TAU_GRID_POINTS))
+    grid[0], grid[-1] = lower, upper
+    profile = [betas_for(float(t))[1] for t in grid]
+    best = int(np.argmin(profile))
+    if not math.isfinite(profile[best]):
+        raise CalibrationError(
+            "Nelson-Siegel has no finite fit anywhere in tau_bounds: the squared error is "
+            "not a finite number at any decay, so the rates are too large to fit "
+            f"(largest magnitude {max(abs(r) for r in zero_rates):.3e})"
+        )
     search = minimize_scalar(
-        lambda tau: betas_for(tau)[1], bounds=tau_bounds, method="bounded",
+        lambda tau: betas_for(tau)[1],
+        bounds=(float(grid[max(best - 1, 0)]), float(grid[min(best + 1, len(grid) - 1)])),
+        method="bounded",
         options={"xatol": 1e-10},
     )
     tau = float(search.x)
+    if betas_for(tau)[1] > profile[best]:
+        # Brent never evaluates the ends of its bracket, so on a bound the
+        # grid point itself can be the better of the two.
+        tau = float(grid[best])
     betas, _ = betas_for(tau)
     model = NelsonSiegel(float(betas[0]), float(betas[1]), float(betas[2]), tau)
 
@@ -243,10 +314,36 @@ def fit_nelson_siegel(
     errors_bp = [(f - o) * 1e4 for f, o in zip(fitted, zero_rates, strict=True)]
     rmse_bp = math.sqrt(sum(e * e for e in errors_bp) / len(errors_bp))
     max_error_bp = max(abs(e) for e in errors_bp)
-    if tolerance_bp is not None and rmse_bp > tolerance_bp:
+    if not math.isfinite(rmse_bp):
+        raise CalibrationError(
+            f"Nelson-Siegel fitted to an RMSE that is not a finite number ({rmse_bp!r} bp); "
+            "a fit whose error cannot be measured is not a fit"
+        )
+    if tolerance_bp is not None and not rmse_bp <= tolerance_bp:
         raise CalibrationError(
             f"Nelson-Siegel fitted to {rmse_bp:.4f} bp RMSE, above the {tolerance_bp} bp "
             f"tolerance; worst maturity off by {max_error_bp:.4f} bp"
+        )
+
+    at_bound: str | None = None
+    if tau - lower <= _AT_BOUND_RELATIVE * lower:
+        at_bound = "lower"
+    elif upper - tau <= _AT_BOUND_RELATIVE * upper:
+        at_bound = "upper"
+    warnings: tuple[Degradation, ...] = ()
+    if at_bound is not None:
+        edge = lower if at_bound == "lower" else upper
+        warnings = (
+            Degradation(
+                code="nelson_siegel_tau_at_bound",
+                message=(
+                    f"The decay tau = {tau:.6g} years sits on the {at_bound} bound "
+                    f"({edge} of tau_bounds {list(tau_bounds)}): the best fit lies at or "
+                    "beyond the search range, so tau was set by the range rather than the "
+                    "data. Widen tau_bounds if the range was not a deliberate constraint."
+                ),
+                data_quality=DataQuality.ASSUMED,
+            ),
         )
 
     evidence = Evidence(
@@ -256,15 +353,20 @@ def fit_nelson_siegel(
             "model": "nelson_siegel",
             "estimator": "concentrated_least_squares",
             "estimator_note": (
-                "Betas solved in closed form for each tau, tau searched over a bounded "
-                "interval. Deterministic, unlike a four-way nonlinear search."
+                "Betas solved in closed form for each tau; the tau profile scanned on a "
+                f"{_TAU_GRID_POINTS}-point log grid across tau_bounds and refined by bounded "
+                "Brent around the best point, so a second minimum cannot capture the "
+                "search. Deterministic, unlike a four-way nonlinear search."
             ),
             "tau_bounds": list(tau_bounds),
+            "tau_grid_points": _TAU_GRID_POINTS,
+            "tau_at_bound": at_bound,
             "observations": len(times),
             "parameters": model.to_dict(),
             "rmse_bp": rmse_bp,
             "max_error_bp": max_error_bp,
         },
+        warnings=warnings,
     )
     return NelsonSiegelFit(
         evidence=evidence,

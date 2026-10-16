@@ -27,7 +27,11 @@ import pytest
 import rates_engine
 from rates_engine.conventions.daycount import DayCount, year_fraction
 from rates_engine.conventions.side import Side
-from rates_engine.core.errors import CalibrationError, UnderdeterminedCurveError
+from rates_engine.core.errors import (
+    CalibrationError,
+    ImplausibleInputError,
+    UnderdeterminedCurveError,
+)
 from rates_engine.core.evidence import DataQuality
 from rates_engine.curves.discount import CurveSet, DiscountCurve
 from rates_engine.curves.parametric import (
@@ -194,6 +198,91 @@ class TestNelsonSiegelFit:
         assert payload["curve_kind"] == "parametric"
         assert payload["model"] == "nelson_siegel"
         json.dumps(ns_fit.to_dict())
+
+    def test_it_finds_the_global_minimum_of_the_tau_profile(self):
+        """A Svensson curve whose profile has an interior minimum and a lower
+        value nowhere else but a slope down to the upper bound.
+
+        Bounded Brent alone settled on the bound: tau = 30, 7.16 bp RMSE. A
+        dense grid over the same bounds (20,001 log-spaced points, loadings
+        and least squares written out independently in a scratch script)
+        finds tau = 2.0127 at 1.5988 bp. In the review, 24 of 300 random
+        Svensson curves were left more than 5 bp worse than the grid.
+        """
+        b0, b1, b2, b3 = (
+            0.046729229025487776,
+            -0.001418807478039904,
+            0.01112545124353296,
+            -0.027950686078118084,
+        )
+        tau1, tau2 = 2.014123777370009, 13.41654368571956
+
+        def svensson(t: float) -> float:
+            x, y = t / tau1, t / tau2
+            s1, s2 = (1.0 - math.exp(-x)) / x, (1.0 - math.exp(-y)) / y
+            return b0 + b1 * s1 + b2 * (s1 - math.exp(-x)) + b3 * (s2 - math.exp(-y))
+
+        times = (0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 15.0, 20.0, 30.0)
+        fit = fit_nelson_siegel(times, tuple(svensson(t) for t in times))
+        assert fit.rmse_bp == pytest.approx(1.598783249179921, abs=1e-5)
+        assert fit.model.tau == pytest.approx(2.0126537839608125, abs=1e-3)
+        assert "nelson_siegel_tau_at_bound" not in {w.code for w in fit.evidence.warnings}
+
+    def test_it_finds_a_minimum_on_the_bound_too(self):
+        """The mirror case: an interior local minimum that is worse than the
+        bound. Brent alone stopped at tau = 0.3006 inside ``(0.05, 1.0)``."""
+        truth = NelsonSiegel(0.042, -0.006, 0.012, 2.5)
+        times = (0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 20.0, 30.0)
+        rates = tuple(truth.zero_rate(t) for t in times)
+        fit = fit_nelson_siegel(times, rates, tau_bounds=(0.05, 1.0))
+        assert fit.model.tau == pytest.approx(1.0, abs=1e-6)
+
+    def test_a_tau_on_its_bound_is_flagged(self):
+        """The optimum outside the bounds is not an error -- the caller chose
+        the range -- but the decay was set by the range rather than the data,
+        and the evidence has to say so."""
+        truth = NelsonSiegel(0.042, -0.006, 0.012, 2.5)
+        times = (0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 20.0, 30.0)
+        fit = fit_nelson_siegel(
+            times, tuple(truth.zero_rate(t) for t in times), tau_bounds=(4.0, 30.0)
+        )
+        assert fit.model.tau == pytest.approx(4.0, abs=1e-6)
+        warnings = {w.code: w for w in fit.evidence.warnings}
+        assert "nelson_siegel_tau_at_bound" in warnings
+        assert "4.0" in warnings["nelson_siegel_tau_at_bound"].message
+        assert fit.evidence.fields["tau_at_bound"] == "lower"
+
+    def test_an_interior_tau_is_not_flagged(self, ns_fit):
+        assert ns_fit.evidence.fields["tau_at_bound"] is None
+        assert ns_fit.evidence.warnings == ()
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+    def test_a_non_finite_rate_refuses(self, zero_curve, bad):
+        """NaN used to pass straight through: ``rmse > tolerance`` is false
+        for a NaN RMSE, so even an explicit tolerance never fired."""
+        times, rates = zero_curve
+        broken = (bad, *rates[1:])
+        with pytest.raises(ImplausibleInputError, match="zero_rates"):
+            fit_nelson_siegel(times, broken, tolerance_bp=1.0)
+
+    def test_a_non_finite_time_refuses(self, zero_curve):
+        times, rates = zero_curve
+        with pytest.raises(ImplausibleInputError, match="times"):
+            fit_nelson_siegel((*times[:-1], float("nan")), rates)
+
+    def test_a_fit_that_is_not_a_number_refuses(self):
+        """Finite inputs whose squares overflow: the RMSE is not a number, and
+        that is a failed fit, not a fit to report."""
+        times = (1.0, 2.0, 3.0, 5.0, 10.0)
+        with pytest.raises(CalibrationError, match="not a finite"):
+            fit_nelson_siegel(times, (1e300, -1e300, 1e300, -1e300, 1e300))
+
+    def test_nonsense_bounds_refuse(self, zero_curve):
+        times, rates = zero_curve
+        with pytest.raises(ValueError, match="tau_bounds"):
+            fit_nelson_siegel(times, rates, tau_bounds=(5.0, 1.0))
+        with pytest.raises(ValueError, match="tau_bounds"):
+            fit_nelson_siegel(times, rates, tau_bounds=(0.0, 30.0))
 
     def test_sampling_onto_a_discount_curve_reproduces_the_model(self, ns_fit):
         nodes = tuple(AS_OF + timedelta(days=365 * k) for k in (1, 2, 5, 10, 30))
