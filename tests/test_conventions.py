@@ -241,6 +241,112 @@ class TestSchedule:
             )
 
 
+_MF = BusinessDayConvention.MODIFIED_FOLLOWING
+_F = BusinessDayConvention.FOLLOWING
+_P = BusinessDayConvention.PRECEDING
+
+
+class TestScheduleAgainstQuantLib:
+    """The two edges of a schedule's front: its effective date and its first roll.
+
+    Every expected tuple below is the date list of QuantLib 1.44's
+    ``ql.Schedule(effective, maturity, ql.Period(n, ql.Months),
+    ql.UnitedStates(ql.UnitedStates.SOFR), convention, convention,
+    ql.DateGeneration.Backward, False)``, pasted as constants: the effective
+    date as QuantLib adjusts it, then every period end.
+
+    Two defects lived here until v0.4. The effective date was never adjusted,
+    so a swap starting on the June 2030 IMM date -- Juneteenth -- accrued from
+    a holiday. And when the roll convention pulled the first roll date back
+    onto the effective date, the schedule kept a period of zero days: an OIS
+    carried an empty flow and an ``IRSwap`` raised "forward period must be
+    positive". QuantLib adjusts the first and drops the second, and so does
+    ``Schedule.generate`` now. The zero-length period was the only difference
+    in 3,259 random schedules with business-day effective dates compared with
+    QuantLib during the 2026-10-15 review.
+    """
+
+    @pytest.mark.parametrize(
+        "effective,maturity,months,convention,expected",
+        [
+            # 31 May 2026 is a Sunday: Modified Following pulls the first roll
+            # back to Friday 29 May, the effective date itself.
+            (date(2026, 5, 29), date(2028, 5, 31), 12, _MF,
+             (date(2026, 5, 29), date(2027, 5, 28), date(2028, 5, 31))),
+            # 19 June 2030, the June IMM date, is Juneteenth.
+            (date(2030, 6, 19), date(2031, 6, 18), 12, _MF,
+             (date(2030, 6, 20), date(2031, 6, 18))),
+            # A Saturday effective date whose first roll collapses onto it.
+            (date(2026, 5, 30), date(2027, 5, 31), 12, _MF,
+             (date(2026, 5, 29), date(2027, 5, 28))),
+            # Following, monthly, from a Saturday month end.
+            (date(2026, 1, 31), date(2026, 7, 31), 1, _F,
+             (date(2026, 2, 2), date(2026, 3, 2), date(2026, 3, 31), date(2026, 4, 30),
+              date(2026, 6, 1), date(2026, 6, 30), date(2026, 7, 31))),
+            # Preceding, from a Saturday.
+            (date(2026, 5, 30), date(2026, 11, 30), 6, _P,
+             (date(2026, 5, 29), date(2026, 11, 30))),
+            # Independence Day 2026 is a Saturday, observed Friday 3 July.
+            (date(2026, 7, 4), date(2027, 7, 6), 3, _MF,
+             (date(2026, 7, 6), date(2026, 10, 6), date(2027, 1, 6), date(2027, 4, 6),
+              date(2027, 7, 6))),
+        ],
+    )
+    def test_dates_match_quantlib(self, effective, maturity, months, convention, expected):
+        schedule = Schedule.generate(
+            effective, maturity, frequency_months=months, convention=convention
+        )
+        assert (schedule.accrual_start[0], *schedule.accrual_end) == expected
+        assert schedule.accrual_start[1:] == schedule.accrual_end[:-1]
+
+    def test_no_period_is_empty(self):
+        schedule = Schedule.generate(
+            date(2026, 5, 29), date(2028, 5, 31), frequency_months=12, payment_lag_days=2
+        )
+        assert all(
+            end > start
+            for start, end in zip(schedule.accrual_start, schedule.accrual_end, strict=True)
+        )
+        assert len(schedule) == len(schedule.payment) == 2
+        assert schedule.payment == (date(2027, 6, 2), date(2028, 6, 2))
+
+    def test_an_irs_on_those_terms_prices(self):
+        import math
+
+        from rates_engine.curves.discount import CurveSet, DiscountCurve
+        from rates_engine.instruments.swaps import IRSwap
+        from rates_engine.pricing.linear import pv
+
+        as_of = date(2026, 5, 27)
+        nodes = tuple(as_of + timedelta(days=365 * k) for k in range(1, 6))
+        curve = DiscountCurve(as_of, nodes, tuple(math.exp(-0.04 * k) for k in range(1, 6)))
+        swap = IRSwap(
+            effective=date(2026, 5, 29),
+            maturity=date(2028, 5, 31),
+            fixed_rate=0.04,
+            fixed_frequency_months=12,
+        )
+        assert math.isfinite(pv(swap, CurveSet(curve)).value)
+
+    def test_a_single_period_that_collapses_refuses(self):
+        # Maturity on Sunday 31 May 2026 rolls back to the effective date.
+        with pytest.raises(ValueError, match="no accrual period"):
+            Schedule.generate(date(2026, 5, 29), date(2026, 5, 31), frequency_months=12)
+
+    def test_an_effective_date_on_a_business_day_is_untouched(self):
+        schedule = Schedule.generate(date(2026, 3, 18), date(2027, 3, 17), frequency_months=12)
+        assert schedule.accrual_start[0] == date(2026, 3, 18)
+
+    def test_the_legacy_schedule_leaves_the_effective_date_alone(self):
+        # adjust_accrual_ends=False reproduces the pre-v0.4 schedule, whose
+        # effective date and period ends were never adjusted.
+        schedule = Schedule.generate(
+            date(2030, 6, 19), date(2031, 6, 18), frequency_months=12, adjust_accrual_ends=False
+        )
+        assert schedule.accrual_start == (date(2030, 6, 19),)
+        assert schedule.accrual_end == (date(2031, 6, 18),)
+
+
 class TestSaturdayObservance:
     """Which Saturday holidays close the Friday before, and which close nothing.
 
