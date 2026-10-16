@@ -102,6 +102,15 @@ class SABRParameters:
     shift: float = 0.0
 
     def __post_init__(self) -> None:
+        # Finiteness first. Every comparison with NaN is false, so ``alpha <=
+        # 0`` and ``nu < 0`` both let a NaN through, the expansion returned
+        # NaN, and expansion_is_valid called the point valid because NaN is
+        # not ``<= 0``. An infinite alpha or nu is no better: the expansion
+        # divides by alpha and multiplies by nu.
+        for name in ("alpha", "beta", "rho", "nu", "shift"):
+            value = getattr(self, name)
+            if not math.isfinite(value):
+                raise ValueError(f"{name} must be a finite number, got {value!r}")
         if self.alpha <= 0.0:
             raise ValueError(f"alpha must be positive, got {self.alpha!r}")
         if not 0.0 <= self.beta <= 1.0:
@@ -126,6 +135,12 @@ class SABRParameters:
 
 def _shifted(parameters: SABRParameters, forward: float, strike: float) -> tuple[float, float]:
     """Apply the shift and refuse when the result is still not positive."""
+    if not (math.isfinite(forward) and math.isfinite(strike)):
+        # A NaN is not ``<= 0``, so without this it reached the logarithm
+        # and came back as a NaN volatility.
+        raise ValueError(
+            f"SABR needs a finite forward and strike, got {forward!r} and {strike!r}"
+        )
     f, k = forward + parameters.shift, strike + parameters.shift
     if f <= 0.0 or k <= 0.0:
         raise ShiftRequiredError(
@@ -164,6 +179,13 @@ def _checked(value: float, flavour: str, strike: float, expiry: float) -> float:
     push the failure downstream into a pricer, where it reads as a bad input
     rather than as a model boundary.
     """
+    if not math.isfinite(value):
+        raise ExpansionBreakdownError(
+            f"Hagan's {flavour} expansion returns {value!r} at strike {strike!r} and "
+            f"expiry {expiry!r} years: the arithmetic overflowed, which happens when "
+            "nu / alpha is astronomically large. No volatility comes out of that; "
+            "check alpha, which is the level of volatility and not a small tolerance."
+        )
     if value <= 0.0:
         raise ExpansionBreakdownError(
             f"Hagan's {flavour} expansion returns {value:.6e} at strike {strike!r} and "
@@ -192,10 +214,11 @@ def lognormal_vol(
 
     Raises:
         ShiftRequiredError: The shifted forward or strike is not positive.
-        ValueError: ``expiry`` is negative.
+        ValueError: ``expiry`` is negative, or the forward, strike or expiry
+            is not a finite number.
     """
-    if expiry < 0.0:
-        raise ValueError(f"expiry must be non-negative, got {expiry!r}")
+    if not expiry >= 0.0 or math.isinf(expiry):
+        raise ValueError(f"expiry must be a finite non-negative number, got {expiry!r}")
     f, k = _shifted(parameters, forward, strike)
     alpha, beta, rho, nu = parameters.alpha, parameters.beta, parameters.rho, parameters.nu
     one_minus_beta = 1.0 - beta
@@ -244,10 +267,11 @@ def normal_vol(
 
     Raises:
         ShiftRequiredError: The shifted forward or strike is not positive.
-        ValueError: ``expiry`` is negative.
+        ValueError: ``expiry`` is negative, or the forward, strike or expiry
+            is not a finite number.
     """
-    if expiry < 0.0:
-        raise ValueError(f"expiry must be non-negative, got {expiry!r}")
+    if not expiry >= 0.0 or math.isinf(expiry):
+        raise ValueError(f"expiry must be a finite non-negative number, got {expiry!r}")
     f, k = _shifted(parameters, forward, strike)
     alpha, beta, rho, nu = parameters.alpha, parameters.beta, parameters.rho, parameters.nu
     one_minus_beta = 1.0 - beta

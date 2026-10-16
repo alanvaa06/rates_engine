@@ -231,6 +231,41 @@ class TestImpliedVol:
         with pytest.raises(ValueError, match="expiry"):
             bachelier.implied_normal_vol(0.1, 0.04, 0.04, 0.0)
 
+    @pytest.mark.parametrize("target", [float("nan"), float("inf")])
+    def test_a_target_that_is_not_a_finite_price_refuses(self, target):
+        # Every comparison with NaN is false, so the bracket never grew, each
+        # Newton step was rejected, and the bisection walked to the top of the
+        # bracket: a NaN price came back as 100 bp normal or 10% lognormal.
+        with pytest.raises(ValueError, match="finite"):
+            bachelier.implied_normal_vol(target, 0.04, 0.045, 5.0, annuity=4.2)
+        with pytest.raises(ValueError, match="finite"):
+            black.implied_lognormal_vol(target, 0.04, 0.045, 5.0, annuity=4.2)
+
+    @pytest.mark.parametrize(
+        "forward,strike,expiry",
+        [(float("nan"), 0.045, 5.0), (0.04, float("nan"), 5.0), (0.04, 0.045, float("nan"))],
+    )
+    def test_an_inversion_input_that_is_not_a_number_refuses(self, forward, strike, expiry):
+        target = 0.01
+        with pytest.raises(ValueError, match="finite"):
+            bachelier.implied_normal_vol(target, forward, strike, expiry)
+        with pytest.raises(ValueError, match="finite"):
+            black.implied_lognormal_vol(target, forward, strike, expiry)
+
+
+class TestNotANumber:
+    """A NaN input is refused by name, never priced into a NaN."""
+
+    @pytest.mark.parametrize("position", range(4))
+    def test_both_pricers_refuse_a_nan_input(self, position):
+        arguments = [0.04, 0.045, 5.0, 0.008]
+        arguments[position] = float("nan")
+        with pytest.raises(ValueError, match="finite"):
+            bachelier.price(*arguments)
+        arguments[3] = 0.20 if position != 3 else float("nan")
+        with pytest.raises(ValueError, match="finite"):
+            black.price(*arguments)
+
 
 class TestSwaptionPricing:
     """The contract, the numeraire, and the model that follows from the units."""

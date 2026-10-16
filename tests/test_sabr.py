@@ -227,6 +227,24 @@ class TestShiftAndRefusals:
         with pytest.raises(ValueError):
             SABRParameters(**{**base, **kwargs})
 
+    @pytest.mark.parametrize("name", ["alpha", "beta", "rho", "nu", "shift"])
+    @pytest.mark.parametrize("value", [float("nan"), float("inf")])
+    def test_a_parameter_that_is_not_a_finite_number_refuses(self, name, value):
+        # ``alpha <= 0`` and ``nu < 0`` are both false for NaN, so a NaN alpha
+        # or nu used to be accepted, the expansion returned NaN, and
+        # ``expansion_is_valid`` said True because NaN is not ``<= 0``.
+        base = {"alpha": 0.009, "beta": 0.5, "rho": 0.0, "nu": 0.4, "shift": 0.0}
+        with pytest.raises(ValueError, match="finite"):
+            SABRParameters(**{**base, name: value})
+
+    @pytest.mark.parametrize("forward,strike", [(float("nan"), 0.04), (0.04, float("nan"))])
+    def test_a_forward_or_strike_that_is_not_a_number_refuses(self, forward, strike):
+        # NaN passes ``f <= 0`` as false, and the expansion would hand back
+        # NaN as a volatility.
+        for function in (normal_vol, lognormal_vol):
+            with pytest.raises(ValueError, match="finite"):
+                function(TRUTH, forward, strike, EXPIRY)
+
 
 class TestValidityRegion:
     """The expansion's own boundary, measured rather than assumed."""
