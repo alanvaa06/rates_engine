@@ -9,10 +9,22 @@ positive.
 
 Monotone convex fixes the discrete forwards — the average forward over each
 node interval, which is what the market quotes — and builds a continuous
-instantaneous forward that **integrates back to them exactly**. That last
-property is the reason it can be swapped for log-linear without disturbing a
-calibration: every input instrument still reprices, because the quantity each
-instrument pins is preserved by construction, not by the fit.
+instantaneous forward that **integrates back to them exactly**. So a node's
+discount factor is the same under either interpolation, and an instrument
+that reads discount factors only on nodes — a futures period, the realised
+stub — reprices under both by construction.
+
+An instrument that reads a discount factor *inside* an interval is another
+matter: a SOFR OIS paid two business days after each period, a fixed leg
+with intermediate coupons. That factor depends on the instantaneous forward
+across the interval, and the forward at node ``i`` (step 1 below) blends the
+discrete forwards on *both* sides of it, so it moves when the next node
+does. The method is not local. Such instruments still reprice -- a
+calibration can be swapped from log-linear to monotone convex without losing
+its fit -- but only because
+:func:`~rates_engine.curves.bootstrap.bootstrap_discount_curve` sweeps the
+curve until every one of them does, not because the interpolation preserves
+what they pin.
 
 The algorithm in three steps:
 

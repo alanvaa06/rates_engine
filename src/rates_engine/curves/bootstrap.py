@@ -1,9 +1,30 @@
-"""Sequential bootstrap: one instrument, one node, solved in maturity order.
+"""Bootstrap: one instrument, one node, solved in maturity order -- and again if needed.
 
 Every calibration instrument exposes the same two things — the node it pins
 and the residual it leaves — so the solver is one loop rather than a branch
-per instrument type. That uniformity is what makes AC-3.1 fall out for free:
-if each instrument is solved to a zero residual, every instrument reprices.
+per instrument type. That uniformity is what makes AC-3.1 fall out: if each
+instrument is solved to a zero residual *on the finished curve*, every
+instrument reprices.
+
+**When one pass is enough, and when it is not.** Under log-linear
+interpolation a discount factor at or before node ``i`` depends on no later
+node, so solving the nodes in maturity order leaves each instrument exactly
+where it was solved: the one pass is the answer. Monotone convex is not
+local. Its forward at node ``i`` blends the discrete forwards on both sides
+of it, so solving node ``i + 1`` reshapes the interval ending at node ``i``,
+and an instrument reading a discount factor inside that interval -- a SOFR
+OIS paid two business days after each period, from a spot two days after
+``as_of`` -- no longer reprices. On a twelve-swap SOFR strip the single pass
+left residuals of +0.09 to +0.11 bp, and ``strict`` refused it.
+
+So a non-local interpolation is *swept*: every node is solved again, in
+order, with all the others held where the previous sweep left them, until
+no discount factor moves by more than ``iteration_tolerance`` -- a
+Gauss-Seidel iteration, and the scheme of QuantLib's ``IterativeBootstrap``,
+which likewise stops after the first pass for a local interpolator. That
+strip settles in about five sweeps, to residuals below 1e-11 bp. A curve
+that has not settled after ``max_iterations`` sweeps is refused by name
+rather than returned half-solved.
 
 **The proxy gate.** Treasury par yields standing in for OIS par are allowed and
 never silent. An instrument whose provenance says ``PROXY`` is refused unless
@@ -14,6 +35,7 @@ evidence chain into whatever consumes the curve.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date
@@ -42,6 +64,8 @@ __all__ = [
     "bootstrap_discount_curve",
     "TREASURY_PROXY",
     "DEFAULT_TOLERANCE_BP",
+    "DEFAULT_MAX_ITERATIONS",
+    "DEFAULT_ITERATION_TOLERANCE",
 ]
 
 TREASURY_PROXY = "treasury_proxy"
@@ -49,6 +73,34 @@ TREASURY_PROXY = "treasury_proxy"
 
 DEFAULT_TOLERANCE_BP = 0.01
 """Residual a calibration instrument must reprice within, in basis points."""
+
+DEFAULT_MAX_ITERATIONS = 100
+"""Most sweeps a non-local interpolation is given to settle before it is refused.
+
+Generous on purpose. The twelve-swap SOFR strip in
+``tests/test_bootstrap_monotone_convex.py`` takes about five, each one
+cutting the largest discount factor change by two orders of magnitude, so a
+curve still moving after a hundred is not converging slowly: it is not
+converging.
+"""
+
+DEFAULT_ITERATION_TOLERANCE = 1e-12
+"""Largest change in any node discount factor between two sweeps, absolute
+and dimensionless, at which a swept curve counts as settled.
+
+On a discount factor near one that is about 1e-8 bp of a one-year zero rate,
+far inside :data:`DEFAULT_TOLERANCE_BP`, and well clear of the 1e-16 the
+root finder resolves a factor to, so the sweeps can actually reach it.
+"""
+
+_LOCAL_INTERPOLATIONS = frozenset({"log_linear_df"})
+"""Interpolations under which a factor at or before node ``i`` ignores every later node.
+
+For these the first, sequential pass is already the fixed point and no sweep
+runs, so their curves are what this function returned before sweeps
+existed, to the bit. Anything not listed is swept. QuantLib draws the same
+line with its ``Interpolator::global`` flag.
+"""
 
 _SOLVER_XTOL = 1e-16
 _SOLVER_RTOL = 8.9e-16
@@ -273,14 +325,18 @@ def bootstrap_discount_curve(
     strict: bool = True,
     tolerance_bp: float = DEFAULT_TOLERANCE_BP,
     currency: Currency = Currency.USD,
+    max_iterations: int = DEFAULT_MAX_ITERATIONS,
+    iteration_tolerance: float = DEFAULT_ITERATION_TOLERANCE,
 ) -> BootstrapResult:
-    """Solve one curve node per instrument, in maturity order.
+    """Solve one curve node per instrument, in maturity order, sweeping if needed.
 
     Args:
         as_of: Valuation date. ``df(as_of)`` is 1 by construction.
         instruments: Calibration instruments. Sorted here by node date, so the
             caller's ordering does not change the answer.
-        interpolation: Curve interpolation; ``"log_linear_df"`` in v1.
+        interpolation: ``"log_linear_df"`` (the default) or
+            ``"monotone_convex"``. The second is swept to a fixed point; see
+            the module docstring.
         long_end_source: Must be ``"treasury_proxy"`` to admit proxy-quality
             instruments. ``None`` means no proxy is accepted, and there is no
             default that quietly admits one.
@@ -290,9 +346,16 @@ def bootstrap_discount_curve(
         tolerance_bp: Residual tolerance in basis points.
         currency: What the resulting curve discounts. Defaults to USD,
             which every v1 and v2 curve already was.
+        max_iterations: Most sweeps a non-local interpolation may take after
+            the first pass, a positive count. Ignored by ``log_linear_df``,
+            whose first pass is final.
+        iteration_tolerance: Largest change in any node discount factor
+            (absolute, dimensionless) between two sweeps at which the curve
+            counts as settled. Positive.
 
     Returns:
-        The :class:`BootstrapResult`.
+        The :class:`BootstrapResult`. Its evidence records how many sweeps
+        ran: zero under log-linear.
 
     Raises:
         UnderdeterminedCurveError: No instruments, or two instruments pinning
@@ -302,8 +365,20 @@ def bootstrap_discount_curve(
         CurveArbitrageError: An instrument implies a non-decreasing discount
             factor, so no admissible node solves it.
         BootstrapResidualError: Under ``strict``, an instrument does not
-            reprice within tolerance.
+            reprice within tolerance. Under either strictness, a swept curve
+            that has not settled after ``max_iterations`` sweeps.
+        ValueError: ``max_iterations`` or ``iteration_tolerance`` is not
+            positive.
     """
+    if isinstance(max_iterations, bool) or not isinstance(max_iterations, int) or (
+        max_iterations < 1
+    ):
+        raise ValueError(f"max_iterations must be a positive integer, got {max_iterations!r}")
+    if not (math.isfinite(iteration_tolerance) and iteration_tolerance > 0.0):
+        raise ValueError(
+            f"iteration_tolerance must be a positive discount factor change, "
+            f"got {iteration_tolerance!r}"
+        )
     if not instruments:
         raise UnderdeterminedCurveError(
             "no calibration instruments: a curve with no quotes is not underdetermined, "
@@ -342,6 +417,11 @@ def bootstrap_discount_curve(
             curve.with_node(instrument.node_date, curve.dfs[-1]),
             instrument,
             previous_df=curve.dfs[-1],
+        )
+    iterations = 0
+    if interpolation not in _LOCAL_INTERPOLATIONS:
+        curve, iterations = _settle(
+            curve, ordered, max_iterations=max_iterations, tolerance=iteration_tolerance
         )
 
     # AC-3.2: the curve a calibration produces must be monotone. A bumped
@@ -410,6 +490,9 @@ def bootstrap_discount_curve(
             "max_abs_residual_bp": max((abs(r) for r in residual_list), default=0.0),
             "nodes": [n.isoformat() for n in curve.nodes],
             "convexity_models": sorted(_convexity_models(ordered)) or None,
+            "iterations": iterations,
+            "max_iterations": max_iterations,
+            "iteration_tolerance": iteration_tolerance,
         },
         warnings=tuple(warnings),
     )
@@ -483,3 +566,86 @@ def _solve_node(
         )
     solved = brentq(residual, lower, upper, xtol=_SOLVER_XTOL, rtol=_SOLVER_RTOL, maxiter=200)
     return curve.with_node(node, float(solved))
+
+
+def _settle(
+    curve: DiscountCurve,
+    ordered: Sequence[CalibrationInstrument],
+    *,
+    max_iterations: int,
+    tolerance: float,
+) -> tuple[DiscountCurve, int]:
+    """Sweep a non-local curve until no node factor moves by more than ``tolerance``.
+
+    Each sweep re-solves every node in maturity order against the curve as
+    it stands, later nodes included -- the step the first pass could not
+    take, because when node ``i`` was solved node ``i + 1`` did not exist
+    yet. Gauss-Seidel, so a node solved early in a sweep is already in place
+    for the ones after it.
+
+    Returns:
+        The settled curve and the number of sweeps it took.
+
+    Raises:
+        BootstrapResidualError: The curve was still moving after
+            ``max_iterations`` sweeps.
+    """
+    change = math.inf
+    for sweep in range(1, max_iterations + 1):
+        before = curve.dfs
+        for instrument in ordered:
+            curve = _resolve_node(curve, instrument)
+        change = max(abs(a - b) for a, b in zip(before, curve.dfs, strict=True))
+        if change <= tolerance:
+            return curve, sweep
+    worst = max(ordered, key=lambda inst: abs(inst.residual_bp(curve)))
+    raise BootstrapResidualError(
+        f"the {curve.interpolation} bootstrap did not converge: after {max_iterations} "
+        f"sweeps a node discount factor still moved by {change:.3e} (iteration_tolerance "
+        f"{tolerance:.1e}), and {worst.label!r} is off by {worst.residual_bp(curve):.6f} bp. "
+        "Raise max_iterations if the change is still falling; otherwise these quotes do "
+        "not settle under this interpolation, and log_linear_df, which is local and "
+        "needs no sweep, fits them in one pass."
+    )
+
+
+def _resolve_node(curve: DiscountCurve, instrument: CalibrationInstrument) -> DiscountCurve:
+    """Re-solve one existing node with every other node held where it is.
+
+    The bracket is grown outward from the current factor rather than down
+    from the previous node as in the first pass: the answer is close, and a
+    trial factor far below it would put a rising segment against the next
+    node, which a non-local interpolant reads back into this one. The first
+    step is sized from the residual -- a residual of ``r`` bp at time ``t``
+    is roughly ``r * 1e-4 * t`` of discount factor -- and doubled until the
+    residual changes sign.
+    """
+    node = instrument.node_date
+
+    def residual(df: float) -> float:
+        return instrument.residual_bp(curve.with_factor(node, df))
+
+    start = curve.dfs[curve.nodes.index(node)]
+    at_start = residual(start)
+    if at_start == 0.0:
+        return curve
+    # A residual is model minus quote, and a lower factor is a higher rate:
+    # positive means the factor is too low, so the root lies above it.
+    direction = 1.0 if at_start > 0.0 else -1.0
+    step = max(abs(at_start) * 1e-4 * curve.time(node) * start, 1e-15)
+    inner, outer = start, start
+    for _ in range(200):
+        outer = inner + direction * step
+        if outer <= 0.0:
+            outer = 0.5 * inner
+        if (residual(outer) > 0.0) != (at_start > 0.0):
+            break
+        inner, step = outer, 2.0 * step
+    else:  # pragma: no cover - the first pass found a root near here already
+        raise CurveArbitrageError(
+            f"{instrument.label}: no discount factor near {start!r} brackets the quote "
+            "once the later nodes are in place"
+        )
+    low, high = sorted((inner, outer))
+    solved = brentq(residual, low, high, xtol=_SOLVER_XTOL, rtol=_SOLVER_RTOL, maxiter=200)
+    return curve.with_factor(node, float(solved))
