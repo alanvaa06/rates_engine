@@ -12,7 +12,7 @@ license = { file = "LICENSE" }
 # end of life in October 2025 and pins the stack to numpy 1.x, which
 # costs modern typing syntax for nothing this package gains.
 requires-python = ">=3.11"
-authors = [{ name = "Alan Vazquez" }]
+authors = [{ name = "Alan Vazquez" }, { name = "Eduardo Ramos" }]
 keywords = ["sofr", "rates", "curve", "swap", "swaption", "sabr", "volatility", "futures", "convexity", "dv01", "quant"]
 classifiers = [
     "Programming Language :: Python :: 3",
