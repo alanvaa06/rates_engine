@@ -285,16 +285,22 @@ class TestTheShapeBetweenThePillars:
 
 
 class TestTheWingsAreFlaggedNotExtrapolated:
-    """Vanna-volga is a hedging argument, and it says so past its pillars."""
+    """Vanna-volga is a hedging argument, and it says so past its pillars.
+
+    "Its pillars" are the outermost quoted ones: the ten-delta pair when the
+    quotes have it, as `QUOTES` does. These two tests used the 25-delta
+    pillars, and passed only because the ten-delta quotes were ignored.
+    """
 
     def test_past_the_top_pillar_it_holds_flat(self, smile):
-        top_strike, top_vol = smile.pillars()[-1]
+        top_strike, top_vol = smile.all_pillars()[-1]
+        assert (top_strike, top_vol) == smile.wing_pillars()[-1]
         reading = smile.volatility_at(top_strike * 1.3)
         assert reading.volatility == pytest.approx(top_vol)
         assert reading.source == "flat_wing"
 
     def test_past_the_bottom_pillar_it_holds_flat(self, smile):
-        bottom_strike, bottom_vol = smile.pillars()[0]
+        bottom_strike, bottom_vol = smile.all_pillars()[0]
         reading = smile.volatility_at(bottom_strike * 0.7)
         assert reading.volatility == pytest.approx(bottom_vol)
 
@@ -448,3 +454,133 @@ class TestTheInversionDoesNotClampInSilence:
     def test_a_premium_inside_it_inverts_exactly(self, smile):
         premium = gk.price(SPOT, 19.0, EXPIRY, R_MXN, R_USD, 0.137, OptionKind.CALL)
         assert smile._implied(19.0, premium, OptionKind.CALL) == pytest.approx(0.137, abs=1e-12)
+
+
+class TestTheTenDeltaQuotesAreUsed:
+    """The review's finding 3.11: `SmileQuotes` took a ten-delta risk reversal
+    and butterfly, and the smile ignored them.
+
+    PRD-003 AC-3.2 asks for the volatility at ten delta. Built only on the
+    25-delta pillars, the smile read 15.10% at the ten-delta call strike of
+    a quote set whose ten-delta call is 18.00%, and was identical with and
+    without the ten-delta numbers (`REVISION-rates_engine-2026-10-15-repro/
+    options/09_vanna_volga.py`). It now builds vanna-volga piecewise: the
+    25-delta triple between the 25-delta strikes, exactly as before, and
+    `(10P, 25P, ATM)` and `(ATM, 25C, 10C)` in the two wings out to the
+    ten-delta strikes, flat and unreliable past them.
+
+    The pillar strikes below are QuantLib 1.44's,
+    `ql.BlackDeltaCalculator(kind, ql.DeltaVolQuote.Spot, S, e^{-r_d T},
+    e^{-r_f T}, vol sqrt(T)).strikeFromDelta(delta)` at each wing's own
+    volatility, not this package's.
+    """
+
+    QUANTLIB = {  # (strike, quoted volatility), spot unadjusted delta, this file's market
+        "10P": (17.50308981619162, 0.1100),
+        "25P": (18.102401018159345, 0.1095),
+        "25C": (19.59988253905741, 0.1275),
+        "10C": (20.575601889840065, 0.1420),
+    }
+
+    def test_the_wing_pillars_are_quantlibs_strikes_at_the_quoted_vols(self, smile):
+        # 1e-9 rather than tighter: QuantLib inverts the normal with Acklam's
+        # approximation, unrefined, which is good to about 1e-9; the package
+        # uses scipy's ndtri. The two strikes differ by 8e-11 relative.
+        (k10p, v10p), (k10c, v10c) = smile.wing_pillars()
+        assert k10p == pytest.approx(self.QUANTLIB["10P"][0], rel=1e-9)
+        assert k10c == pytest.approx(self.QUANTLIB["10C"][0], rel=1e-9)
+        assert v10p == pytest.approx(self.QUANTLIB["10P"][1], abs=1e-15)
+        assert v10c == pytest.approx(self.QUANTLIB["10C"][1], abs=1e-15)
+
+    @pytest.mark.parametrize("pillar", ["10P", "25P", "25C", "10C"])
+    def test_the_smile_reads_the_quote_at_each_quantlib_strike(self, smile, pillar):
+        strike, quoted = self.QUANTLIB[pillar]
+        assert smile.volatility_at(strike).volatility == pytest.approx(quoted, abs=1e-9)
+
+    @pytest.mark.parametrize("kind", list(OptionKind))
+    def test_all_five_pillars_reprice_exactly(self, smile, kind):
+        """On the price, not the lookup short circuit, as for the 25-delta three."""
+        assert len(smile.all_pillars()) == 5
+        for strike, vol in smile.all_pillars():
+            market = gk.price(SPOT, strike, EXPIRY, R_MXN, R_USD, vol, kind)
+            assert smile.price(strike, kind) == pytest.approx(market, abs=1e-12)
+
+    def test_the_reviews_case_reads_eighteen_percent_not_fifteen(self):
+        """S 18.50, T 1, r 9.5% and 4.2%, spot premium-adjusted delta, ATM
+        13%, RR25 3%, BF25 0.6%, RR10 6%, BF10 2%: the ten-delta call is
+        quoted at 18.00% and QuantLib puts its strike at 24.641237726504414."""
+        smile = VannaVolgaSmile(
+            18.50, 1.0, 0.095, 0.042,
+            SmileQuotes(0.13, 0.030, 0.006, 0.060, 0.020),
+            DeltaConvention(DeltaBasis.SPOT, PremiumAdjustment.PREMIUM_ADJUSTED),
+            ATMConvention.DELTA_NEUTRAL_STRADDLE,
+        )
+        reading = smile.volatility_at(24.641237726504414)
+        assert reading.volatility == pytest.approx(0.18, abs=1e-9)
+        assert reading.reliable is True
+        put = smile.volatility_at(16.828969828751596)
+        assert put.volatility == pytest.approx(0.12, abs=1e-9)
+
+    def test_between_the_two_deltas_it_is_interpolated_and_reliable(self, smile):
+        for (left_k, left_v), (right_k, right_v) in (
+            (smile.wing_pillars()[0], smile.pillars()[0]),
+            (smile.pillars()[-1], smile.wing_pillars()[-1]),
+        ):
+            reading = smile.volatility_at(0.5 * (left_k + right_k))
+            assert reading.source == "vanna_volga"
+            assert reading.reliable is True
+            assert reading.evidence.warnings == ()
+            assert min(left_v, right_v) - 2e-3 <= reading.volatility <= max(left_v, right_v) + 2e-3
+
+    def test_it_is_continuous_where_the_wings_meet_the_core(self, smile):
+        for strike, vol in (smile.pillars()[0], smile.pillars()[-1]):
+            below = smile.volatility_at(strike * (1 - 1e-7)).volatility
+            above = smile.volatility_at(strike * (1 + 1e-7)).volatility
+            assert below == pytest.approx(vol, abs=1e-6)
+            assert above == pytest.approx(vol, abs=1e-6)
+
+    def test_inside_the_25_delta_strikes_nothing_changed(self, smile):
+        thin = _smile(quotes=SmileQuotes(QUOTES.atm, QUOTES.risk_reversal_25, QUOTES.butterfly_25))
+        for strike in (18.2, 18.5, 18.8, 19.1, 19.4):
+            assert smile.volatility_at(strike).volatility == thin.volatility_at(strike).volatility
+
+    def test_past_the_ten_delta_strikes_it_is_flat_and_flagged(self, smile):
+        for strike, vol in (smile.all_pillars()[0], smile.all_pillars()[-1]):
+            factor = 0.9 if strike < SPOT else 1.1
+            reading = smile.volatility_at(strike * factor)
+            assert reading.volatility == vol
+            assert reading.source == "flat_wing"
+            assert reading.reliable is False
+            assert reading.evidence.worst_quality is DataQuality.ASSUMED
+
+    def test_without_ten_delta_quotes_the_outer_pillars_are_the_25_delta(self):
+        thin = _smile(quotes=SmileQuotes(QUOTES.atm, QUOTES.risk_reversal_25, QUOTES.butterfly_25))
+        assert thin.wing_pillars() == ()
+        assert thin.all_pillars() == thin.pillars()
+        top_strike, top_vol = thin.pillars()[-1]
+        reading = thin.volatility_at(top_strike * 1.01)
+        assert (reading.volatility, reading.source, reading.reliable) == (top_vol, "flat_wing", False)
+
+    @pytest.mark.parametrize(
+        "quotes",
+        [
+            SmileQuotes(0.115, 0.018, 0.0035, risk_reversal_10=0.032),
+            SmileQuotes(0.115, 0.018, 0.0035, butterfly_10=0.011),
+        ],
+    )
+    def test_half_a_ten_delta_pair_refuses(self, quotes):
+        with pytest.raises(CalibrationError, match="ten-delta"):
+            _smile(quotes=quotes)
+
+    def test_a_ten_delta_wing_inside_the_25_delta_one_refuses(self):
+        """A ten-delta volatility so far below the 25-delta one that its
+        strike lands inside the 25-delta strike is not a smile."""
+        broken = SmileQuotes(0.115, 0.018, 0.0035, risk_reversal_10=0.0, butterfly_10=-0.09)
+        with pytest.raises(CalibrationError, match="ten-delta"):
+            _smile(quotes=broken).wing_pillars()
+
+    def test_the_payload_lists_the_wing_pillars(self, smile):
+        stored = smile.to_dict()
+        assert len(stored["wing_pillars"]) == 2
+        fields = smile.volatility_at(19.0).evidence.fields
+        assert len(fields["wing_pillars"]) == 2

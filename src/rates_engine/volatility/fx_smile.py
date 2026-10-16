@@ -1,4 +1,4 @@
-"""Vanna-volga: a smile from three quotes, reproducing all three exactly.
+"""Vanna-volga: a smile from three or five quotes, reproducing each exactly.
 
 The FX market quotes a smile as three numbers per expiry — the at-the-money
 volatility, a risk reversal and a butterfly — and vanna-volga is the
@@ -14,6 +14,19 @@ weight vector collapses onto that instrument. SABR fits them, with a
 residual. The criterion asks for exact reproduction, so the choice follows
 from the criterion rather than from taste.
 
+**Five quotes, piecewise.** With the ten-delta risk reversal and butterfly
+as well, there are five pillars and vanna-volga still hedges three greeks,
+so it is applied piecewise: the 25-delta triple ``(25P, ATM, 25C)`` between
+the two 25-delta strikes — exactly the three-quote smile, unchanged — and
+``(10P, 25P, ATM)`` below the 25-delta put and ``(ATM, 25C, 10C)`` above the
+25-delta call, out to the ten-delta strikes. Each segment reproduces its
+three pillars exactly, so all five reprice, and neighbouring segments meet
+at the 25-delta pillar both reproduce, so the smile is continuous there. It
+is not smooth there: the slope can jump at the 25-delta strikes, which is
+the price of keeping the central smile identical to the three-quote one.
+Until the 2026-10-15 review the ten-delta numbers were accepted and
+ignored, and the smile read 15.10% at a ten-delta call quoted at 18.00%.
+
 **Two conventions, both refused rather than assumed.** A delta does not
 name a strike until the convention is stated — that is
 :mod:`rates_engine.models.fx_delta`'s problem. "At the money" does not name one
@@ -24,8 +37,9 @@ occasionally the spot, and they differ by ``exp(±sigma^2 T / 2)``, which at
 **What it is not.** Not arbitrage free. Vanna-volga can produce negative
 densities in the wings at high volatility, and this module does not hide
 that: :meth:`VannaVolgaSmile.wing_is_reliable` reports it, and the
-extrapolation past the outer pillars is flat rather than pretending the
-construction still applies.
+extrapolation past the outer pillars — the ten-delta ones when quoted, the
+25-delta ones otherwise — is flat rather than pretending the construction
+still applies.
 """
 
 from __future__ import annotations
@@ -54,7 +68,7 @@ __all__ = [
 
 NOT_ARBITRAGE_FREE = (
     "Vanna-volga is a hedging argument, not a model with a density behind it. "
-    "It reproduces the three quoted strikes exactly and interpolates plausibly "
+    "It reproduces the quoted strikes exactly and interpolates plausibly "
     "between them; far into the wings it can imply a negative density. Readings "
     "outside the quoted delta range are flagged, and past the outer pillars the "
     "volatility is held flat rather than extrapolated."
@@ -151,7 +165,7 @@ class SmileReading(EngineResult):
     Attributes:
         volatility: The implied lognormal volatility as a decimal.
         strike: The strike asked for.
-        source: ``"pillar"`` when the strike is one of the three quoted,
+        source: ``"pillar"`` when the strike is one of the quoted ones,
             ``"vanna_volga"`` when it was interpolated, ``"flat_wing"`` when
             it is past the outer pillars and held flat.
         reliable: False when the reading sits outside the quoted delta range,
@@ -183,7 +197,8 @@ class VannaVolgaSmile:
         expiry: Time to expiry in years.
         r_domestic: Quote currency rate.
         r_foreign: Base currency rate.
-        quotes: The market's three or five numbers.
+        quotes: The market's three or five numbers. With five, the ten-delta
+            pair extends the smile out to the ten-delta strikes.
         delta_convention: Which of the four delta conventions the wings are
             quoted on. Required.
         atm_convention: What the at-the-money strike means. Required.
@@ -217,6 +232,19 @@ class VannaVolgaSmile:
                 f"volatility: 25d put {put_vol:.6f}, 25d call {call_vol:.6f}. A butterfly "
                 "more negative than half the risk reversal does that, and no smile has it."
             )
+        if (self.quotes.risk_reversal_10 is None) != (self.quotes.butterfly_10 is None):
+            raise CalibrationError(
+                "the ten-delta wing needs both its risk reversal and its butterfly; this "
+                "quote set has one of the two. Supply both, or neither for a smile on "
+                "the 25-delta quotes alone."
+            )
+        if self.quotes.risk_reversal_10 is not None:
+            put_10, call_10 = self.quotes.wings(0.10)
+            if put_10 <= 0.0 or call_10 <= 0.0:
+                raise CalibrationError(
+                    f"the quoted ten-delta risk reversal and butterfly imply a non-positive "
+                    f"wing volatility: 10d put {put_10:.6f}, 10d call {call_10:.6f}."
+                )
 
     @property
     def forward(self) -> float:
@@ -238,7 +266,12 @@ class VannaVolgaSmile:
         return self.forward * math.exp(sign * drift)
 
     def pillars(self) -> tuple[tuple[float, float], ...]:
-        """The three quoted points as ``(strike, volatility)``, in strike order."""
+        """The three 25-delta and at-the-money points as ``(strike, volatility)``.
+
+        In strike order: the core of the construction, used between the two
+        25-delta strikes. The ten-delta points, when quoted, are
+        :meth:`wing_pillars`, and :meth:`all_pillars` has all five.
+        """
         cached = self._cache.get("pillars")
         if cached is not None:
             return cached
@@ -259,12 +292,74 @@ class VannaVolgaSmile:
         self._cache["pillars"] = result
         return result
 
-    def _weights(self, strike: float) -> np.ndarray:
-        """Weights on the three pillars that reproduce the target's greeks.
+    def wing_pillars(self) -> tuple[tuple[float, float], ...]:
+        """The two ten-delta points as ``(strike, volatility)``, or ``()``.
+
+        Empty when the quotes have no ten-delta pair. Each strike is the one
+        whose delta, under :attr:`delta_convention`, is ten at that wing's own
+        volatility, which is how the 25-delta strikes are found too.
+
+        Raises:
+            CalibrationError: A ten-delta strike does not lie outside the
+                25-delta strike on its side, which no smile does.
+        """
+        cached = self._cache.get("wing_pillars")
+        if cached is not None:
+            return cached
+        result: tuple[tuple[float, float], ...] = ()
+        if self.quotes.risk_reversal_10 is not None and self.quotes.butterfly_10 is not None:
+            put_vol, call_vol = self.quotes.wings(0.10)
+            put_strike = strike_from_delta(
+                self.spot, 0.10, self.expiry, self.r_domestic, self.r_foreign,
+                put_vol, OptionKind.PUT, self.delta_convention,
+            )
+            call_strike = strike_from_delta(
+                self.spot, 0.10, self.expiry, self.r_domestic, self.r_foreign,
+                call_vol, OptionKind.CALL, self.delta_convention,
+            )
+            core = self.pillars()
+            if not (put_strike < core[0][0] and call_strike > core[-1][0]):
+                raise CalibrationError(
+                    f"the ten-delta strikes ({put_strike:.6f} put, {call_strike:.6f} call) "
+                    f"do not lie outside the 25-delta ones ({core[0][0]:.6f}, "
+                    f"{core[-1][0]:.6f}). Ten-delta volatilities that far below the "
+                    "25-delta ones are not a smile; check the ten-delta quotes."
+                )
+            result = ((put_strike, put_vol), (call_strike, call_vol))
+        self._cache["wing_pillars"] = result
+        return result
+
+    def all_pillars(self) -> tuple[tuple[float, float], ...]:
+        """Every quoted point, three or five, as ``(strike, volatility)`` in strike order."""
+        wings = self.wing_pillars()
+        if not wings:
+            return self.pillars()
+        return (wings[0], *self.pillars(), wings[-1])
+
+    def _segment(self, strike: float) -> tuple[tuple[float, float], ...]:
+        """The three pillars vanna-volga uses at ``strike``.
+
+        The 25-delta triple between the 25-delta strikes, and everywhere when
+        there are no ten-delta quotes; below the 25-delta put the triple
+        ``(10P, 25P, ATM)``, above the 25-delta call ``(ATM, 25C, 10C)``.
+        """
+        core = self.pillars()
+        wings = self.wing_pillars()
+        if not wings or core[0][0] <= strike <= core[-1][0]:
+            return core
+        if strike < core[0][0]:
+            return (wings[0], core[0], core[1])
+        return (core[1], core[2], wings[-1])
+
+    def _weights(
+        self, strike: float, pillars: tuple[tuple[float, float], ...] | None = None
+    ) -> np.ndarray:
+        """Weights on three pillars that reproduce the target's greeks.
 
         Vega, vanna and volga, all evaluated at the at-the-money volatility
         so that the system is the one the hedging argument describes rather
-        than a self-referential fit.
+        than a self-referential fit. ``pillars`` defaults to the segment the
+        strike falls in, see :meth:`_segment`.
         """
         base = self.quotes.atm
         args = (self.expiry, self.r_domestic, self.r_foreign, base)
@@ -276,13 +371,18 @@ class VannaVolgaSmile:
                 gk.volga(self.spot, k, *args),
             ]
 
-        matrix = np.array([row(k) for k, _ in self.pillars()], dtype=float).T
+        triple = self._segment(strike) if pillars is None else pillars
+        matrix = np.array([row(k) for k, _ in triple], dtype=float).T
         target = np.array(row(strike), dtype=float)
         solution, *_ = np.linalg.lstsq(matrix, target, rcond=None)
         return solution
 
     def price(self, strike: float, kind: OptionKind = OptionKind.CALL) -> float:
         """The vanna-volga price of a vanilla at ``strike``.
+
+        Vanna-volga on the segment the strike falls in (see the module
+        docstring); past the outermost pillar it is the nearest segment's
+        formula carried on, which :meth:`volatility_at` does not report.
 
         Args:
             strike: The strike.
@@ -296,9 +396,10 @@ class VannaVolgaSmile:
         flat = gk.price(
             self.spot, strike, self.expiry, self.r_domestic, self.r_foreign, base, kind
         )
-        weights = self._weights(strike)
+        triple = self._segment(strike)
+        weights = self._weights(strike, triple)
         correction = 0.0
-        for weight, (pillar_strike, pillar_vol) in zip(weights, self.pillars(), strict=True):
+        for weight, (pillar_strike, pillar_vol) in zip(weights, triple, strict=True):
             market = gk.price(
                 self.spot, pillar_strike, self.expiry, self.r_domestic, self.r_foreign,
                 pillar_vol, kind,
@@ -345,14 +446,16 @@ class VannaVolgaSmile:
 
         Returns:
             A :class:`SmileReading` saying which of the three ways the
-            number was produced and whether it sits inside the quoted range.
+            number was produced and whether it sits inside the quoted range,
+            which reaches the ten-delta strikes when they are quoted.
 
         Raises:
             ValueError: ``strike`` is not positive.
+            CalibrationError: No volatility reproduces the vanna-volga price.
         """
         if strike <= 0.0:
             raise ValueError(f"a lognormal smile has no strike at {strike!r}")
-        pillars = self.pillars()
+        pillars = self.all_pillars()
         lowest, highest = pillars[0][0], pillars[-1][0]
 
         for pillar_strike, pillar_vol in pillars:
@@ -381,8 +484,8 @@ class VannaVolgaSmile:
         return self._reading(self._implied(strike, premium, kind), strike, "vanna_volga", True)
 
     def wing_is_reliable(self, strike: float) -> bool:
-        """Whether ``strike`` lies within the quoted pillars."""
-        pillars = self.pillars()
+        """Whether ``strike`` lies within the outermost quoted pillars."""
+        pillars = self.all_pillars()
         return pillars[0][0] <= strike <= pillars[-1][0]
 
     def _reading(self, volatility: float, strike: float, source: str, reliable: bool) -> SmileReading:
@@ -392,8 +495,9 @@ class VannaVolgaSmile:
                 Degradation(
                     code="outside_quoted_smile",
                     message=(
-                        f"strike {strike} is outside the quoted 25-delta pillars; the "
-                        "volatility is held flat at the nearest one. " + NOT_ARBITRAGE_FREE
+                        f"strike {strike} is outside the outermost quoted pillars (ten-delta "
+                        "when quoted, 25-delta otherwise); the volatility is held flat at "
+                        "the nearest one. " + NOT_ARBITRAGE_FREE
                     ),
                     data_quality=DataQuality.ASSUMED,
                 ),
@@ -411,6 +515,9 @@ class VannaVolgaSmile:
                     "atm_strike": self.atm_strike,
                     "pillars": [
                         {"strike": k, "volatility": v} for k, v in self.pillars()
+                    ],
+                    "wing_pillars": [
+                        {"strike": k, "volatility": v} for k, v in self.wing_pillars()
                     ],
                     "quotes": self.quotes.to_dict(),
                     **self.delta_convention.to_dict(),
@@ -436,6 +543,7 @@ class VannaVolgaSmile:
             "atm_strike": self.atm_strike,
             "quotes": self.quotes.to_dict(),
             "pillars": [{"strike": k, "volatility": v} for k, v in self.pillars()],
+            "wing_pillars": [{"strike": k, "volatility": v} for k, v in self.wing_pillars()],
             **self.delta_convention.to_dict(),
             "atm_convention": self.atm_convention.value,
             "caveat": NOT_ARBITRAGE_FREE,
