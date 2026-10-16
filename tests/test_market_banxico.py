@@ -75,6 +75,30 @@ class TestParsing:
         )
         assert series.values == (pytest.approx(1850.50),)
 
+    def test_several_thousands_separators_survive(self):
+        series = banxico.parse_sie_payload(
+            _payload([{"fecha": "15/09/2026", "dato": "12,345,678.9"}]), "SF43783", percent=False
+        )
+        assert series.values == (pytest.approx(12_345_678.9),)
+
+    @pytest.mark.parametrize("dato", ["11,2850", "1,850", "1,85.0", "1.850,50"])
+    def test_a_comma_that_may_be_decimal_refuses_rather_than_guessing(self, dato):
+        """Stripping every comma read "11,2850" -- an exchange rate written
+        with a decimal comma -- as 112850, and "1,850" is 1850 or 1.85
+        depending on who wrote it. A comma is accepted only where it can be
+        nothing but a thousands separator: groups of three, then a decimal
+        point."""
+        with pytest.raises(InsufficientDataError) as excinfo:
+            banxico.parse_sie_payload(
+                _payload([{"fecha": "15/09/2026", "dato": dato}]), "SF43783", percent=False
+            )
+        assert "comma" in str(excinfo.value)
+
+    @pytest.mark.parametrize("dato", ["NaN", "inf"])
+    def test_a_non_finite_value_refuses_as_unreadable(self, dato):
+        with pytest.raises(InsufficientDataError, match="15/09/2026"):
+            banxico.parse_sie_payload(_payload([{"fecha": "15/09/2026", "dato": dato}]), "SF43783")
+
     def test_unavailable_observations_are_dropped_not_interpolated(self):
         rows = [*ROWS, {"fecha": "18/09/2026", "dato": "N/E"}]
         series = banxico.parse_sie_payload(_payload(rows), "SF43783")

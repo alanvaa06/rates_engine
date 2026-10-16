@@ -28,7 +28,9 @@ against a recorded payload shape rather than pretending otherwise.
 from __future__ import annotations
 
 import json
+import math
 import os
+import re
 from datetime import UTC, date, datetime
 from typing import Any
 
@@ -69,6 +71,32 @@ def _token(explicit: str | None) -> str:
     return token
 
 
+_THOUSANDS_GROUPED = re.compile(r"[+-]?\d{1,3}(?:,\d{3})+\.\d+")
+"""A number whose commas can only be thousands separators: ``1,850.50``."""
+
+
+def _sie_number(raw: str) -> float:
+    """One SIE ``dato`` as a finite float, refusing a comma that could be decimal.
+
+    Stripping every comma, as this parser did, read ``"11,2850"`` -- an
+    exchange rate written with a decimal comma -- as 112850. A comma is
+    accepted only where it cannot be anything but a thousands separator:
+    groups of three digits, then a decimal point. ``"1,850"`` is 1850 to one
+    writer and 1.85 to another, and is refused rather than guessed at.
+    """
+    if "," in raw:
+        if not _THOUSANDS_GROUPED.fullmatch(raw):
+            raise ValueError(
+                f"{raw!r} has a comma that may be a decimal comma rather than a "
+                "thousands separator; refusing to guess which"
+            )
+        raw = raw.replace(",", "")
+    value = float(raw)
+    if not math.isfinite(value):
+        raise ValueError(f"{raw!r} is not a finite number")
+    return value
+
+
 def parse_sie_payload(payload: str, series_id: str, *, percent: bool = True) -> Series:
     """Turn a SIE JSON response into a :class:`Series`.
 
@@ -93,7 +121,10 @@ def parse_sie_payload(payload: str, series_id: str, *, percent: bool = True) -> 
 
     Raises:
         InsufficientDataError: The payload has no observations for the
-            series, or is not the shape SIE documents.
+            series, or is not the shape SIE documents, or an observation
+            cannot be read: a date that is not day-first, a value that is
+            not finite, or a comma that could be a decimal comma (only
+            ``1,850.50``-style thousands separators are accepted).
     """
     try:
         document: dict[str, Any] = json.loads(payload)
@@ -126,7 +157,7 @@ def parse_sie_payload(payload: str, series_id: str, *, percent: bool = True) -> 
 
     rows: list[tuple[date, float]] = []
     for point in chosen["datos"]:
-        raw = str(point.get("dato", "")).strip().replace(",", "")
+        raw = str(point.get("dato", "")).strip()
         if raw in {"", "N/E", "N/A"}:
             continue
         # The guard above covers the envelope; this covers the rows. The
@@ -135,11 +166,11 @@ def parse_sie_payload(payload: str, series_id: str, *, percent: bool = True) -> 
         # it should happen.
         try:
             day, month, year = (int(part) for part in str(point["fecha"]).split("/"))
-            value = float(raw) / (100.0 if percent else 1.0)
+            value = _sie_number(raw) / (100.0 if percent else 1.0)
         except (KeyError, TypeError, ValueError) as exc:
             raise InsufficientDataError(
                 f"SIE returned an observation this parser cannot read for "
-                f"{series_id}: {point!r}. Dates are day-first (`16/09/2026`) and "
+                f"{series_id}: {point!r} ({exc}). Dates are day-first (`16/09/2026`) and "
                 f"values are decimal strings."
             ) from exc
         rows.append((date(year, month, day), value))
