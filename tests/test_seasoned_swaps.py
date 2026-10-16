@@ -18,18 +18,34 @@ and, for the swaps that start on or after the valuation date, the outputs of
 
 from __future__ import annotations
 
+import json
 import math
+from collections.abc import Callable
 from datetime import date, timedelta
 
 import pytest
 
-from rates_engine.conventions.indices import TERM_SOFR_6M, TIIE_FONDEO
+from rates_engine.conventions.calendar import BMV, SIFMA_US, HolidayCalendar
+from rates_engine.conventions.daycount import DayCount
+from rates_engine.conventions.indices import (
+    TERM_SOFR_6M,
+    TIIE_28,
+    TIIE_FONDEO,
+    IndexTenor,
+    RateIndex,
+)
+from rates_engine.conventions.schedule import add_months
 from rates_engine.conventions.side import Side
+from rates_engine.core.errors import MissingFixingError, UnsupportedConventionError
+from rates_engine.core.evidence import DataQuality, Provenance
 from rates_engine.core.money import Currency
+from rates_engine.curves.bootstrap import bootstrap_discount_curve
 from rates_engine.curves.discount import CurveSet, DiscountCurve
 from rates_engine.instruments.fra import FRA
 from rates_engine.instruments.swaps import IRSwap, OISSwap
-from rates_engine.pricing.linear import annuity, discounted_value, par_rate, pv
+from rates_engine.market.snapshot import MarketSnapshot, Series
+from rates_engine.pricing.calibration import SwapQuoteNode
+from rates_engine.pricing.linear import annuity, discounted_value, par_rate, par_rate_value, pv
 from rates_engine.pricing.projection import fra_fair_rate
 
 AS_OF = date(2026, 1, 15)
@@ -304,17 +320,17 @@ PINNED: dict[str, dict[str, object]] = {
 }
 
 
-def _measure(instrument, curve_set) -> dict[str, object]:
-    result = pv(instrument, curve_set)
+def _measure(instrument, curve_set, **fixings) -> dict[str, object]:
+    result = pv(instrument, curve_set, **fixings)
     measured: dict[str, object] = {
         "pv": result.value,
-        "discounted_value": discounted_value(instrument, curve_set),
+        "discounted_value": discounted_value(instrument, curve_set, **fixings),
         "flows": tuple((flow.amount, flow.rate) for flow in result.cashflows or ()),
     }
     if isinstance(instrument, FRA):
-        measured["fair"] = fra_fair_rate(instrument, curve_set)
+        measured["fair"] = fra_fair_rate(instrument, curve_set, **fixings)
     else:
-        measured["par"] = par_rate(instrument, curve_set).value
+        measured["par"] = par_rate(instrument, curve_set, **fixings).value
         measured["annuity"] = annuity(instrument, curve_set).value
     return measured
 
@@ -326,6 +342,14 @@ class TestSwapsThatStartOnOrAfterTheValuationDateDoNotMove:
     def test_every_measure_is_bit_identical_to_main(self, name):
         instrument, curve_set = _pinned_cases()[name]
         assert _measure(instrument, curve_set) == PINNED[name]
+
+    @pytest.mark.parametrize("name", sorted(PINNED))
+    def test_handing_them_fixings_changes_nothing(self, name):
+        # A book is priced with one snapshot for every trade; the ones with
+        # no history must not read it.
+        instrument, curve_set = _pinned_cases()[name]
+        snapshot = _fixings(_history(), _history("TIIE_FONDEO", 0.07, calendar=BMV))
+        assert _measure(instrument, curve_set, fixings=snapshot) == PINNED[name]
 
     def test_the_battery_covers_both_starts_and_every_linear_product(self):
         # A pin that only held swaps struck later than today would miss the
@@ -438,3 +462,461 @@ class TestFlowsAlreadyPaidAreWorthNothing:
         result = pv(TwoBullets(), CurveSet(_flat_curve()))
         assert result.value == pytest.approx(1_000.0 * _df(date(2027, 1, 15)), rel=1e-12)
         assert [flow.payment_date for flow in result.cashflows or ()] == [date(2027, 1, 15)]
+
+
+# ---------------------------------------------------------------------------
+# The floating period in progress: part history, part forecast.
+# ---------------------------------------------------------------------------
+
+
+def _history(
+    series_id: str = "SOFR",
+    rate: float | Callable[[date], float] = 0.0430,
+    *,
+    start: date = date(2024, 1, 1),
+    end: date = AS_OF,
+    calendar: HolidayCalendar = SIFMA_US,
+    quality: DataQuality = DataQuality.OBSERVED,
+) -> Series:
+    """One published rate per business day of ``calendar`` in ``[start, end)``."""
+    days: list[date] = []
+    day = start
+    while day < end:
+        if calendar.is_business_day(day):
+            days.append(day)
+        day += timedelta(days=1)
+    values = tuple(rate(d) if callable(rate) else rate for d in days)
+    return Series(
+        series_id,
+        tuple(days),
+        values,
+        Provenance(source="test", series_id=series_id, instrument_kind="fixing",
+                   data_quality=quality),
+    )
+
+
+def _fixings(*series: Series) -> MarketSnapshot:
+    return MarketSnapshot(as_of=AS_OF, series={s.series_id: s for s in series})
+
+
+def _term(series_id: str, published: dict[date, float]) -> Series:
+    days = tuple(sorted(published))
+    return Series(
+        series_id,
+        days,
+        tuple(published[d] for d in days),
+        Provenance(source="test", series_id=series_id, instrument_kind="term_fixing"),
+    )
+
+
+class TestThePeriodInProgressNeedsItsFixings:
+    """No curve knows what SOFR printed last month; without the fixings the price is refused."""
+
+    SWAP = OISSwap(effective=date(2025, 7, 15), maturity=date(2027, 7, 15), fixed_rate=0.04,
+                   notional=NOTIONAL)
+
+    def test_pv_refuses_and_says_what_is_missing_and_how_to_pass_it(self):
+        with pytest.raises(MissingFixingError) as caught:
+            pv(self.SWAP, CurveSet(_flat_curve()))
+        message = str(caught.value)
+        for needed in ("2025-07-15", "2026-07-15", "2026-01-15", "'SOFR'", "fixings=",
+                       "MarketSnapshot"):
+            assert needed in message, (needed, message)
+
+    @pytest.mark.parametrize("measure", [discounted_value, par_rate, par_rate_value])
+    def test_every_measure_built_on_the_floating_leg_refuses_too(self, measure):
+        with pytest.raises(MissingFixingError, match="SOFR"):
+            measure(self.SWAP, CurveSet(_flat_curve()))
+
+    def test_the_annuity_needs_no_fixing(self):
+        expected = 365 / 360 * _df(date(2026, 7, 17)) + 365 / 360 * _df(date(2027, 7, 19))
+        assert annuity(self.SWAP, CurveSet(_flat_curve())).value == pytest.approx(expected)
+
+    def test_a_term_rate_period_names_its_fixing_date(self):
+        irs = IRSwap(effective=date(2025, 11, 17), maturity=date(2026, 11, 17), fixed_rate=0.04,
+                     notional=NOTIONAL)
+        with pytest.raises(MissingFixingError) as caught:
+            pv(irs, CurveSet(_flat_curve()))
+        assert "TERM_SOFR_3M" in str(caught.value)
+        assert "2025-11-17" in str(caught.value)
+
+    def test_a_fra_in_progress_refuses_and_so_does_its_fair_rate(self):
+        fra = FRA(start=date(2025, 12, 15), end=date(2026, 3, 16), rate=0.04, notional=NOTIONAL)
+        with pytest.raises(MissingFixingError, match="TERM_SOFR_3M"):
+            pv(fra, CurveSet(_flat_curve()))
+        with pytest.raises(MissingFixingError, match="TERM_SOFR_3M"):
+            fra_fair_rate(fra, CurveSet(_flat_curve()))
+
+    def test_a_snapshot_without_the_series_names_the_one_it_wanted(self):
+        wrong = _fixings(_history("TERM_SOFR_3M"))
+        with pytest.raises(MissingFixingError) as caught:
+            pv(self.SWAP, CurveSet(_flat_curve()), fixings=wrong)
+        assert "'SOFR'" in str(caught.value) and "TERM_SOFR_3M" in str(caught.value)
+        assert "2025-07-15" in str(caught.value)
+
+    def test_a_missing_business_day_is_named_never_interpolated(self):
+        gap = date(2025, 10, 22)
+        full = _history()
+        kept = [(d, v) for d, v in zip(full.dates, full.values, strict=True) if d != gap]
+        holed = Series("SOFR", tuple(d for d, _ in kept), tuple(v for _, v in kept),
+                       full.provenance)
+        with pytest.raises(MissingFixingError, match="2025-10-22"):
+            pv(self.SWAP, CurveSet(_flat_curve()), fixings=_fixings(holed))
+
+    def test_an_overnight_index_on_another_basis_is_refused_rather_than_compounded_on_360(self):
+        # MarketSnapshot.compounded compounds 1 + r/360 a day. An overnight
+        # index accruing on another basis would need another rule, and
+        # applying this one would be a silent error the size of 365/360.
+        odd = RateIndex(name="TEST_ON", label="Test ON", slug="test_on", currency=Currency.USD,
+                        tenor=IndexTenor.OVERNIGHT, day_count=DayCount.ACT_365F,
+                        calendar=SIFMA_US, administrator="nobody")
+        swap = OISSwap(effective=date(2025, 7, 15), maturity=date(2027, 7, 15), fixed_rate=0.04,
+                       index=odd)
+        with pytest.raises(UnsupportedConventionError, match="ACT/360"):
+            pv(swap, CurveSet(_flat_curve()), fixings=_fixings(_history("TEST_ON")))
+
+
+class TestClosedForms:
+    """With the history and the curve both known exactly, so is the answer."""
+
+    def test_an_ois_compounds_its_fixings_then_the_curve(self):
+        # Monday 12 to Thursday 15 January 2026: three published fixings and
+        # no weekend, so a daily and a business-day compounding rule agree
+        # and the reference does not depend on which one is right.
+        published = {date(2026, 1, 12): 0.0431, date(2026, 1, 13): 0.0429,
+                     date(2026, 1, 14): 0.0433}
+        swap = OISSwap(effective=date(2026, 1, 12), maturity=date(2027, 1, 12), fixed_rate=0.04,
+                       notional=NOTIONAL)
+        realised = math.prod(1.0 + r / 360.0 for r in published.values())
+        pay = date(2027, 1, 14)
+        growth = realised / _df(date(2027, 1, 12))
+        expected = -NOTIONAL * 0.04 * 365 / 360 * _df(pay) + NOTIONAL * (growth - 1.0) * _df(pay)
+        snapshot = _fixings(_term("SOFR", published))
+        result = pv(swap, CurveSet(_flat_curve()), fixings=snapshot)
+        assert result.value == pytest.approx(expected, rel=1e-12)
+        floating = [flow for flow in result.cashflows or () if flow.leg == "float"]
+        assert floating[0].rate == pytest.approx((growth - 1.0) / (365 / 360), rel=1e-12)
+
+    def test_the_fixed_coupon_in_progress_is_counted_in_full(self):
+        published = {date(2026, 1, 12): 0.0431, date(2026, 1, 13): 0.0429,
+                     date(2026, 1, 14): 0.0433}
+        swap = OISSwap(effective=date(2026, 1, 12), maturity=date(2027, 1, 12), fixed_rate=0.04,
+                       notional=NOTIONAL)
+        result = pv(swap, CurveSet(_flat_curve()), fixings=_fixings(_term("SOFR", published)))
+        fixed = [flow for flow in result.cashflows or () if flow.leg == "fixed"]
+        assert [flow.amount for flow in fixed] == [-NOTIONAL * 0.04 * 365 / 360]
+
+    def test_fixings_on_and_after_the_valuation_date_are_never_read(self):
+        # A period's coupon is history only up to the day before as_of; the
+        # rest is the curve's. A snapshot that holds later prints -- a
+        # backtest's look-ahead -- must not reach the price.
+        published = {date(2026, 1, 12): 0.0431, date(2026, 1, 13): 0.0429,
+                     date(2026, 1, 14): 0.0433}
+        future = {**published, AS_OF: 0.99, date(2026, 1, 16): 0.99}
+        swap = OISSwap(effective=date(2026, 1, 12), maturity=date(2027, 1, 12), fixed_rate=0.04,
+                       notional=NOTIONAL)
+        curve_set = CurveSet(_flat_curve())
+        clean = pv(swap, curve_set, fixings=_fixings(_term("SOFR", published))).value
+        assert pv(swap, curve_set, fixings=_fixings(_term("SOFR", future))).value == clean
+
+    def test_a_tiie_de_fondeo_ois_compounds_on_the_bmv_calendar_in_pesos(self):
+        published = {date(2026, 1, 12): 0.0702, date(2026, 1, 13): 0.0700,
+                     date(2026, 1, 14): 0.0701}
+        # Rolls on the 12th: 2026-04-12 is a Sunday, so the period ends on
+        # Monday the 13th (91 days) and is paid two BMV days later.
+        swap = OISSwap(effective=date(2026, 1, 12), maturity=date(2026, 4, 12), fixed_rate=0.075,
+                       notional=500_000_000.0, frequency_months=3, index=TIIE_FONDEO)
+        curve_set = CurveSet(_flat_curve(0.07, Currency.MXN))
+        realised = math.prod(1.0 + r / 360.0 for r in published.values())
+        growth = realised / _df(date(2026, 4, 13), 0.07)
+        pay = date(2026, 4, 15)
+        expected = (-500_000_000.0 * 0.075 * 91 / 360 + 500_000_000.0 * (growth - 1.0)) * _df(
+            pay, 0.07
+        )
+        result = pv(swap, curve_set, fixings=_fixings(_term("TIIE_FONDEO", published)))
+        assert result.value == pytest.approx(expected, rel=1e-12)
+        assert result.unit == "MXN"
+        assert result.evidence.fields["realised_fixings"][0]["series_id"] == "TIIE_FONDEO"
+
+    def test_an_irs_pays_the_term_fixing_of_its_period_start(self):
+        # Single curve, no payment lag: the projected periods telescope to
+        # N (P(first projected start) - P(maturity)), and the period in
+        # progress pays N * F * tau on the fixing of 2025-11-17.
+        irs = IRSwap(effective=date(2025, 11, 17), maturity=date(2026, 11, 17), fixed_rate=0.04,
+                     notional=NOTIONAL)
+        fixing = 0.0412
+        snapshot = _fixings(_term("TERM_SOFR_3M", {date(2025, 11, 17): fixing}))
+        first_end, end = date(2026, 2, 17), date(2026, 11, 17)
+        expected = (
+            -NOTIONAL * 0.04 * 365 / 360 * _df(end)
+            + NOTIONAL * fixing * 92 / 360 * _df(first_end)
+            + NOTIONAL * (_df(first_end) - _df(end))
+        )
+        assert pv(irs, CurveSet(_flat_curve()), fixings=snapshot).value == pytest.approx(
+            expected, rel=1e-12
+        )
+
+    @pytest.mark.parametrize(("side", "sign"), [(Side.PAYER, 1.0), (Side.RECEIVER, -1.0)])
+    def test_a_fra_in_progress_settles_on_its_fixing(self, side, sign):
+        fra = FRA(start=date(2025, 12, 15), end=date(2026, 3, 16), rate=0.04, notional=NOTIONAL,
+                  side=side)
+        snapshot = _fixings(_term("TERM_SOFR_3M", {date(2025, 12, 15): 0.0425}))
+        curve_set = CurveSet(_flat_curve())
+        expected = sign * NOTIONAL * (0.0425 - 0.04) * 91 / 360 * _df(date(2026, 3, 16))
+        assert pv(fra, curve_set, fixings=snapshot).value == pytest.approx(expected, rel=1e-12)
+        assert fra_fair_rate(fra, curve_set, fixings=snapshot) == 0.0425
+
+    def test_a_tiie_28_fra_reads_its_peso_fixing(self):
+        fra = FRA(start=date(2025, 12, 29), end=date(2026, 1, 26), rate=0.075,
+                  notional=1_000_000_000.0, index=TIIE_28)
+        snapshot = _fixings(_term("TIIE_28", {date(2025, 12, 29): 0.0745}))
+        result = pv(fra, CurveSet(_flat_curve(0.07, Currency.MXN)), fixings=snapshot)
+        expected = 1_000_000_000.0 * (0.0745 - 0.075) * 28 / 360 * _df(date(2026, 1, 26), 0.07)
+        assert result.value == pytest.approx(expected, rel=1e-12)
+        assert result.evidence.worst_quality is DataQuality.ASSUMED  # the MXN conventions
+
+    def test_a_period_fully_accrued_and_not_yet_paid_is_all_history(self):
+        # Accrued Monday 12 to Wednesday 14 January, paid Friday the 16th:
+        # every fixing is published by as_of and the curve only discounts.
+        published = {date(2026, 1, 12): 0.0431, date(2026, 1, 13): 0.0429}
+        swap = OISSwap(effective=date(2026, 1, 12), maturity=date(2026, 1, 14), fixed_rate=0.04,
+                       notional=NOTIONAL, frequency_months=1)
+        realised = (1.0 + 0.0431 / 360.0) * (1.0 + 0.0429 / 360.0)
+        expected = NOTIONAL * (realised - 1.0 - 0.04 * 2 / 360) * _df(date(2026, 1, 16))
+        result = pv(swap, CurveSet(_flat_curve()), fixings=_fixings(_term("SOFR", published)))
+        assert result.value == pytest.approx(expected, rel=1e-12)
+
+
+#: The OIS strip of the review's repro scripts (``curves/common.py``), the
+#: same quotes QuantLib was bootstrapped on below. Decimal, annual ACT/360,
+#: payment lag two, spot 2026-01-20 (T+2 over Martin Luther King Day).
+_SPOT = date(2026, 1, 20)
+_OIS_QUOTES = (
+    ("1M", 1, 0.0431), ("3M", 3, 0.0428), ("6M", 6, 0.0419), ("1Y", 12, 0.0402),
+    ("2Y", 24, 0.0375), ("3Y", 36, 0.0362), ("5Y", 60, 0.0358), ("7Y", 84, 0.0363),
+    ("10Y", 120, 0.0372), ("15Y", 180, 0.0384), ("20Y", 240, 0.0389), ("30Y", 360, 0.0382),
+)
+
+
+@pytest.fixture(scope="module")
+def strip_curve() -> DiscountCurve:
+    """The engine's own bootstrap of :data:`_OIS_QUOTES`, as the repro script builds it."""
+    nodes = tuple(
+        SwapQuoteNode(
+            swap=OISSwap(effective=_SPOT, maturity=add_months(_SPOT, months), fixed_rate=quote),
+            quoted_rate=quote,
+            label=label,
+        )
+        for label, months, quote in _OIS_QUOTES
+    )
+    return bootstrap_discount_curve(AS_OF, nodes).curve
+
+
+#: QuantLib 1.44, computed in the review's environment with its
+#: ``curves/r04_seasoned_swap.py`` (the first two numbers are the ones that
+#: script prints) extended to the cases below: ``OvernightIndexedSwap``
+#: (annual, ACT/360, payment lag 2, UnitedStates(SOFR), Modified Following,
+#: backward) on a ``PiecewiseLogLinearDiscount`` bootstrapped from
+#: :data:`_OIS_QUOTES` with ``OISRateHelper`` (lag 2, annual), SOFR fixings at
+#: a flat 4.30% on every UnitedStates(SOFR) business day from 2024-01-01 to
+#: 2026-01-14. Payer at 4% on USD 100m, valued 2026-01-15. The 2024 and 2025
+#: starts share every flow still to be paid, so QuantLib gives both the same
+#: numbers. ``*_ANNUITY`` is ``-fixedLegBPS() / (notional * 1e-4)``.
+QL_SEASONED_PV = -17348.132534572855
+QL_SEASONED_FAIR = 0.039911027926253645
+QL_SEASONED_ANNUITY = 1.9498401918820142
+#: Same set-up, one annual period 2025-01-14 to 2026-01-14, paid 2026-01-16.
+QL_ACCRUED_PV = 400007.9465766563
+QL_ACCRUED_FAIR = 0.04394575534861574
+QL_ACCRUED_ANNUITY = 1.0137677357948412
+#: ``VanillaSwap``, payer at 3.9% on USD 100m, 2025-08-20 to 2027-08-20,
+#: fixed annual ACT/360, floating quarterly on an IborIndex (3M, fixing days
+#: 0, ACT/360, UnitedStates(SOFR)) projected on the QuantLib OIS curve
+#: spread by 18 bp continuously compounded on ACT/365F and discounted on the
+#: OIS curve. Fixings: 4.20% on 2025-08-20 and 4.12% on 2025-11-20.
+QL_IRS_PV = -814681.7892547129
+QL_IRS_FAIR = 0.034807974465136754
+
+
+def _compounding_rule_gap(start: date, end: date, rate: float = 0.0430) -> float:
+    """How far apart the two compounding rules put a flat history's growth.
+
+    ``MarketSnapshot.compounded`` multiplies ``1 + r/360`` once per calendar
+    day, so a weekend is ``(1 + r/360)^3``. QuantLib, CME and the New York
+    Fed multiply ``1 + r d/360`` once per business day, ``d`` the calendar
+    days it covers. The review's finding 3.4; the rule lives in
+    ``market/snapshot.py`` and is corrected on the branch that owns it, after
+    which this gap is what the two prices may still differ by and no more.
+    Written out here from the calendar alone, not by calling the snapshot.
+    """
+    days = [start + timedelta(days=k) for k in range((end - start).days)]
+    daily = math.prod(1.0 + rate / 360.0 for _ in days)
+    published = [day for day in days if SIFMA_US.is_business_day(day)]
+    following = published[1:] + [end]
+    business = math.prod(
+        1.0 + rate * (after - day).days / 360.0
+        for day, after in zip(published, following, strict=True)
+    )
+    return daily - business
+
+
+def _pv_tolerance(start: date, end: date) -> float:
+    """USD on USD 100m: the rule gap, grown by at most 5% of forecast and one dollar."""
+    return NOTIONAL * abs(_compounding_rule_gap(start, end)) * 1.05 + 1.0
+
+
+class TestAgainstQuantLib:
+    """The seasoned trades of the review, against QuantLib with the same history."""
+
+    @pytest.mark.parametrize("effective", [date(2025, 7, 15), date(2024, 7, 15)])
+    def test_the_seasoned_payer_matches_quantlib(self, strip_curve, effective):
+        # Before this change: -2,238,694.78 (2025 start) and -6,294,250.34
+        # (2024 start) against QuantLib's -17,348.13; par 2.8519% and 1.8762%
+        # against 3.9911%. Now 128 USD and 0.0066 bp apart, all of it the
+        # compounding rule: 128.30 USD of coupon on this window.
+        swap = OISSwap(effective=effective, maturity=date(2027, 7, 15), fixed_rate=0.04,
+                       notional=NOTIONAL)
+        curve_set = CurveSet(strip_curve)
+        snapshot = _fixings(_history())
+        tolerance = _pv_tolerance(date(2025, 7, 15), AS_OF)
+        assert tolerance < 150.0  # the 222 bp error this guards against is 2.2m USD
+        assert pv(swap, curve_set, fixings=snapshot).value == pytest.approx(
+            QL_SEASONED_PV, abs=tolerance
+        )
+        assert par_rate(swap, curve_set, fixings=snapshot).value == pytest.approx(
+            QL_SEASONED_FAIR, abs=tolerance / (NOTIONAL * QL_SEASONED_ANNUITY)
+        )
+        assert annuity(swap, curve_set).value == pytest.approx(QL_SEASONED_ANNUITY, abs=1e-9)
+
+    def test_the_two_starts_value_the_same_remaining_flows_identically(self, strip_curve):
+        curve_set = CurveSet(strip_curve)
+        snapshot = _fixings(_history())
+        young, old = (
+            OISSwap(effective=effective, maturity=date(2027, 7, 15), fixed_rate=0.04,
+                    notional=NOTIONAL)
+            for effective in (date(2025, 7, 15), date(2024, 7, 15))
+        )
+        assert pv(old, curve_set, fixings=snapshot).value == pv(
+            young, curve_set, fixings=snapshot
+        ).value
+
+    def test_a_period_accrued_but_unpaid_matches_quantlib(self, strip_curve):
+        # A whole year of history, every day of it realised: 271 USD apart,
+        # the rule gap to the cent.
+        swap = OISSwap(effective=date(2025, 1, 14), maturity=date(2026, 1, 14), fixed_rate=0.04,
+                       notional=NOTIONAL)
+        curve_set = CurveSet(strip_curve)
+        snapshot = _fixings(_history())
+        tolerance = _pv_tolerance(date(2025, 1, 14), date(2026, 1, 14))
+        assert pv(swap, curve_set, fixings=snapshot).value == pytest.approx(
+            QL_ACCRUED_PV, abs=tolerance
+        )
+        assert par_rate(swap, curve_set, fixings=snapshot).value == pytest.approx(
+            QL_ACCRUED_FAIR, abs=tolerance / (NOTIONAL * QL_ACCRUED_ANNUITY)
+        )
+
+    @pytest.mark.parametrize(("side", "expected"), [(Side.PAYER, 1.0), (Side.RECEIVER, -1.0)])
+    def test_a_seasoned_term_sofr_irs_on_two_curves_matches_quantlib(
+        self, strip_curve, side, expected
+    ):
+        # No overnight compounding is involved, so the tolerance is the
+        # curves' agreement and nothing else.
+        irs = IRSwap(effective=date(2025, 8, 20), maturity=date(2027, 8, 20), fixed_rate=0.039,
+                     notional=NOTIONAL, side=side)
+        curve_set = CurveSet(strip_curve, strip_curve.shifted(0.0018))
+        snapshot = _fixings(
+            _term("TERM_SOFR_3M", {date(2025, 8, 20): 0.0420, date(2025, 11, 20): 0.0412})
+        )
+        assert pv(irs, curve_set, fixings=snapshot).value == pytest.approx(
+            expected * QL_IRS_PV, abs=1e-3
+        )
+        assert par_rate(irs, curve_set, fixings=snapshot).value == pytest.approx(
+            QL_IRS_FAIR, abs=1e-10
+        )
+
+    def test_struck_at_its_par_rate_a_seasoned_swap_is_worth_nothing(self, strip_curve):
+        # QuantLib's fairRate: the fixed rate that zeroes what is left. The
+        # accrued floating coupon is in the numerator, the full fixed coupon
+        # in progress in the annuity.
+        curve_set = CurveSet(strip_curve)
+        snapshot = _fixings(_history())
+        swap = OISSwap(effective=date(2024, 7, 15), maturity=date(2027, 7, 15), fixed_rate=0.04,
+                       notional=NOTIONAL)
+        struck = swap.with_terms(fixed_rate=par_rate(swap, curve_set, fixings=snapshot).value)
+        assert abs(pv(struck, curve_set, fixings=snapshot).value) < 1e-8 * NOTIONAL
+
+
+class TestTheEvidenceSaysWhatHistoryWasUsed:
+    """The fixings behind a number, and how far to trust them, travel with it."""
+
+    SWAP = OISSwap(effective=date(2025, 7, 15), maturity=date(2027, 7, 15), fixed_rate=0.04,
+                   notional=NOTIONAL)
+
+    def test_the_price_records_each_window_and_its_quality(self):
+        series = _history()
+        result = pv(self.SWAP, CurveSet(_flat_curve()), fixings=_fixings(series))
+        (record,) = result.evidence.fields["realised_fixings"]
+        assert record["series_id"] == "SOFR"
+        assert record["method"] == "compounded"
+        assert record["observed_from"] == "2025-07-15"
+        assert record["observed_to"] == "2026-01-15"
+        assert record["accrual_start"] == "2025-07-15"
+        assert record["accrual_end"] == "2026-07-15"
+        assert record["data_quality"] == "observed"
+        # Every SIFMA business day from 2025-07-15 to 2026-01-14 was read.
+        assert record["business_days"] == sum(
+            1 for d in series.dates if date(2025, 7, 15) <= d < AS_OF
+        )
+        assert series.provenance in result.evidence.inputs
+
+    def test_assumed_fixings_make_the_price_assumed(self):
+        series = _history(quality=DataQuality.ASSUMED)
+        result = pv(self.SWAP, CurveSet(_flat_curve()), fixings=_fixings(series))
+        assert result.evidence.worst_quality is DataQuality.ASSUMED
+
+    def test_the_par_rate_records_them_too(self):
+        result = par_rate(self.SWAP, CurveSet(_flat_curve()), fixings=_fixings(_history()))
+        assert result.evidence.fields["realised_fixings"][0]["series_id"] == "SOFR"
+
+    def test_the_payload_serialises(self):
+        result = pv(self.SWAP, CurveSet(_flat_curve()), fixings=_fixings(_history()))
+        stored = json.loads(json.dumps(result.to_dict()))
+        assert stored["evidence"]["fields"]["realised_fixings"][0]["rate"] > 0.04
+
+    def test_a_trade_with_no_history_records_none_even_when_handed_fixings(self):
+        # Fixings passed for a book are not a reason for an unseasoned trade's
+        # payload to change shape, or its numbers to move.
+        instrument, curve_set = _pinned_cases()["ois_spot_payer"]
+        result = pv(instrument, curve_set, fixings=_fixings(_history()))
+        assert "realised_fixings" not in result.evidence.fields
+        assert result.evidence.inputs == ()
+        assert result.value == PINNED["ois_spot_payer"]["pv"]
+
+    def test_a_parametric_comparison_carries_the_history_and_its_quality(self):
+        # Both prices rest on the same fixings, so the comparison records them
+        # once and an assumed history still marks it assumed.
+        from dataclasses import dataclass
+        from typing import Any
+
+        from rates_engine.core.evidence import Evidence
+        from rates_engine.core.results import EngineResult
+        from rates_engine.pricing.linear import price_on_parametric
+
+        @dataclass(frozen=True)
+        class Fit(EngineResult):
+            def payload_fields(self) -> dict[str, Any]:
+                return {"curve_kind": "parametric", "model": "flat"}
+
+        series = _history(quality=DataQuality.ASSUMED)
+        result = price_on_parametric(
+            self.SWAP,
+            CurveSet(_flat_curve(0.0405)),
+            CurveSet(_flat_curve()),
+            fit=Fit(evidence=Evidence(produced_by="test.fit")),
+            fixings=_fixings(series),
+        )
+        assert result.evidence.fields["realised_fixings"][0]["series_id"] == "SOFR"
+        assert result.evidence.worst_quality is DataQuality.ASSUMED
+        # The accrued half-year is identical on both curves and cancels out
+        # of the difference; only the forecast moves.
+        assert result.parametric_pv != result.bootstrap_pv

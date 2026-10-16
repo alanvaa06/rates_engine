@@ -15,7 +15,9 @@ and register its projection::
         ...
 
 Every pricer, risk measure and hedge then works on it unchanged, because they
-all price through :func:`project`.
+all price through :func:`project`. The pricers pass ``fixings=`` on only
+when their caller hands them some, so a projection written without the
+keyword keeps working; declare ``*, fixings=None`` to accept them.
 
 **Currency.** Every flow carries its instrument's currency, taken from the
 index. :func:`rates_engine.pricing.linear.pv` discounts each flow on the
@@ -29,6 +31,29 @@ projected at all: it has been paid, and nothing about it is worth anything
 today. The pricer drops such flows again whatever projected them, so a
 product of the caller's own that returns its whole history is still
 valued correctly.
+
+A period that began before ``as_of`` and is paid after it is part history.
+Its fixed coupon was known on the trade date and is counted in full. Its
+floating coupon is not, and no curve can say what it was:
+
+- an overnight rate (SOFR, TIIE de Fondeo) compounds the published fixings
+  from the accrual start up to ``as_of``, exclusive, and the curve's
+  ``P(as_of) / P(end)`` for the rest -- the coupon QuantLib's
+  ``OvernightIndexedCoupon`` pays;
+- a term rate (Term SOFR, TIIE 28) pays the fixing published on its
+  accrual start, which is where this package projects a term rate from.
+
+Both come from a :class:`~rates_engine.market.snapshot.MarketSnapshot`
+passed as ``fixings``, read by the series named after the index
+(``"SOFR"``, ``"TERM_SOFR_3M"``, ``"TIIE_FONDEO"``), and without one the
+projection raises :class:`~rates_engine.core.errors.MissingFixingError`
+naming what is missing. Until v0.4 it projected the period as
+``P(start) / P(end)`` on a curve that is one on or before ``as_of``, so the
+part already accrued was worth nothing: a 4% payer over USD 100m started
+six months before valuation came back at -2.24m USD against QuantLib's
+-17,348. A period that starts *on* ``as_of`` has no history and is
+projected exactly as before; its fixing, if any, is published that day and
+a curve built that morning already prices it.
 """
 
 from __future__ import annotations
@@ -37,13 +62,16 @@ from datetime import date
 from functools import singledispatch
 from typing import Any, Protocol, runtime_checkable
 
-from rates_engine.conventions.daycount import year_fraction
+from rates_engine.conventions.daycount import DayCount, year_fraction
+from rates_engine.conventions.indices import RateIndex
 from rates_engine.conventions.side import fixed_leg_sign
+from rates_engine.core.errors import MissingFixingError, UnsupportedConventionError
 from rates_engine.core.money import Currency
 from rates_engine.curves.discount import CurveSet
-from rates_engine.instruments.cashflow import Cashflow
+from rates_engine.instruments.cashflow import Cashflow, RealisedFixing
 from rates_engine.instruments.fra import FRA
 from rates_engine.instruments.swaps import IRSwap, OISSwap
+from rates_engine.market.snapshot import MarketSnapshot
 
 __all__ = ["Priceable", "Swappable", "project", "float_leg", "fra_fair_rate"]
 
@@ -99,18 +127,25 @@ class Swappable(Priceable, Protocol):
 
 
 @singledispatch
-def project(instrument: object, curve_set: CurveSet) -> tuple[Cashflow, ...]:
+def project(
+    instrument: object, curve_set: CurveSet, *, fixings: MarketSnapshot | None = None
+) -> tuple[Cashflow, ...]:
     """Every cashflow of ``instrument`` still to be paid under ``curve_set``, signed for its side.
 
     Args:
         instrument: A registered instrument.
         curve_set: Discount and projection curves.
+        fixings: Published fixings for a floating period already in progress
+            on ``curve_set.as_of``, by index name. Needed only by a trade
+            that has started; see the module docstring.
 
     Returns:
         The flows paid after ``curve_set.as_of``, fixed leg first for a swap.
 
     Raises:
         TypeError: Nothing is registered for the instrument's type.
+        MissingFixingError: A floating period is in progress and ``fixings``
+            is absent or lacks a fixing it needs.
     """
     raise TypeError(
         f"no cashflow projection is registered for {type(instrument).__name__}; "
@@ -119,29 +154,134 @@ def project(instrument: object, curve_set: CurveSet) -> tuple[Cashflow, ...]:
 
 
 @singledispatch
-def float_leg(swap: object, curve_set: CurveSet) -> tuple[Cashflow, ...]:
+def float_leg(
+    swap: object, curve_set: CurveSet, *, fixings: MarketSnapshot | None = None
+) -> tuple[Cashflow, ...]:
     """The floating leg of a swap under ``curve_set``, signed for its side.
 
     Args:
         swap: A registered swap.
         curve_set: Discount and projection curves.
+        fixings: Published fixings for the period in progress, if one is.
 
     Returns:
         One flow per floating period paid after ``curve_set.as_of``.
 
     Raises:
         TypeError: Nothing is registered for the swap's type.
+        MissingFixingError: A floating period is in progress and ``fixings``
+            is absent or lacks a fixing it needs.
     """
     raise TypeError(f"no floating leg is registered for {type(swap).__name__}")
 
 
+def _in_progress(
+    instrument: OISSwap | IRSwap | FRA,
+    start: date,
+    end: date,
+    pay: date,
+    as_of: date,
+) -> str:
+    """How the refusals below name the period they could not value."""
+    if isinstance(instrument, FRA):
+        trade = f"FRA {instrument.start} to {instrument.end}"
+    else:
+        trade = f"{type(instrument).__name__} {instrument.effective} to {instrument.maturity}"
+    return (
+        f"{trade}: the floating period {start} to {end}, paid {pay}, began before the "
+        f"valuation date {as_of}"
+    )
+
+
+def _how_to_pass(index: RateIndex) -> str:
+    return (
+        f"Pass the published fixings as fixings=MarketSnapshot(as_of=..., series={{"
+        f"{index.name!r}: Series(...)}}) to pv, par_rate, discounted_value or project"
+    )
+
+
+def _compounded_history(
+    index: RateIndex,
+    start: date,
+    until: date,
+    fixings: MarketSnapshot | None,
+    context: str,
+) -> RealisedFixing:
+    """The overnight fixings of ``[start, until)`` compounded, and the record of them."""
+    if fixings is None:
+        raise MissingFixingError(
+            f"{context}, so part of its coupon is {index.name} compounded from {start} up to "
+            f"{until} (exclusive): history no curve knows. {_how_to_pass(index)}."
+        )
+    # MarketSnapshot.compounded multiplies 1 + r/360 a day. An overnight
+    # index accruing on another basis needs another rule, and this one would
+    # be off by the ratio of the two bases without a word.
+    if index.day_count is not DayCount.ACT_360:
+        raise UnsupportedConventionError(
+            f"{context}; its realised part would be compounded on ACT/360, and {index.name} "
+            f"accrues on {index.day_count.value}. Only ACT/360 overnight indices can be "
+            "valued part-way through a period."
+        )
+    try:
+        series = fixings.require(index.name)
+        compounded = fixings.compounded(index.name, start, until, calendar=index.calendar)
+    except MissingFixingError as error:
+        raise MissingFixingError(f"{context}: {error}") from error
+    return RealisedFixing(
+        series_id=index.name,
+        method="compounded",
+        observed_from=start,
+        observed_to=until,
+        rate=compounded.rate,
+        accrual_factor=compounded.accrual_factor,
+        business_days=compounded.business_days,
+        repeated_days=compounded.repeated_days,
+        provenance=series.provenance,
+    )
+
+
+def _term_fixing(
+    index: RateIndex,
+    fixing_date: date,
+    fixings: MarketSnapshot | None,
+    context: str,
+) -> RealisedFixing:
+    """The term fixing published on ``fixing_date``, and the record of it."""
+    if fixings is None:
+        raise MissingFixingError(
+            f"{context}, so its coupon is the {index.name} fixing of {fixing_date}, its "
+            f"accrual start: history no curve knows. {_how_to_pass(index)}."
+        )
+    try:
+        series = fixings.require(index.name)
+        rate = fixings.fixing(index.name, fixing_date)
+    except MissingFixingError as error:
+        raise MissingFixingError(
+            f"{context}, and it fixes on its accrual start: {error}"
+        ) from error
+    return RealisedFixing(
+        series_id=index.name,
+        method="term",
+        observed_from=fixing_date,
+        observed_to=fixing_date,
+        rate=rate,
+        accrual_factor=None,
+        business_days=1,
+        repeated_days=0,
+        provenance=series.provenance,
+    )
+
+
 @float_leg.register
-def _ois_float(swap: OISSwap, curve_set: CurveSet) -> tuple[Cashflow, ...]:
+def _ois_float(
+    swap: OISSwap, curve_set: CurveSet, *, fixings: MarketSnapshot | None = None
+) -> tuple[Cashflow, ...]:
     """Compounded overnight, projected off the discount curve.
 
     The compounded overnight growth over a period is exactly the ratio of the
     period's discount factors on a deterministic curve, so no separate
-    projection is needed and none is invented.
+    projection is needed and none is invented. A period in progress
+    compounds its published fixings up to ``as_of`` and the curve from there.
     """
     sign = -fixed_leg_sign(swap.side)
     curve = curve_set.discount
@@ -155,7 +295,20 @@ def _ois_float(swap: OISSwap, curve_set: CurveSet) -> tuple[Cashflow, ...]:
         if pay <= as_of:
             continue
         tau = year_fraction(start, end, day_count)
-        growth = curve.df(start) / curve.df(end)
+        realised: RealisedFixing | None = None
+        if start < as_of:
+            realised = _compounded_history(
+                swap.index,
+                start,
+                min(end, as_of),
+                fixings,
+                _in_progress(swap, start, end, pay, as_of),
+            )
+            assert realised.accrual_factor is not None  # set for every compounded record
+            remaining = curve.df(as_of) / curve.df(end) if end > as_of else 1.0
+            growth = realised.accrual_factor * remaining
+        else:
+            growth = curve.df(start) / curve.df(end)
         rate = (growth - 1.0) / tau if tau else 0.0
         flows.append(
             Cashflow(
@@ -167,20 +320,24 @@ def _ois_float(swap: OISSwap, curve_set: CurveSet) -> tuple[Cashflow, ...]:
                 year_fraction=tau,
                 rate=rate,
                 currency=swap.currency,
+                fixing=realised,
             )
         )
     return tuple(flows)
 
 
 @float_leg.register
-def _irs_float(swap: IRSwap, curve_set: CurveSet) -> tuple[Cashflow, ...]:
+def _irs_float(
+    swap: IRSwap, curve_set: CurveSet, *, fixings: MarketSnapshot | None = None
+) -> tuple[Cashflow, ...]:
     """Forwards from the projection curve, nothing else.
 
     This is the whole multi-curve story in four lines. The forward comes from
     ``curve_set.projection``; the discounting, applied in
     :mod:`rates_engine.pricing.linear`, comes from ``curve_set.discount``.
     When the two are the same object the basis is zero and the result
-    collapses onto the OIS answer.
+    collapses onto the OIS answer. A period in progress pays the fixing of
+    its accrual start instead of a forward.
     """
     sign = -fixed_leg_sign(swap.side)
     projection = curve_set.projection
@@ -193,7 +350,14 @@ def _irs_float(swap: IRSwap, curve_set: CurveSet) -> tuple[Cashflow, ...]:
         if pay <= as_of:
             continue
         tau = year_fraction(start, end, swap.float_day_count)
-        rate = projection.forward(start, end, day_count=swap.float_day_count)
+        realised: RealisedFixing | None = None
+        if start < as_of:
+            realised = _term_fixing(
+                swap.float_index, start, fixings, _in_progress(swap, start, end, pay, as_of)
+            )
+            rate = realised.rate
+        else:
+            rate = projection.forward(start, end, day_count=swap.float_day_count)
         flows.append(
             Cashflow(
                 payment_date=pay,
@@ -204,6 +368,7 @@ def _irs_float(swap: IRSwap, curve_set: CurveSet) -> tuple[Cashflow, ...]:
                 year_fraction=tau,
                 rate=rate,
                 currency=swap.currency,
+                fixing=realised,
             )
         )
     return tuple(flows)
@@ -220,44 +385,77 @@ def _unpaid_fixed(swap: OISSwap | IRSwap, curve_set: CurveSet) -> tuple[Cashflow
 
 
 @project.register
-def _project_ois(swap: OISSwap, curve_set: CurveSet) -> tuple[Cashflow, ...]:
-    return _unpaid_fixed(swap, curve_set) + _ois_float(swap, curve_set)
+def _project_ois(
+    swap: OISSwap, curve_set: CurveSet, *, fixings: MarketSnapshot | None = None
+) -> tuple[Cashflow, ...]:
+    return _unpaid_fixed(swap, curve_set) + _ois_float(swap, curve_set, fixings=fixings)
 
 
 @project.register
-def _project_irs(swap: IRSwap, curve_set: CurveSet) -> tuple[Cashflow, ...]:
-    return _unpaid_fixed(swap, curve_set) + _irs_float(swap, curve_set)
+def _project_irs(
+    swap: IRSwap, curve_set: CurveSet, *, fixings: MarketSnapshot | None = None
+) -> tuple[Cashflow, ...]:
+    return _unpaid_fixed(swap, curve_set) + _irs_float(swap, curve_set, fixings=fixings)
 
 
-def fra_fair_rate(fra: FRA, curve_set: CurveSet) -> float:
+def _fra_rate(
+    fra: FRA, curve_set: CurveSet, fixings: MarketSnapshot | None
+) -> tuple[float, RealisedFixing | None]:
+    """The rate the FRA settles on: its fixing once it has started, else the forward."""
+    as_of = curve_set.as_of
+    if fra.start < as_of:
+        realised = _term_fixing(
+            fra.index, fra.start, fixings, _in_progress(fra, fra.start, fra.end, fra.end, as_of)
+        )
+        return realised.rate, realised
+    return curve_set.projection.forward(fra.start, fra.end, day_count=fra.day_count), None
+
+
+def fra_fair_rate(
+    fra: FRA, curve_set: CurveSet, *, fixings: MarketSnapshot | None = None
+) -> float:
     """The rate that makes the FRA worth zero, from the projection curve.
+
+    Once the reference period has started the rate is no longer a forecast:
+    it is the index's fixing on the period start, read from ``fixings``.
 
     Args:
         fra: The contract.
         curve_set: Discount and projection curves.
+        fixings: Published fixings, needed only once ``fra.start`` is before
+            ``curve_set.as_of``. The series is named after the index, e.g.
+            ``"TERM_SOFR_3M"``.
 
     Returns:
         The fair rate as a decimal on the FRA's day count.
+
+    Raises:
+        MissingFixingError: The period has started and ``fixings`` does not
+            hold the fixing of its start.
     """
-    return curve_set.projection.forward(fra.start, fra.end, day_count=fra.day_count)
+    rate, _ = _fra_rate(fra, curve_set, fixings)
+    return rate
 
 
 @project.register
-def _project_fra(fra: FRA, curve_set: CurveSet) -> tuple[Cashflow, ...]:
+def _project_fra(
+    fra: FRA, curve_set: CurveSet, *, fixings: MarketSnapshot | None = None
+) -> tuple[Cashflow, ...]:
     if fra.end <= curve_set.as_of:
         return ()
     sign = -fixed_leg_sign(fra.side)
-    projected = fra_fair_rate(fra, curve_set)
+    settled, realised = _fra_rate(fra, curve_set, fixings)
     tau = fra.year_fraction
     return (
         Cashflow(
             payment_date=fra.end,
-            amount=sign * fra.notional * (projected - fra.rate) * tau,
+            amount=sign * fra.notional * (settled - fra.rate) * tau,
             leg="float",
             accrual_start=fra.start,
             accrual_end=fra.end,
             year_fraction=tau,
-            rate=projected,
+            rate=settled,
             currency=fra.currency,
+            fixing=realised,
         ),
     )

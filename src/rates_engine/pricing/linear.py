@@ -17,20 +17,34 @@ over USD 100m valued eighteen months in, the fixed coupon paid six months
 earlier came back as -4.06m USD. The filter is here rather than
 only in the projections because this is the one place a flow meets the
 valuation date, so a product of the caller's own is covered too.
+
+**A floating period in progress needs its fixings.** Every valuation here
+takes ``fixings``, a :class:`~rates_engine.market.snapshot.MarketSnapshot`
+of published rates, and hands it to the projection, which compounds or
+reads the history of the period in progress and refuses with
+:class:`~rates_engine.core.errors.MissingFixingError` when it is absent
+(:mod:`rates_engine.pricing.projection` says exactly what it reads). A
+trade that starts on or after ``as_of`` needs none and prices to the bit as
+it did before; handed fixings anyway, it ignores them. The fixings a price
+did use are in its evidence, as ``realised_fixings`` and as the series'
+provenance among the inputs, so their data quality reaches
+``worst_quality``.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
 from rates_engine.conventions.side import Side
 from rates_engine.core.errors import CurrencyMismatchError
-from rates_engine.core.evidence import Evidence
+from rates_engine.core.evidence import Evidence, Provenance
 from rates_engine.core.money import require_same_currency
 from rates_engine.core.results import EngineResult
 from rates_engine.curves.discount import CurveSet
 from rates_engine.instruments.cashflow import Cashflow
+from rates_engine.market.snapshot import MarketSnapshot
 from rates_engine.pricing.collateral import (
     collateral_warnings,
     discounting_fields,
@@ -177,12 +191,51 @@ def _pv_of(flows: tuple[Cashflow, ...], curve_set: CurveSet) -> float:
     return total
 
 
+def _passing(fixings: MarketSnapshot | None) -> dict[str, MarketSnapshot]:
+    """``fixings`` as a keyword for ``project`` and ``float_leg``, or nothing.
+
+    A projection registered for a product of the caller's own may predate
+    the keyword. Passing it only when there is something to pass keeps such
+    a product pricing exactly as before; handing it fixings it cannot take
+    fails loudly, in Python's own words, rather than dropping them.
+    """
+    return {} if fixings is None else {"fixings": fixings}
+
+
+def _history_used(flows: Iterable[Cashflow]) -> tuple[dict[str, Any], tuple[Provenance, ...]]:
+    """The ``realised_fixings`` field and the fixings' provenance, for flows resting on them.
+
+    One record per flow -- the period, then what was read for it -- and one
+    provenance per series, in the order the flows first used it. Both are
+    empty when no flow rests on a fixing, so the evidence of a trade with no
+    history is exactly what it always was.
+    """
+    records: list[dict[str, Any]] = []
+    inputs: dict[Provenance, None] = {}
+    for flow in flows:
+        if flow.fixing is None:
+            continue
+        records.append(
+            {
+                "leg": flow.leg,
+                "accrual_start": flow.accrual_start.isoformat(),
+                "accrual_end": flow.accrual_end.isoformat(),
+                "payment_date": flow.payment_date.isoformat(),
+                **flow.fixing.to_dict(),
+            }
+        )
+        inputs.setdefault(flow.fixing.provenance)
+    return ({"realised_fixings": records} if records else {}), tuple(inputs)
+
+
 def valuation_evidence(
     produced_by: str,
     instrument: Priceable,
     curve_set: CurveSet,
     extra: dict[str, Any],
     sources: tuple[Evidence, ...],
+    *,
+    realised: Iterable[Cashflow] = (),
 ) -> Evidence:
     """The evidence every valuation on a curve set records.
 
@@ -199,12 +252,18 @@ def valuation_evidence(
         curve_set: The curves it was valued on.
         extra: Measure-specific fields, merged last.
         sources: Evidence of the inputs, chained in.
+        realised: The flows behind the result. Each one whose amount rests on
+            published fixings adds a ``realised_fixings`` entry to the fields
+            and its series' provenance to the inputs. A result with none adds
+            neither, so its payload is what it always was.
 
     Returns:
         The evidence record.
     """
+    history, inputs = _history_used(realised)
     return Evidence(
         produced_by=produced_by,
+        inputs=inputs,
         fields={
             "instrument": instrument.describe(),
             "currency": curve_set.currency.value,
@@ -213,6 +272,7 @@ def valuation_evidence(
             "projection_curve": "tenor" if curve_set.is_dual else "discount",
             **discounting_fields(curve_set.currency),
             **extra,
+            **history,
         },
         sources=sources,
         # The curve's own degradations, so a price on a curve whose
@@ -223,7 +283,12 @@ def valuation_evidence(
     )
 
 
-def discounted_value(instrument: Priceable, curve_set: CurveSet) -> float:
+def discounted_value(
+    instrument: Priceable,
+    curve_set: CurveSet,
+    *,
+    fixings: MarketSnapshot | None = None,
+) -> float:
     """Present value as a bare float, for callers that reprice many times.
 
     Exactly the number :func:`pv` returns, without the cashflow list and the
@@ -234,14 +299,18 @@ def discounted_value(instrument: Priceable, curve_set: CurveSet) -> float:
     Args:
         instrument: Anything :func:`~rates_engine.pricing.projection.project` handles.
         curve_set: Discount and projection curves.
+        fixings: Published fixings for a floating period in progress on
+            ``curve_set.as_of``; see :func:`pv`.
 
     Returns:
         The present value in the discount curve's currency.
 
     Raises:
         CurrencyMismatchError: A flow is in another currency than the curve.
+        MissingFixingError: A floating period is in progress and ``fixings``
+            does not cover its history.
     """
-    return _pv_of(project(instrument, curve_set), curve_set)
+    return _pv_of(project(instrument, curve_set, **_passing(fixings)), curve_set)
 
 
 def annuity_value(swap: Swappable, curve_set: CurveSet) -> float:
@@ -258,12 +327,20 @@ def annuity_value(swap: Swappable, curve_set: CurveSet) -> float:
     return _pv_of(unit_swap.fixed_cashflows(), curve_set) / swap.notional
 
 
-def _float_leg_pv(swap: Swappable, curve_set: CurveSet) -> float:
+def _float_leg(
+    swap: Swappable, curve_set: CurveSet, fixings: MarketSnapshot | None
+) -> tuple[Cashflow, ...]:
+    """The payer's floating flows still to be paid, which a par rate prices."""
     payer = swap.with_terms(side=Side.PAYER)
-    return _pv_of(float_leg(payer, curve_set), curve_set)
+    return _unpaid(float_leg(payer, curve_set, **_passing(fixings)), curve_set)
 
 
-def par_rate_value(swap: Swappable, curve_set: CurveSet) -> float:
+def par_rate_value(
+    swap: Swappable,
+    curve_set: CurveSet,
+    *,
+    fixings: MarketSnapshot | None = None,
+) -> float:
     """The par rate as a bare float: exactly :func:`par_rate`'s value.
 
     For callers that evaluate it many times -- a root solver calibrating a
@@ -273,11 +350,18 @@ def par_rate_value(swap: Swappable, curve_set: CurveSet) -> float:
     Args:
         swap: A two-legged instrument.
         curve_set: Discount and projection curves.
+        fixings: Published fixings for a floating period in progress; see
+            :func:`par_rate`.
 
     Returns:
         The par rate as a decimal.
+
+    Raises:
+        MissingFixingError: A floating period is in progress and ``fixings``
+            does not cover its history.
     """
-    return _float_leg_pv(swap, curve_set) / (swap.notional * annuity_value(swap, curve_set))
+    float_pv = _pv_of(_float_leg(swap, curve_set, fixings), curve_set)
+    return float_pv / (swap.notional * annuity_value(swap, curve_set))
 
 
 def pv(
@@ -285,24 +369,49 @@ def pv(
     curve_set: CurveSet,
     *,
     source_evidence: tuple[Evidence, ...] = (),
+    fixings: MarketSnapshot | None = None,
 ) -> PriceResult:
     """Present value in USD, signed from the holder's point of view.
+
+    A trade that started before ``curve_set.as_of`` is valued on what is
+    left of it: paid flows count for nothing, the fixed coupon accruing
+    today counts in full, and the floating one in progress is its published
+    history -- compounded for an overnight index, read for a term one --
+    and the curve's forecast for the rest.
 
     Args:
         instrument: Anything :func:`~rates_engine.pricing.projection.project` handles.
         curve_set: Discount and projection curves.
         source_evidence: Evidence of the curves, chained in so that a proxied
             curve stays visibly proxied in the price.
+        fixings: Published fixings, needed only when a floating period is in
+            progress on ``curve_set.as_of``: a series named after the index
+            (``"SOFR"``, ``"TERM_SOFR_3M"``, ``"TIIE_FONDEO"``, ``"TIIE_28"``)
+            holding one decimal rate per business day. Fixings dated on or
+            after ``as_of`` are never read.
 
     Returns:
         A :class:`PriceResult` with ``measure="pv"`` and the discount
         curve's currency as its unit. Its ``cashflows`` are the flows the
         value counts: none paid on or before the valuation date.
+
+    Raises:
+        CurrencyMismatchError: A flow is in another currency than the curve.
+        MissingFixingError: A floating period is in progress and ``fixings``
+            is absent, lacks the index's series, or lacks a business day of
+            its history. The message names the period and the series.
     """
-    flows = _unpaid(project(instrument, curve_set), curve_set)
+    flows = _unpaid(project(instrument, curve_set, **_passing(fixings)), curve_set)
     value = _pv_of(flows, curve_set)
     return PriceResult(
-        evidence=valuation_evidence("pricing.pv", instrument, curve_set, {"cashflows": len(flows)}, source_evidence),
+        evidence=valuation_evidence(
+            "pricing.pv",
+            instrument,
+            curve_set,
+            {"cashflows": len(flows)},
+            source_evidence,
+            realised=flows,
+        ),
         value=value,
         measure="pv",
         unit=curve_set.discount.currency.value,
@@ -344,6 +453,7 @@ def par_rate(
     curve_set: CurveSet,
     *,
     source_evidence: tuple[Evidence, ...] = (),
+    fixings: MarketSnapshot | None = None,
 ) -> PriceResult:
     """The fixed rate that prices the swap at zero, as a decimal.
 
@@ -352,10 +462,17 @@ def par_rate(
     the floating leg finds its forwards on the projection curve and both legs
     discount on the OIS curve.
 
+    For a swap that has started it is the rate that zeroes what is left --
+    QuantLib's ``fairRate`` -- with the floating coupon in progress, history
+    and forecast, in the numerator and the fixed coupon in progress, in full,
+    in the annuity.
+
     Args:
         swap: A two-legged instrument.
         curve_set: Discount and projection curves.
         source_evidence: Evidence of the curves.
+        fixings: Published fixings for a floating period in progress; see
+            :func:`pv`.
 
     Returns:
         A :class:`PriceResult` with ``measure="par_rate"`` and
@@ -364,8 +481,11 @@ def par_rate(
     Raises:
         ZeroDivisionError: The annuity is zero, which means the fixed leg has
             no periods left to discount.
+        MissingFixingError: A floating period is in progress and ``fixings``
+            does not cover its history.
     """
-    float_pv = _float_leg_pv(swap, curve_set)
+    floating = _float_leg(swap, curve_set, fixings)
+    float_pv = _pv_of(floating, curve_set)
     years = annuity_value(swap, curve_set)
     value = float_pv / (swap.notional * years)
     return PriceResult(
@@ -375,6 +495,7 @@ def par_rate(
             curve_set,
             {"annuity_years": years, "float_leg_pv": float_pv},
             source_evidence,
+            realised=floating,
         ),
         value=value,
         measure="par_rate",
@@ -431,6 +552,7 @@ def price_on_parametric(
     bootstrapped: CurveSet,
     *,
     fit: EngineResult,
+    fixings: MarketSnapshot | None = None,
 ) -> ParametricComparison:
     """Price on a fitted curve and report the gap against the bootstrapped one.
 
@@ -440,6 +562,8 @@ def price_on_parametric(
         bootstrapped: The curves the model was fitted to.
         fit: The fit that produced ``parametric``. Its payload must declare
             ``curve_kind="parametric"``; the model name is read from it.
+        fixings: Published fixings for a floating period in progress; see
+            :func:`pv`. The same history enters both prices.
 
     Returns:
         The :class:`ParametricComparison`.
@@ -448,6 +572,8 @@ def price_on_parametric(
         ValueError: ``fit`` does not declare itself parametric, so labelling
             the comparison ``curve_kind="parametric"`` would be a claim about
             a curve nothing here has seen.
+        MissingFixingError: A floating period is in progress and ``fixings``
+            does not cover its history.
     """
     # D7: `_pv_of` checks each curve set against its own flows, and nothing
     # checked the two sets against each other — so a parametric USD curve
@@ -467,8 +593,11 @@ def price_on_parametric(
         )
     model = str(fields.get("model", type(fit).__name__))
 
-    parametric_pv = _pv_of(project(instrument, parametric), parametric)
-    bootstrap_pv = _pv_of(project(instrument, bootstrapped), bootstrapped)
+    parametric_flows = _unpaid(project(instrument, parametric, **_passing(fixings)), parametric)
+    parametric_pv = _pv_of(parametric_flows, parametric)
+    bootstrap_pv = _pv_of(project(instrument, bootstrapped, **_passing(fixings)), bootstrapped)
+    # The history is the same on both curves; record it once.
+    history, inputs = _history_used(parametric_flows)
     difference = parametric_pv - bootstrap_pv
     notional = instrument.describe().get("notional")
     per_bp = (
@@ -479,6 +608,7 @@ def price_on_parametric(
 
     evidence = Evidence(
         produced_by="pricing.price_on_parametric",
+        inputs=inputs,
         fields={
             "instrument": instrument.describe(),
             "curve_kind": "parametric",
@@ -494,6 +624,7 @@ def price_on_parametric(
                 "so this difference is the cost of the smoothing, not an error in "
                 "either price."
             ),
+            **history,
         },
         sources=(fit.evidence,),
         warnings=merge_warnings(collateral_warnings(currency), instrument_warnings(instrument)),

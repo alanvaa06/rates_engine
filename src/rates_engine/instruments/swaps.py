@@ -15,6 +15,13 @@ calendar its dates roll on. Projecting the floating leg off a curve is
 :mod:`rates_engine.pricing.projection`'s job; the fixed leg needs no curve and
 is produced here.
 
+**A swap that has started is the same terms.** Nothing here knows the
+valuation date. :meth:`OISSwap.fixed_cashflows` returns the whole fixed leg,
+paid coupons included, because that is what was traded; which of them are
+left, and which published fixings the floating period in progress needs,
+are the projection's questions, answered against the curve set's
+``as_of``.
+
 **Sign convention.** A payer pays fixed and receives floating, so its fixed
 cashflows are negative and its floating cashflows positive. A receiver is the
 exact negation. Every DV01 and duration in this package inherits that.
