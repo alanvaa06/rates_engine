@@ -20,8 +20,21 @@ authors = [{ name = "Alan Vazquez" }]
 keywords = ["sofr", "rates", "curve", "swap", "swaption", "sabr", "volatility", "futures", "convexity", "dv01", "quant"]
 classifiers = [
     "Programming Language :: Python :: 3",
+    # One per version CI runs the suite on; a version listed here and not in
+    # the matrix is a promise nothing checks.
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    # Beta rather than Production/Stable: before 1.0 a minor release may
+    # break the API, and the CHANGELOG says when one does.
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Financial and Insurance Industry",
     "Operating System :: OS Independent",
     "Topic :: Office/Business :: Financial :: Investment",
+    # The package ships py.typed.
+    "Typing :: Typed",
 ]
 # Three, and no more. Everything the library computes is arithmetic over
 # dates and discount factors: numpy carries the vectors, scipy supplies the
