@@ -10,13 +10,11 @@ the other reason it is written this way.
 
 from __future__ import annotations
 
-import csv
-import io
 from datetime import UTC, date, datetime
 
 from rates_engine.core.evidence import Provenance
 from rates_engine.market.classify import classify_series
-from rates_engine.market.providers.file import is_missing_value
+from rates_engine.market.providers.file import parse_series_csv
 from rates_engine.market.snapshot import MarketSnapshot, Series
 
 __all__ = ["FRED_CSV_URL", "fetch_series", "fetch_snapshot"]
@@ -25,22 +23,37 @@ FRED_CSV_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
 """CSV endpoint. No API key, one series per request."""
 
 
-def fetch_series(series_id: str, *, timeout: float = 30.0) -> Series:
+def fetch_series(series_id: str, *, timeout: float = 30.0, percent: bool | None = None) -> Series:
     """Download one FRED series.
+
+    The response is read by :func:`~rates_engine.market.providers.file.parse_series_csv`,
+    the same reader that loads a FRED CSV saved to disk, so the two come out
+    identical.
 
     Args:
         series_id: FRED identifier, e.g. ``"SOFR"`` or ``"DGS2"``.
         timeout: Socket timeout in seconds.
+        percent: Whether FRED publishes the series in percent, to be divided
+            by 100 into decimals. ``None`` uses
+            :func:`~rates_engine.market.classify.quoted_in_percent`: the
+            overnight rates, the SOFR averages and the ``DGS*`` yields are in
+            percent, ``SOFRINDEX`` is an index level and is not divided, and
+            any other series has to say.
 
     Returns:
-        The :class:`~rates_engine.market.snapshot.Series`. Percent-quoted
-        series — every rate FRED publishes — are divided by 100 so that the
-        values are decimals throughout this package.
+        The :class:`~rates_engine.market.snapshot.Series`, rates as decimals
+        throughout this package.
 
     Raises:
         OSError: The request failed. Not wrapped in a package exception: a
             network failure is the environment's, not the engine's, and the
             original error says more than a rewrapped one would.
+        UnsupportedConventionError: ``percent`` is ``None`` and the series is
+            not one whose units this package knows. Every series used to be
+            divided by 100, which is right for a rate and a hundredfold
+            error for an index or an exchange rate.
+        InsufficientDataError: The response holds no observations.
+        ValueError: The response is not FRED's CSV of this series.
     """
     from urllib.request import urlopen
 
@@ -48,17 +61,9 @@ def fetch_series(series_id: str, *, timeout: float = 30.0) -> Series:
     with urlopen(url, timeout=timeout) as response:  # noqa: S310 - fixed https host
         payload = response.read().decode("utf-8")
     retrieved = datetime.now(UTC)
-
-    rows: list[tuple[date, float]] = []
-    reader = csv.reader(io.StringIO(payload))
-    header = next(reader)
-    value_index = 1 if len(header) > 1 else 0
-    for row in reader:
-        raw = row[value_index].strip()
-        if is_missing_value(raw):
-            continue
-        rows.append((date.fromisoformat(row[0].strip()), float(raw) / 100.0))
-    rows.sort(key=lambda item: item[0])
+    rows = parse_series_csv(
+        payload, series_id, percent=percent, origin=f"FRED's response for {series_id!r}"
+    )
 
     kind, quality, note = classify_series(series_id)
     return Series(
@@ -91,6 +96,10 @@ def fetch_snapshot(
 
     Raises:
         OSError: Any request failed.
+        UnsupportedConventionError: A series whose units this package does
+            not know. Fetch it with :func:`fetch_series` and ``percent=``,
+            and build the :class:`MarketSnapshot` from the series.
+        InsufficientDataError: A response held no observations.
     """
     return MarketSnapshot(
         as_of=as_of,

@@ -7,7 +7,11 @@ from datetime import date
 import pytest
 
 from rates_engine.conventions.calendar import SIFMA_US
-from rates_engine.core.errors import MissingFixingError
+from rates_engine.core.errors import (
+    InsufficientDataError,
+    MissingFixingError,
+    UnsupportedConventionError,
+)
 from rates_engine.core.evidence import DataQuality, Provenance
 from rates_engine.market.classify import TREASURY_PAR_YIELD
 from rates_engine.market.providers.file import (
@@ -81,6 +85,76 @@ class TestLoading:
         path = tmp_path / "infinite.csv"
         path.write_text(f"date,value\n2026-01-05,0.0431\n2026-01-06,{value}\n", encoding="utf-8")
         with pytest.raises(ValueError, match="2026-01-06"):
+            load_series_csv(path, "SOFR")
+
+
+#: The review's FRED download, as fredgraph.csv writes it: in percent.
+FRED_CSV = "observation_date,SOFR\n2026-01-12,3.64\n2026-01-13,.\n2026-01-14,3.65\n"
+
+
+class TestUnits:
+    """The units a file is read in are stated or known, never assumed by accident."""
+
+    def test_a_fred_download_loads_in_decimals_with_the_default_columns(self, tmp_path):
+        # Used to load zero observations, without an error.
+        path = tmp_path / "SOFR.csv"
+        path.write_text(FRED_CSV, encoding="utf-8")
+        series = load_series_csv(path, "SOFR")
+        assert series.dates == (date(2026, 1, 12), date(2026, 1, 14))
+        assert series.values == (pytest.approx(0.0364), pytest.approx(0.0365))
+
+    def test_naming_fred_s_columns_reads_the_same_units(self, tmp_path):
+        # Used to load 3.64, a hundred times too large, marked observed.
+        path = tmp_path / "SOFR.csv"
+        path.write_text(FRED_CSV, encoding="utf-8")
+        series = load_series_csv(
+            path, "SOFR", value_column="SOFR", date_column="observation_date"
+        )
+        assert series.values == (pytest.approx(0.0364), pytest.approx(0.0365))
+        assert series.provenance.data_quality is DataQuality.OBSERVED
+
+    def test_the_package_s_own_layout_is_decimals(self, tmp_path):
+        path = tmp_path / "sofr.csv"
+        path.write_text("date,value\n2026-01-12,0.0364\n", encoding="utf-8")
+        assert load_series_csv(path, "SOFR").values == (0.0364,)
+
+    def test_stated_units_win_in_either_layout(self, tmp_path):
+        fred_file = tmp_path / "SOFR.csv"
+        fred_file.write_text(FRED_CSV, encoding="utf-8")
+        own = tmp_path / "own.csv"
+        own.write_text("date,value\n2026-01-12,3.64\n", encoding="utf-8")
+        assert load_series_csv(fred_file, "SOFR", percent=False).values == (3.64, 3.65)
+        assert load_series_csv(own, "SOFR", percent=True).values == (pytest.approx(0.0364),)
+
+    def test_a_fred_series_of_unknown_units_refuses_until_they_are_stated(self, tmp_path):
+        path = tmp_path / "DEXMXUS.csv"
+        path.write_text("observation_date,DEXMXUS\n2026-01-12,17.5\n", encoding="utf-8")
+        with pytest.raises(UnsupportedConventionError, match="percent="):
+            load_series_csv(path, "DEXMXUS")
+        assert load_series_csv(path, "DEXMXUS", percent=False).values == (17.5,)
+
+    def test_a_fred_file_holding_another_series_refuses(self, tmp_path):
+        path = tmp_path / "DGS2.csv"
+        path.write_text("observation_date,DGS2\n2026-01-12,4.05\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="DGS2"):
+            load_series_csv(path, "SOFR")
+
+    def test_columns_that_are_not_there_refuse_rather_than_reading_nothing(self, tmp_path):
+        path = tmp_path / "other.csv"
+        path.write_text("day,rate\n2026-01-12,0.0364\n", encoding="utf-8")
+        with pytest.raises(ValueError) as excinfo:
+            load_series_csv(path, "SOFR")
+        message = str(excinfo.value)
+        assert "day" in message and "rate" in message
+        assert "date_column=" in message
+
+    @pytest.mark.parametrize(
+        "text", ["", "date,value\n", "date,value\n2026-01-12,.\n2026-01-13,nan\n"]
+    )
+    def test_a_file_that_yields_no_observations_refuses(self, tmp_path, text):
+        path = tmp_path / "empty.csv"
+        path.write_text(text, encoding="utf-8")
+        with pytest.raises(InsufficientDataError, match="empty.csv"):
             load_series_csv(path, "SOFR")
 
 
