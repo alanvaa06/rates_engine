@@ -117,6 +117,7 @@ which is a choice the payload carries.
 ## Links
 
 - Source: https://github.com/alanvaa06/rates_engine
+- API reference, rendered from the docstrings: https://alanvaa06.github.io/rates_engine/
 - Agent notes: AGENTS.md
 - Architecture and layers: docs/architecture/ARCHITECTURE.md
 - Refusal contract: docs/ERRORS.md
