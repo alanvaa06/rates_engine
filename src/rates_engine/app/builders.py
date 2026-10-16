@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import math
 from datetime import date, timedelta
-from typing import Any
+from typing import Any, NamedTuple
 
 from rates_engine.app.config import as_date
 from rates_engine.conventions.daycount import CURVE_TIME_BASIS, year_fraction
@@ -179,11 +179,21 @@ def flat_curve(as_of: date, rate: float, currency: Currency, years: float) -> Di
     goes through the same discounting code every other price does, rather
     than through a second exponential written out in the command.
 
+    The rate is read as **continuously compounded on ACT/365F**, the curve's
+    own time basis: ``P(t) = exp(-rate * t)`` with ``t`` in ACT/365F years.
+    A money-market quote — simple interest on ACT/360, which is how SOFR and
+    TIIE are published — is a different number for the same rate and has to
+    be converted before it is passed here; read as continuous, a USD/MXN pair
+    of such quotes moves the one-year forward by hundreds of pips.
+
     Args:
         as_of: Valuation date.
-        rate: Continuously compounded rate as a decimal a year.
+        rate: Continuously compounded rate on ACT/365F, as a decimal a year.
         currency: What the curve discounts.
-        years: Horizon in years; the single node sits at the nearest day.
+        years: Horizon in ACT/365F years; the single node sits at the
+            nearest day, and log-linear interpolation between it and
+            ``as_of`` keeps ``P(t) = exp(-rate * t)`` exact at every date in
+            between, the spot date included.
 
     Returns:
         The curve.
@@ -193,18 +203,67 @@ def flat_curve(as_of: date, rate: float, currency: Currency, years: float) -> Di
     return DiscountCurve(as_of, (node,), (math.exp(-rate * span),), currency=currency)
 
 
-def fx_inputs(config: dict[str, Any]) -> tuple[date, dict[str, Any], float]:
-    """The valuation date, the ``fx`` block and the years to delivery.
+_FX_REQUIRED = ("spot", "delivery", "r_domestic", "r_foreign")
+
+_RATE_CONVENTION_NOTE = (
+    "Read as a continuously compounded rate on ACT/365F, as a decimal a year: "
+    "P(t) = exp(-r t). A money-market quote (simple interest on ACT/360, how SOFR "
+    "and TIIE are published) is a different number for the same rate and must be "
+    "converted first."
+)
+
+
+class FXInputs(NamedTuple):
+    """The ``fx`` block, read once for both FX commands.
+
+    Attributes:
+        as_of: Valuation (trade) date.
+        delivery: Delivery date of the forward, which is also when the
+            exposure settles.
+        spot: Spot rate, MXN per USD, for delivery on the spot date.
+        r_domestic: The peso rate, continuously compounded on ACT/365F, as a
+            decimal a year.
+        r_foreign: The dollar rate, in the same convention.
+        basis_bp: Cross-currency basis in basis points, a spread on the peso
+            leg; zero when the block has none.
+        years: ACT/365F years from ``as_of`` to delivery, the horizon of the
+            two flat curves.
+        provenance: How the two rates were read, for the result's evidence.
+        block: The block itself, for the keys only one command reads.
+    """
+
+    as_of: date
+    delivery: date
+    spot: float
+    r_domestic: float
+    r_foreign: float
+    basis_bp: float
+    years: float
+    provenance: tuple[Provenance, ...]
+    block: dict[str, Any]
+
+
+def fx_inputs(config: dict[str, Any]) -> FXInputs:
+    """The ``fx`` block, read and checked, with the years to delivery.
+
+    ``r_domestic`` (MXN) and ``r_foreign`` (USD) are read as
+    **continuously compounded rates on ACT/365F**, as decimals a year — the
+    convention of :func:`flat_curve` and of Garman-Kohlhagen — and the
+    result's evidence says so in one
+    :class:`~rates_engine.core.evidence.Provenance` per rate.
+    ``spot`` is the price for delivery on the pair's spot date, two joint
+    business days after ``as_of``; the forward and the option structures
+    both run from there.
 
     Args:
         config: The whole configuration mapping.
 
     Returns:
-        ``(as_of, fx_block, years_to_delivery)``, years on the curve's time
-        basis.
+        The :class:`FXInputs`.
 
     Raises:
-        ConfigurationError: The ``fx`` block is missing or empty.
+        ConfigurationError: The ``fx`` block is missing or empty, or lacks
+            one of ``spot``, ``delivery``, ``r_domestic`` and ``r_foreign``.
     """
     block = config.get("fx") or {}
     if not block:
@@ -212,6 +271,33 @@ def fx_inputs(config: dict[str, Any]) -> tuple[date, dict[str, Any], float]:
             "this command needs an `fx` block with spot, delivery, r_domestic and "
             "r_foreign. See `rateng describe --json` for the shape."
         )
+    missing = [key for key in _FX_REQUIRED if block.get(key) is None]
+    if missing:
+        raise ConfigurationError(
+            f"the `fx` block is missing {', '.join(missing)}; it needs spot, delivery, "
+            "r_domestic and r_foreign (continuously compounded, ACT/365F, decimals)."
+        )
     as_of = as_date(config["as_of"])
     delivery = as_date(block["delivery"])
-    return as_of, block, year_fraction(as_of, delivery, CURVE_TIME_BASIS)
+    r_domestic = float(block["r_domestic"])
+    r_foreign = float(block["r_foreign"])
+    provenance = tuple(
+        Provenance(
+            source="config",
+            series_id=f"fx.{key}",
+            instrument_kind="continuously_compounded_rate_act365f",
+            notes=f"{currency} rate. {_RATE_CONVENTION_NOTE}",
+        )
+        for key, currency in (("r_domestic", "MXN"), ("r_foreign", "USD"))
+    )
+    return FXInputs(
+        as_of=as_of,
+        delivery=delivery,
+        spot=float(block["spot"]),
+        r_domestic=r_domestic,
+        r_foreign=r_foreign,
+        basis_bp=float(block.get("basis_bp", 0.0)),
+        years=year_fraction(as_of, delivery, CURVE_TIME_BASIS),
+        provenance=provenance,
+        block=block,
+    )

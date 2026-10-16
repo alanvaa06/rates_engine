@@ -307,20 +307,19 @@ def fx_forward(config: dict[str, Any] | None) -> dict[str, Any]:
 
     Returns:
         The ``FXForwardResult`` payload, the basis reported apart from the
-        covered-interest-parity forward.
+        covered-interest-parity forward, parity run from the spot date, and
+        the two rates' convention (continuous, ACT/365F) in the evidence.
     """
     config = require_config(config, "fx-forward")
-    as_of, block, years = fx_inputs(config)
-    delivery = as_date(block["delivery"])
-    domestic = flat_curve(as_of, float(block["r_domestic"]), Currency.MXN, years)
-    foreign = flat_curve(as_of, float(block["r_foreign"]), Currency.USD, years)
+    inputs = fx_inputs(config)
     result = forward_from_curves(
         USDMXN,
-        float(block["spot"]),
-        delivery,
-        domestic,
-        foreign,
-        basis_bp=float(block.get("basis_bp", 0.0)),
+        inputs.spot,
+        inputs.delivery,
+        flat_curve(inputs.as_of, inputs.r_domestic, Currency.MXN, inputs.years),
+        flat_curve(inputs.as_of, inputs.r_foreign, Currency.USD, inputs.years),
+        basis_bp=inputs.basis_bp,
+        inputs=inputs.provenance,
     )
     return result_payload(result, command="fx-forward")
 
@@ -336,24 +335,47 @@ def hedge_structures(config: dict[str, Any] | None) -> dict[str, Any]:
         when the config carries a ``hedge_program``.
     """
     config = require_config(config, "hedge-structures")
-    as_of, block, years = fx_inputs(config)
+    inputs = fx_inputs(config)
     exposure_block = config.get("exposure") or {}
     if not exposure_block:
         raise ConfigurationError(
             "hedge-structures needs an `exposure` block with amount and direction "
             "('payable' or 'receivable')."
         )
+    if inputs.block.get("volatility") is None:
+        raise ConfigurationError(
+            "hedge-structures needs `fx.volatility`, the lognormal volatility as a "
+            "decimal (0.115 for 11.5%)."
+        )
+    # The same forward fx-forward reports, from the same curves: parity from
+    # the spot date, with the block's basis. Its evidence carries the peso
+    # curve's assumptions into every row, and its span is the structures'
+    # expiry -- the premium is paid on the spot date, and an option
+    # delivering on the settlement date expires the spot lag before it.
+    # Before, this command ignored basis_bp and measured from as_of, and its
+    # forward row sat 1,941 pips from fx-forward at a year on -100 bp.
+    forward = forward_from_curves(
+        USDMXN,
+        inputs.spot,
+        inputs.delivery,
+        flat_curve(inputs.as_of, inputs.r_domestic, Currency.MXN, inputs.years),
+        flat_curve(inputs.as_of, inputs.r_foreign, Currency.USD, inputs.years),
+        basis_bp=inputs.basis_bp,
+        inputs=inputs.provenance,
+    )
     quote = StructureQuote(
-        spot=float(block["spot"]),
-        expiry=years,
-        r_domestic=float(block["r_domestic"]),
-        r_foreign=float(block["r_foreign"]),
-        volatility=float(block["volatility"]),
+        spot=inputs.spot,
+        expiry=forward.year_fraction,
+        r_domestic=inputs.r_domestic,
+        r_foreign=inputs.r_foreign,
+        volatility=float(inputs.block["volatility"]),
+        evidence=(forward.evidence,),
+        basis_bp=inputs.basis_bp,
     )
     exposure = Exposure(
         amount=float(exposure_block["amount"]),
         direction=ExposureDirection(str(exposure_block["direction"])),
-        settlement=as_date(block["delivery"]),
+        settlement=inputs.delivery,
         pair=USDMXN,
     )
     comparison = compare_structures(

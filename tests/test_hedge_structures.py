@@ -594,3 +594,53 @@ class TestTheUnderlyingPricesAreRight:
         assert row.upfront_cost == pytest.approx(
             QUOTE.price(bought[1], OptionKind.CALL) - QUOTE.price(sold[1], OptionKind.CALL)
         )
+
+
+class TestTheBasisReachesTheStructures:
+    """A cross-currency basis moves the forward every structure is struck on.
+
+    The basis is a spread on the quote leg (`pricing.fx_forward.BASIS_LEG`):
+    the peso rate between spot and delivery is `r_d + b`. That moves the
+    outright exactly as `forward_from_curves` does, and the peso premium is
+    carried on the same shifted rate. Before, `StructureQuote` had no basis
+    at all and the CLI dropped the config's, so hedge-structures' forward row
+    sat 1,941 pips from fx-forward at one year on -100 bp.
+    """
+
+    BASIS = -25.0
+
+    @pytest.fixture
+    def quote(self):
+        return StructureQuote(18.50, 0.25, 0.0950, 0.0420, 0.115, basis_bp=self.BASIS)
+
+    def test_the_forward_carries_the_basis(self, quote):
+        assert quote.forward == pytest.approx(
+            18.50 * math.exp((0.0950 - 0.0025 - 0.0420) * 0.25), rel=1e-14
+        )
+
+    def test_the_forward_row_locks_there(self, quote):
+        row = compare_structures(_exposure(), quote).by_name("forward")
+        assert row.worst_case_rate == pytest.approx(quote.forward)
+        assert row.best_case_rate == pytest.approx(quote.forward)
+        assert quote.forward < QUOTE.forward  # a negative basis lowers it
+
+    def test_an_option_is_priced_on_the_shifted_peso_rate(self, quote):
+        strike = 18.80
+        assert quote.price(strike, OptionKind.CALL) == pytest.approx(
+            gk.price(18.50, strike, 0.25, 0.0925, 0.0420, 0.115, OptionKind.CALL), rel=1e-14
+        )
+
+    def test_the_payload_states_the_basis_and_its_leg(self, quote):
+        stored = quote.to_dict()
+        assert stored["basis_bp"] == self.BASIS
+        assert stored["basis_leg"] == "quote"
+        assert stored["r_domestic"] == 0.0950
+        assert stored["r_domestic_effective"] == pytest.approx(0.0925)
+
+    def test_no_basis_changes_nothing(self):
+        assert QUOTE.basis_bp == 0.0
+        assert QUOTE.forward == gk.forward(18.50, 0.25, 0.0950, 0.0420)
+
+    def test_an_implausible_basis_refuses(self):
+        with pytest.raises(ImplausibleInputError, match="500 bp"):
+            StructureQuote(18.50, 0.25, 0.0950, 0.0420, 0.115, basis_bp=-900.0)

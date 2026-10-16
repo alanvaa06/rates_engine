@@ -92,7 +92,7 @@ from rates_engine.core.errors import (
     CurveMismatchError,
     ImplausibleInputError,
 )
-from rates_engine.core.evidence import Degradation, Evidence
+from rates_engine.core.evidence import Degradation, Evidence, Provenance
 from rates_engine.core.results import EngineResult
 from rates_engine.curves.discount import CurveSet, DiscountCurve
 from rates_engine.pricing.collateral import curve_warnings, merge_warnings
@@ -102,6 +102,7 @@ __all__ = [
     "FXForwardResult",
     "forward_from_curves",
     "implied_basis",
+    "require_plausible_basis",
     "MAX_PLAUSIBLE_BASIS_BP",
     "CIP_BROKEN_NOTE",
 ]
@@ -147,7 +148,8 @@ class FXForwardResult(EngineResult):
         pair: The pair, carrying the pip the points are counted in.
         delivery: The delivery date.
         spot_date: The date the spot settles on, which parity runs from.
-            ``None`` only for a result built by hand without one.
+        year_fraction: Years from the spot date to delivery on the curves'
+            time basis (ACT/365F): the span parity and the basis accrue over.
     """
 
     outright: float
@@ -160,7 +162,8 @@ class FXForwardResult(EngineResult):
     spot: float
     pair: CurrencyPair
     delivery: date
-    spot_date: date | None = None
+    spot_date: date
+    year_fraction: float
 
     def payload_fields(self) -> dict[str, Any]:
         """Both halves, in rate terms and in pips, and never only the sum."""
@@ -174,8 +177,9 @@ class FXForwardResult(EngineResult):
             "basis_points_contribution": self.basis_points_contribution,
             "basis_leg": BASIS_LEG,
             "spot": self.spot,
-            "spot_date": self.spot_date.isoformat() if self.spot_date else None,
+            "spot_date": self.spot_date.isoformat(),
             "delivery": self.delivery.isoformat(),
+            "year_fraction": self.year_fraction,
             **self.pair.to_dict(),
             "cip_note": CIP_BROKEN_NOTE,
         }
@@ -236,7 +240,19 @@ def _spot_date(pair: CurrencyPair, delivery: date, as_of: date) -> date:
     return spot_date
 
 
-def _plausible(basis_bp: float) -> None:
+def require_plausible_basis(basis_bp: float) -> None:
+    """Refuse a basis outside :data:`MAX_PLAUSIBLE_BASIS_BP`.
+
+    Public so that everything taking a basis — this module's forward and
+    :class:`~rates_engine.hedging.fx_structures.StructureQuote` — refuses the
+    same numbers with the same message.
+
+    Args:
+        basis_bp: Cross-currency basis in basis points.
+
+    Raises:
+        ImplausibleInputError: It is not finite or is outside the band.
+    """
     if not math.isfinite(basis_bp) or abs(basis_bp) > MAX_PLAUSIBLE_BASIS_BP:
         raise ImplausibleInputError(
             f"a cross-currency basis of {basis_bp:.1f} bp is outside the "
@@ -256,6 +272,7 @@ def forward_from_curves(
     *,
     basis_bp: float = 0.0,
     source_evidence: tuple[Evidence, ...] = (),
+    inputs: tuple[Provenance, ...] = (),
 ) -> FXForwardResult:
     """The outright forward, with the basis kept separate from the parity part.
 
@@ -280,6 +297,9 @@ def forward_from_curves(
             a cross-currency swap quotes; the module docstring says how the
             two differ.
         source_evidence: Evidence of the curves, chained in.
+        inputs: Provenance of the numbers the curves were built from, when
+            they were not bootstrapped — the CLI's two rates, and the
+            compounding and day count they are read in.
 
     Returns:
         The :class:`FXForwardResult`. Its evidence carries the curves'
@@ -294,7 +314,7 @@ def forward_from_curves(
             spot date.
     """
     _check(pair, domestic, foreign)
-    _plausible(basis_bp)
+    require_plausible_basis(basis_bp)
     if not spot > 0.0:
         raise ValueError(f"a spot rate is positive; got {spot!r}")
     if delivery <= domestic.as_of:
@@ -320,6 +340,7 @@ def forward_from_curves(
 
     evidence = Evidence(
         produced_by="fx.forward_from_curves",
+        inputs=inputs,
         fields={
             "pair": pair.name,
             "spot": spot,
@@ -358,6 +379,7 @@ def forward_from_curves(
         pair=pair,
         delivery=delivery,
         spot_date=spot_date,
+        year_fraction=years,
     )
 
 
@@ -423,7 +445,7 @@ def implied_basis(
     )
     years = domestic.time(delivery) - domestic.time(spot_date)
     basis_bp = math.log(market_forward / parity) / years * 1e4
-    _plausible(basis_bp)
+    require_plausible_basis(basis_bp)
 
     evidence = Evidence(
         produced_by="fx.implied_basis",
@@ -465,4 +487,5 @@ def implied_basis(
         pair=pair,
         delivery=delivery,
         spot_date=spot_date,
+        year_fraction=years,
     )

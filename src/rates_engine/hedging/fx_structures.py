@@ -41,6 +41,7 @@ from rates_engine.core.errors import ImplausibleInputError
 from rates_engine.core.evidence import Evidence
 from rates_engine.core.results import EngineResult
 from rates_engine.models import garman_kohlhagen as gk
+from rates_engine.pricing.fx_forward import BASIS_LEG, require_plausible_basis
 
 __all__ = [
     "STRUCTURE_NAMES",
@@ -183,10 +184,16 @@ class StructureQuote:
     """The market a comparison is struck on.
 
     Attributes:
-        spot: Spot rate.
-        expiry: Time to settlement in years.
-        r_domestic: Quote currency rate.
-        r_foreign: Base currency rate.
+        spot: Spot rate, quote currency per unit of base.
+        expiry: Years from the spot date — when an option premium is paid —
+            to settlement. Measured from the spot date rather than the
+            valuation date so that the forward these rates imply is the one
+            :func:`~rates_engine.pricing.fx_forward.forward_from_curves`
+            returns; an option delivering on the settlement date expires the
+            spot lag before it, so the same span is its life.
+        r_domestic: Quote currency rate, continuously compounded, as a
+            decimal a year on the same time basis as ``expiry``.
+        r_foreign: Base currency rate, the same convention.
         volatility: One of three things. A ``float`` is a single lognormal
             volatility for every leg. A :class:`ReadableSmile` — anything
             with ``volatility_at(strike)`` returning a reading, which is
@@ -200,6 +207,14 @@ class StructureQuote:
             curves, typically. Without it a structure priced on an MXN curve
             does not inherit that curve's ASSUMED quality, which two places
             in this package promise it does.
+        basis_bp: Cross-currency basis in basis points, a spread on the
+            quote currency leg as in :mod:`rates_engine.pricing.fx_forward`
+            (:data:`~rates_engine.pricing.fx_forward.BASIS_LEG`). The quote
+            currency's rate becomes ``r_domestic + basis``: the forward
+            moves exactly as ``forward_from_curves`` moves it, and the
+            options and the premium carry use the same shifted rate, which
+            is the curve that forward implicitly discounts on. Zero, the
+            default, is the parity forward.
     """
 
     spot: float
@@ -208,6 +223,15 @@ class StructureQuote:
     r_foreign: float
     volatility: float | ReadableSmile | Callable[[float], float]
     evidence: tuple[Evidence, ...] = ()
+    basis_bp: float = 0.0
+
+    def __post_init__(self) -> None:
+        require_plausible_basis(self.basis_bp)
+
+    @property
+    def r_domestic_effective(self) -> float:
+        """The quote currency rate with the basis on it, as a decimal a year."""
+        return self.r_domestic + self.basis_bp * 1e-4
 
     @property
     def _smile(self) -> ReadableSmile | None:
@@ -241,15 +265,27 @@ class StructureQuote:
 
     @property
     def forward(self) -> float:
-        """The outright forward these rates imply."""
-        return gk.forward(self.spot, self.expiry, self.r_domestic, self.r_foreign)
+        """The outright forward these rates and the basis imply."""
+        return gk.forward(self.spot, self.expiry, self.r_domestic_effective, self.r_foreign)
 
     def price(self, strike: float, kind: OptionKind) -> float:
-        """One option, per unit of base currency."""
+        """One option, per unit of base currency, on the basis-adjusted forward."""
         return gk.price(
-            self.spot, strike, self.expiry, self.r_domestic, self.r_foreign,
+            self.spot, strike, self.expiry, self.r_domestic_effective, self.r_foreign,
             self.vol_at(strike), kind,
         )
+
+    def carried(self, premium: float) -> float:
+        """A premium paid on the spot date, carried to settlement.
+
+        Args:
+            premium: Quote currency per unit of base, paid on the spot date.
+
+        Returns:
+            The same amount at settlement, grown at the basis-adjusted quote
+            currency rate.
+        """
+        return premium * math.exp(self.r_domestic_effective * self.expiry)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialise the market, saying whether a smile was used."""
@@ -259,6 +295,10 @@ class StructureQuote:
             "expiry": self.expiry,
             "r_domestic": self.r_domestic,
             "r_foreign": self.r_foreign,
+            "rate_convention": "continuously compounded, decimal a year",
+            "basis_bp": self.basis_bp,
+            "basis_leg": BASIS_LEG,
+            "r_domestic_effective": self.r_domestic_effective,
             "volatility_source": (
                 "smile"
                 if self._smile is not None
@@ -430,11 +470,11 @@ def _effective_rate(
     for a receivable it is what each unit fetches, and higher is better.
 
     The premium is carried forward to settlement at the quote currency's
-    rate, because it is paid today and the exposure settles later, and
-    comparing a cost paid now with one paid then without that step
-    understates every option structure.
+    rate, because it is paid on the spot date and the exposure settles
+    later, and comparing a cost paid now with one paid then without that
+    step understates every option structure.
     """
-    carried = upfront * math.exp(quote.r_domestic * quote.expiry)
+    carried = quote.carried(upfront)
     hedged_fraction = abs(forward_amount) / exposure.amount
     open_fraction = 1.0 - hedged_fraction
     rate = open_fraction * spot + hedged_fraction * forward_rate
@@ -506,8 +546,7 @@ def _structure(
             ],
             "forward_amount": forward_amount,
             "forward_rate": outright,
-            "premium_carried_to_settlement": upfront
-            * math.exp(quote.r_domestic * quote.expiry),
+            "premium_carried_to_settlement": quote.carried(upfront),
             **quote.to_dict(),
             **exposure.to_dict(),
         },
