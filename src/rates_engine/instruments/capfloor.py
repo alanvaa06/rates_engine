@@ -36,7 +36,7 @@ from functools import cached_property
 from typing import Any
 
 from rates_engine.conventions.calendar import BusinessDayConvention, HolidayCalendar
-from rates_engine.conventions.daycount import DayCount, year_fraction
+from rates_engine.conventions.daycount import CURVE_TIME_BASIS, DayCount, year_fraction
 from rates_engine.conventions.indices import TERM_SOFR_3M, RateIndex, term_sofr
 from rates_engine.conventions.option_kind import OptionKind
 from rates_engine.conventions.schedule import Schedule
@@ -110,6 +110,19 @@ class Caplet:
         the day after Martin Luther King Day, fixes on Thursday the 14th.
         """
         return self.index.calendar.add_business_days(self.accrual_start, -self.fixing_lag_days)
+
+    def time_to_expiry(self, as_of: date, *, day_count: DayCount = CURVE_TIME_BASIS) -> float:
+        """Years from a valuation date to :attr:`fixing_date`, where the option ends.
+
+        Args:
+            as_of: Valuation date.
+            day_count: Basis for the year fraction. The curve's own basis by
+                default, so option time and curve time agree.
+
+        Returns:
+            The time in years, zero at or after the fixing.
+        """
+        return max(year_fraction(as_of, self.fixing_date, day_count), 0.0)
 
     @property
     def rate_index(self) -> RateIndex:

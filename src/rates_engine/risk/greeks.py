@@ -4,6 +4,15 @@ Split from :mod:`rates_engine.risk.sensitivities` because an option's greeks
 bump two things -- the curve and the volatility -- and read the price from
 :mod:`rates_engine.pricing.options` rather than from a cashflow sum. The rate
 bump is the same zero-curve shift every other measure uses.
+
+**Theta is the decay of optionality and nothing else.** Every option's time
+to expiry is one calendar day shorter; the curves are *not* rolled, so the
+carry of the numeraire -- roughly ``r * V`` a day, which on a ten-year
+swaption at 4% is larger than the decay itself -- is not in it, and no period
+is re-classified, so a fixing, a payment or an expiry that falls tomorrow
+neither drops out of the price nor asks for a fixing that does not exist yet.
+That is a choice, stated because the other one is as common: a desk theta
+that rolls the curve forward a day answers a different question.
 """
 
 from __future__ import annotations
@@ -17,18 +26,69 @@ from rates_engine.core.results import EngineResult
 from rates_engine.curves.discount import CurveSet
 from rates_engine.instruments.capfloor import CapFloor
 from rates_engine.instruments.swaption import Swaption
+from rates_engine.market.snapshot import MarketSnapshot
 from rates_engine.pricing.collateral import valuation_warnings
 from rates_engine.pricing.options import (
+    PeriodStatus,
+    cap_floor_periods,
     cap_floor_pv,
     caplet_forward_rate,
     forward_swap_rate,
     model_for,
+    option_value,
+    swaption_annuity,
     swaption_pv,
 )
 from rates_engine.risk.bumps import BUMP_BP, shifted
 from rates_engine.volatility.units import Volatility, VolUnits
 
 __all__ = ["GreeksResult", "option_greeks"]
+
+
+def _decayed_one_day(
+    option: Swaption | CapFloor,
+    curve_set: CurveSet,
+    volatility: Volatility,
+    valuation: date,
+    fixings: MarketSnapshot | None,
+) -> float:
+    """The price with every expiry measured from tomorrow and nothing else moved.
+
+    Away from any event this is exactly the price at ``as_of`` tomorrow, the
+    same arithmetic in the same order. It differs where tomorrow is an event:
+    a swaption expiring then decays to its intrinsic value rather than being
+    refused as expired, and a caplet fixing then decays to its intrinsic value
+    on the forward rather than asking for a fixing that is not published yet.
+    """
+    tomorrow = valuation + timedelta(days=1)
+    if isinstance(option, Swaption):
+        return option_value(
+            volatility,
+            forward_swap_rate(option, curve_set),
+            option.strike,
+            option.time_to_expiry(tomorrow),
+            option.kind,
+            swaption_annuity(option, curve_set),
+        )
+    values = []
+    for period in cap_floor_periods(
+        option, curve_set, volatility, as_of=valuation, fixings=fixings
+    ):
+        if period.status is not PeriodStatus.LIVE or period.forward is None:
+            values.append(period.value)
+            continue
+        caplet = period.caplet
+        values.append(
+            option_value(
+                volatility,
+                period.forward,
+                caplet.strike,
+                caplet.time_to_expiry(tomorrow),
+                caplet.kind,
+                period.numeraire,
+            )
+        )
+    return sum(values)
 
 
 @dataclass(frozen=True)
@@ -43,9 +103,12 @@ class GreeksResult(EngineResult):
         vega: Change in value per basis point of *normal* volatility. Reported on the normal basis whatever model
             priced the option, because that is what the market quotes and
             what two desks can compare.
-        theta: Change in value for one calendar day passing, per day.
-            Negative for a long option, which is the whole of what a long
-            option costs to hold.
+        theta: Change in value when every option's time to expiry is one
+            calendar day shorter, per day. Only the decay of volatility time
+            value: the curves are not rolled, so the numeraire's carry is
+            not in it, and nothing that happens tomorrow -- a fixing, a
+            payment, the expiry itself -- is re-classified. Negative for a
+            long option.
         value: The unbumped price.
         rate_bump_bp: Curve bump used, in basis points.
         vol_bump_bp: Volatility bump used, in basis points of normal vol.
@@ -88,6 +151,7 @@ def option_greeks(
     rate_bump_bp: float = BUMP_BP,
     vol_bump_bp: float = 1.0,
     as_of: date | None = None,
+    fixings: MarketSnapshot | None = None,
     source_evidence: tuple[Evidence, ...] = (),
 ) -> GreeksResult:
     """Delta, gamma, vega and theta of a swaption or a cap, by bumping and repricing.
@@ -104,6 +168,11 @@ def option_greeks(
     normal equivalent and converted back, so two desks quoting different
     conventions still compare vegas.
 
+    Theta shortens every expiry by one calendar day and changes nothing else:
+    it is the decay of volatility time value only, with the curves not rolled
+    and every period's status -- paid, fixed, live -- held at the valuation
+    date. See the module docstring for why.
+
     Args:
         option: A :class:`~rates_engine.instruments.swaption.Swaption` or
             :class:`~rates_engine.instruments.capfloor.CapFloor`.
@@ -112,14 +181,20 @@ def option_greeks(
         rate_bump_bp: Curve bump in basis points.
         vol_bump_bp: Volatility bump in basis points of normal volatility.
         as_of: Valuation date. Defaults to the curve's.
+        fixings: Published fixings for a cap or floor with periods that have
+            already fixed, as :func:`~rates_engine.pricing.options.cap_floor_pv`
+            takes them. Ignored for a swaption.
         source_evidence: Evidence of the curves and the surface.
 
     Returns:
         The :class:`GreeksResult`.
 
     Raises:
-        ValueError: Either bump is not positive, or ``option`` is neither a
-            swaption nor a cap.
+        ValueError: Either bump is not positive, ``option`` is neither a
+            swaption nor a cap, a swaption has expired, or every period of a
+            cap has been paid.
+        MissingFixingError: A period of a cap has fixed and ``fixings`` does
+            not hold its fixing.
     """
 
     if rate_bump_bp <= 0.0 or vol_bump_bp <= 0.0:
@@ -134,14 +209,14 @@ def option_greeks(
     valuation = as_of or curve_set.as_of
     shift = rate_bump_bp * 1e-4
 
-    def at(curves: CurveSet, vol: Volatility, day: date) -> float:
+    def at(curves: CurveSet, vol: Volatility) -> float:
         if isinstance(option, Swaption):
-            return swaption_pv(option, curves, vol, as_of=day).value
-        return cap_floor_pv(option, curves, vol, as_of=day).value
+            return swaption_pv(option, curves, vol, as_of=valuation).value
+        return cap_floor_pv(option, curves, vol, as_of=valuation, fixings=fixings).value
 
-    base = at(curve_set, volatility, valuation)
-    up = at(shifted(curve_set, shift), volatility, valuation)
-    down = at(shifted(curve_set, -shift), volatility, valuation)
+    base = at(curve_set, volatility)
+    up = at(shifted(curve_set, shift), volatility)
+    down = at(shifted(curve_set, -shift), volatility)
     delta = (down - up) / 2.0 / rate_bump_bp
     gamma = (up + down - 2.0 * base) / (rate_bump_bp * rate_bump_bp)
 
@@ -160,9 +235,9 @@ def option_greeks(
         bumped_vol = Volatility.unchecked(
             (equivalent + vol_bump_bp) * 1e-4 / forward, VolUnits.LOGNORMAL_DECIMAL
         )
-    vega = (at(curve_set, bumped_vol, valuation) - base) / vol_bump_bp
+    vega = (at(curve_set, bumped_vol) - base) / vol_bump_bp
 
-    theta = at(curve_set, volatility, valuation + timedelta(days=1)) - base
+    theta = _decayed_one_day(option, curve_set, volatility, valuation, fixings) - base
 
     return GreeksResult(
         evidence=Evidence(
@@ -176,6 +251,10 @@ def option_greeks(
                 "vol_bump_bp": vol_bump_bp,
                 "vol_bump_basis": "normal_volatility",
                 "theta_basis": "one_calendar_day",
+                "theta_note": (
+                    "Volatility time decay only: every expiry one day shorter, the "
+                    "curves not rolled, no period re-classified."
+                ),
                 "difference": "central for delta and gamma, forward for vega and theta",
                 "method": "bump_and_reprice",
                 "method_note": (

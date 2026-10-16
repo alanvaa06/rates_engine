@@ -395,6 +395,33 @@ class TestSwaptionPricing:
                 side="long",
             )
 
+    @pytest.mark.parametrize("days_after", [0, 1, 400])
+    def test_an_expired_swaption_refuses(self, atm_swaption, option_curve_set, days_after):
+        # It used to price an expired option at its intrinsic value, as if
+        # the right to exercise still existed.
+        from datetime import timedelta
+
+        with pytest.raises(ValueError, match="expired"):
+            swaption_pv(
+                atm_swaption, option_curve_set, Volatility.normal_bp(80.0),
+                as_of=atm_swaption.expiry + timedelta(days=days_after),
+            )
+
+    def test_the_day_before_expiry_it_prices_and_theta_takes_the_last_day(
+        self, atm_swaption, option_curve_set
+    ):
+        from datetime import timedelta
+
+        vol = Volatility.normal_bp(80.0)
+        day_before = atm_swaption.expiry - timedelta(days=1)
+        value = swaption_pv(atm_swaption, option_curve_set, vol, as_of=day_before).value
+        greeks = option_greeks(atm_swaption, option_curve_set, vol, as_of=day_before)
+        # At the money the intrinsic value is zero, so a day's decay from the
+        # last day is the whole remaining value -- and theta must not trip
+        # over the expiry it decays into.
+        assert value > 0.0
+        assert greeks.theta == pytest.approx(-value, rel=1e-12)
+
     def test_a_peso_swaption_says_its_value_is_in_pesos(self):
         # The payload said "unit": "USD" for every option, while the greeks
         # of the same TIIE swaption said MXN_per_bp.
