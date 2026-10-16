@@ -257,6 +257,35 @@ def test_the_module_map_in_agents_md_lists_every_package():
     assert sorted(rows - present) == [], "in AGENTS.md, not in the package"
 
 
+def test_agents_md_names_every_module_that_reaches_the_network():
+    """AGENTS.md tells an agent which modules can dial out, and an agent
+    sandboxing this package believes it. The sentence named only the FRED
+    provider for as long as the Banxico one also called ``urlopen``, so the
+    list is checked against the imports rather than kept by hand."""
+    import re
+
+    network = ("urllib", "http", "socket", "ssl")
+    reaching = set()
+    for path in _modules():
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and not node.level:
+                names = [node.module or ""]
+            else:
+                continue
+            if any(name.split(".")[0] in network for name in names):
+                reaching.add(".".join(path.relative_to(ROOT).with_suffix("").parts))
+    assert reaching, "no module imports the network; the scan is broken"
+
+    text = (REPO / "AGENTS.md").read_text(encoding="utf-8")
+    claim = re.search(r"\*\*Nothing here reads the network except (.+?)\*\*", text, re.S)
+    assert claim, "AGENTS.md no longer says which modules read the network"
+    named = set(re.findall(r"`([\w.]+)`", claim.group(1)))
+    assert sorted(reaching - named) == [], "reaches the network, not named in AGENTS.md"
+    assert sorted(named - reaching) == [], "named in AGENTS.md, does not reach the network"
+
+
 def test_no_test_imports_another_test_module():
     """`tests` is not a package and is not installed, so `import
     tests.test_x` resolves only when the working directory happens to be on
