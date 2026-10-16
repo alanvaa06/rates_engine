@@ -371,6 +371,41 @@ class TestIncompleteStrip:
             )
 
 
+class TestCoverageWithOverlappingContracts:
+    """SR1 months traded under SR3 quarters overlap, and overlap is not a hole.
+
+    The check compared each contract only with the one starting next, so a
+    short contract inside a long one hid the long one's reach: the SR1/SR3
+    mix below was refused with a gap from 1 May to 17 June that the March
+    SR3 quarter covers to the day.
+    """
+
+    def test_an_overlapping_strip_with_no_hole_is_accepted(self):
+        instruments = _sr1_sr3_mix()
+        hedge = strip_hedge(_mix_swap(instruments), instruments, as_of=MIX_AS_OF)
+        assert hedge.evidence.fields["coverage_checked"] is True
+        assert len(hedge.contracts) == 6
+
+    def test_a_real_hole_in_an_overlapping_strip_is_still_named(self):
+        instruments = tuple(
+            i for i in _sr1_sr3_mix() if not isinstance(i, FuturesNode) or i.label != "SR3-H6"
+        )
+        with pytest.raises(IncompleteStripError, match="2026-05-01 to 2026-06-17"):
+            strip_hedge(_mix_swap(_sr1_sr3_mix()), instruments, as_of=MIX_AS_OF)
+
+    def test_the_hole_is_measured_from_the_furthest_reach_so_far(self, as_of):
+        # A short contract inside a long one: the hole after them opens where
+        # the long one ends, not where the short one does.
+        long = FuturesNode(date(2026, 3, 18), date(2026, 9, 16), 0.04, label="LONG")
+        short = FuturesNode(date(2026, 6, 17), date(2026, 7, 15), 0.04, label="SHORT")
+        late = FuturesNode(date(2026, 10, 21), date(2026, 12, 16), 0.04, label="LATE")
+        swap = OISSwap(
+            effective=date(2026, 3, 18), maturity=date(2026, 12, 16), fixed_rate=0.04
+        )
+        with pytest.raises(IncompleteStripError, match="2026-09-16 to 2026-10-21"):
+            strip_hedge(swap, (long, short, late), as_of=as_of)
+
+
 class TestShockTable:
     """PRD-001 AC-8.3: every column the table promises, and the residual behaving."""
 
@@ -587,4 +622,34 @@ class TestTheHedgeCommandShocks:
         config = _hedge_config(as_of)
         config["hedge"]["shocks_bp"] = [0, 10]
         with pytest.raises(ValueError, match="shocks_bp"):
+            commands.hedge(config)
+
+
+class TestTheHedgeCommandCoverage:
+    """``hedge.require_full_coverage`` through the command, which never exposed it."""
+
+    @staticmethod
+    def _short(as_of) -> dict:
+        config = _hedge_config(as_of)
+        config["curve"]["futures"] = config["curve"]["futures"][:-1]
+        return config
+
+    def test_a_short_strip_is_refused_by_default(self, as_of):
+        with pytest.raises(IncompleteStripError, match="runs to"):
+            commands.hedge(self._short(as_of))
+
+    def test_the_check_can_be_waived_from_the_config(self, as_of):
+        config = self._short(as_of)
+        config["hedge"]["require_full_coverage"] = False
+        payload = commands.hedge(config)
+        assert len(payload["contracts"]) == 8
+        assert payload["evidence"]["fields"]["coverage_checked"] is False
+
+    @pytest.mark.parametrize("value", ["false", 0, None])
+    def test_a_flag_that_is_not_a_boolean_is_refused(self, as_of, value):
+        # bool("false") is True: coercing would turn a request to waive the
+        # check into one to enforce it, or the other way round for 0.
+        config = self._short(as_of)
+        config["hedge"]["require_full_coverage"] = value
+        with pytest.raises(ConfigurationError, match="hedge.require_full_coverage"):
             commands.hedge(config)

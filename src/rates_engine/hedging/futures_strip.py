@@ -518,12 +518,19 @@ def _check_coverage(futures: tuple[FuturesNode, ...], start: date, end: date) ->
             f"the strip ends at {covered_to} but the swap runs to {end}; "
             "no contract covers the closing period and none is extrapolated"
         )
-    for left, right in zip(ordered, ordered[1:], strict=False):
-        if right.start > left.end and left.end < end and right.start > start:
+    # Walk the contracts in start order, carrying the furthest end reached so
+    # far. Comparing each contract only with the one starting next refused
+    # valid strips: SR1 months traded under an SR3 quarter overlap it, and
+    # the April SR1 ending on 1 May reported a hole to 17 June that the
+    # March SR3 quarter, which started earlier, covers to the day.
+    reach = ordered[0].end
+    for contract in ordered[1:]:
+        if contract.start > reach and reach < end and contract.start > start:
             raise IncompleteStripError(
-                f"the strip has no contract covering {left.end} to {right.start}, "
+                f"the strip has no contract covering {reach} to {contract.start}, "
                 f"which lies inside the swap span {start} to {end}"
             )
+        reach = max(reach, contract.end)
 
 
 def _with_quote_shift(

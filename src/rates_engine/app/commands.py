@@ -278,13 +278,18 @@ def hedge(config: dict[str, Any] | None) -> dict[str, Any]:
 
     Args:
         config: The whole configuration mapping. ``None`` is refused by name.
-            The optional ``hedge`` block takes ``shocks_bp`` (basis points)
-            and ``contract_dv01`` (USD per basis point, for every contract;
+            The optional ``hedge`` block takes ``shocks_bp`` (basis points),
+            ``contract_dv01`` (USD per basis point, for every contract;
             left out, each futures entry is sized at its own contract's
-            tick, SR1 USD 41.67 or SR3 USD 25.00).
+            tick, SR1 USD 41.67 or SR3 USD 25.00) and
+            ``require_full_coverage`` (``true`` by default; ``false`` sizes a
+            strip that leaves part of the swap uncovered).
 
     Returns:
         The ``HedgeResult`` payload with a ``shock_table`` block.
+
+    Raises:
+        ConfigurationError: ``hedge.require_full_coverage`` is not a boolean.
     """
     config = require_config(config, "hedge")
     as_of = as_date(config["as_of"])
@@ -295,12 +300,21 @@ def hedge(config: dict[str, Any] | None) -> dict[str, Any]:
     # out sized every SR1 entry 1.67 times over; None lets each contract be
     # sized at its own.
     contract_dv01 = settings.get("contract_dv01")
+    # Checked rather than coerced: bool("false") is True, so coercing would
+    # enforce the check a config asked to waive.
+    require_full_coverage = settings.get("require_full_coverage", True)
+    if not isinstance(require_full_coverage, bool):
+        raise ConfigurationError(
+            f"hedge.require_full_coverage is {require_full_coverage!r}; it must be true or "
+            "false (true, the default, refuses a strip with a gap in the swap's span)"
+        )
     result = strip_hedge(
         swap,
         instruments,
         as_of=as_of,
         long_end_source=(config.get("curve") or {}).get("long_end_source"),
         contract_dv01=float(contract_dv01) if contract_dv01 is not None else None,
+        require_full_coverage=require_full_coverage,
     )
     shocks = tuple(float(s) for s in settings.get("shocks_bp", DEFAULT_SHOCKS_BP))
     table = shock_table(result, shocks)
