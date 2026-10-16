@@ -114,11 +114,13 @@ class KeyRateResult(EngineResult):
     Attributes:
         values: Key tenor in years to the risk at that tenor.
         measure: ``"key_rate_dv01"`` or ``"key_rate_duration"``.
-        unit: ``"<CCY>_per_bp"`` or ``"per_bp"``.
+        unit: ``"<CCY>_per_bp"`` for the DV01 profile, ``"years"`` for the
+            duration profile.
         key_tenors: The tenors, in the order requested.
-        total: Sum across tenors. Equals the parallel measure, which is the
-            point of the tent shocks.
-        bump_bp: Bump size used.
+        total: Sum across tenors. Equals the parallel measure in the same
+            unit -- :func:`dv01` for the first, :func:`effective_duration`
+            for the second -- which is the point of the tent shocks.
+        bump_bp: Bump size used, in basis points.
     """
 
     values: dict[float, float]
@@ -299,7 +301,12 @@ def key_rate_duration(
     bump_bp: float = BUMP_BP,
     source_evidence: tuple[Evidence, ...] = (),
 ) -> KeyRateResult:
-    """The key-rate profile normalised by price, per basis point.
+    """The key-rate profile normalised by price, in years: ``KR DV01 / (PV x 1bp)``.
+
+    The decomposition of :func:`effective_duration` along the curve, in its
+    unit, so the profile sums to it. PRD-001 AC-10.5 defines it this way.
+    It used to divide by the price alone, which left the profile in
+    "per bp" and exactly 1e4 smaller than the duration it decomposes.
 
     Args:
         instrument: Anything with cashflows.
@@ -309,7 +316,8 @@ def key_rate_duration(
         source_evidence: Evidence of the curves.
 
     Returns:
-        The :class:`KeyRateResult` with ``measure="key_rate_duration"``.
+        The :class:`KeyRateResult` with ``measure="key_rate_duration"`` and
+        ``unit="years"``; its ``total`` is the effective duration.
 
     Raises:
         UndefinedDurationError: The instrument prices at zero, as a par swap
@@ -320,10 +328,16 @@ def key_rate_duration(
     raw = key_rate_dv01(
         instrument, curve_set, key_tenors, bump_bp=bump_bp, source_evidence=source_evidence
     )
-    scaled = {tenor: value / price for tenor, value in raw.values.items()}
+    one_bp = shift_from_bp(1.0)
+    scaled = {tenor: value / (price * one_bp) for tenor, value in raw.values.items()}
     evidence = Evidence(
         produced_by="risk.key_rate_duration",
-        fields={**dict(raw.evidence.fields), "price": price, "normalised_by": "pv"},
+        fields={
+            **dict(raw.evidence.fields),
+            "price": price,
+            "normalised_by": "pv_times_one_bp",
+            "derivation": "key_rate_dv01 / (pv * 1e-4)",
+        },
         sources=raw.evidence.sources,
         warnings=raw.evidence.warnings,
     )
@@ -331,7 +345,7 @@ def key_rate_duration(
         evidence=evidence,
         values=scaled,
         measure="key_rate_duration",
-        unit="per_bp",
+        unit="years",
         key_tenors=raw.key_tenors,
         total=sum(scaled.values()),
         bump_bp=bump_bp,
