@@ -6,9 +6,11 @@ produces a curve that is wrong by a day's accrual on some nodes and right on
 others, and that is far easier to review as twelve named rules than as a table.
 
 **The manual check.** ``SIFMA_US`` encodes the twelve recommended US holidays
-and the observance rule used for the government bond market — Saturday
-observed on the preceding Friday, Sunday on the following Monday. That
-observance rule, and nothing else here, is what PRD-001 AC-1.2 marks
+and the observance rule used for the government bond market: a Sunday
+holiday is observed on the following Monday, and a Saturday one on the
+preceding Friday for Independence Day, Juneteenth and Christmas only -- New
+Year's Day and Veterans Day on a Saturday close nothing. That observance
+rule, and nothing else here, is what PRD-001 AC-1.2 marks
 ``[manual-check]``: it must be confirmed once against SIFMA's published
 calendar. Until it is, the fixture generated from these rules carries
 ``data_quality="assumed"``.
@@ -114,13 +116,30 @@ def _last_weekday(year: int, month: int, weekday: int) -> date:
 
 
 def _observed(day: date) -> date:
-    """Apply the government-bond observance rule to a fixed-date holiday.
+    """Saturday back to Friday, Sunday forward to Monday.
 
-    Saturday moves back to Friday, Sunday forward to Monday. This is the line
-    AC-1.2 marks for manual confirmation against SIFMA's published list.
+    SIFMA's rule for Independence Day, Juneteenth and Christmas. It is not
+    its rule for New Year's Day or Veterans Day, which use
+    :func:`_observed_monday_only`; v0.3 applied this one to all five.
     """
     if day.weekday() == 5:
         return day - timedelta(days=1)
+    if day.weekday() == 6:
+        return day + timedelta(days=1)
+    return day
+
+
+def _observed_monday_only(day: date) -> date:
+    """Sunday forward to Monday; a Saturday holiday stays on the Saturday.
+
+    SIFMA's rule for New Year's Day and Veterans Day. A Saturday one closes
+    no weekday at all: the New York Fed published SOFR on Friday 31 December
+    2021 (0.05%) and Friday 10 November 2023 (5.32%), the days before the
+    two that have fallen on a Saturday since SOFR began (FRED series
+    ``SOFR``), and QuantLib's US government bond and SOFR calendars keep
+    both Fridays open. The Saturday is returned rather than dropped so that
+    every year still lists its twelve holidays.
+    """
     if day.weekday() == 6:
         return day + timedelta(days=1)
     return day
@@ -142,10 +161,12 @@ class HolidayCalendar:
         """Every holiday observed in ``year``, as observed dates.
 
         "Observed dates" is the subtlety: a weekend-observance rule can move
-        a holiday *out of its own year*. New Year's Day 2022 fell on a
-        Saturday, so it is observed on Friday 31 December 2021, and that
-        date belongs to ``holidays(2022)`` because it is the 2022 holiday.
-        :meth:`is_business_day` accounts for this; see there.
+        a holiday *out of its own year*. A rule that observed a Saturday New
+        Year's Day on the Friday would put 31 December 2021 in
+        ``holidays(2022)``, because it is the 2022 holiday. SIFMA's calendar
+        has no such rule any more -- it leaves a Saturday New Year's Day where
+        it is -- but the base class does not assume that of every calendar.
+        :meth:`is_business_day` accounts for it; see there.
         """
         raise NotImplementedError
 
@@ -171,10 +192,13 @@ class HolidayCalendar:
         """True when ``day`` is neither a weekend nor an observed holiday.
 
         Checks the neighbouring years as well as ``day``'s own, because an
-        observance rule can move a holiday across a year boundary: with New
-        Year's Day on a Saturday, the observed holiday is 31 December of the
-        preceding year. Looking only in ``holidays(day.year)`` reported that
-        Friday as a business day, which is the bug this guards.
+        observance rule can move a holiday across a year boundary: under a
+        rule that observes a Saturday New Year's Day on the Friday, the
+        observed holiday is 31 December of the preceding year. Looking only
+        in ``holidays(day.year)`` reported that Friday as a business day,
+        which is the bug this guards. (SIFMA_US held that rule until v0.4,
+        wrongly; no SIFMA holiday now leaves its own year, but the guard
+        costs nothing and serves any calendar that does.)
         """
         if day.weekday() >= 5:
             return False
@@ -269,9 +293,11 @@ class SIFMAUSCalendar(HolidayCalendar):
         Returns:
             The observed dates, already rolled off weekends where the rule
             applies. Good Friday and the n-th-weekday holidays never need it.
+            New Year's Day and Veterans Day on a Saturday are returned on the
+            Saturday, which closes no business day.
         """
         days = {
-            _observed(date(year, 1, 1)),
+            _observed_monday_only(date(year, 1, 1)),
             _nth_weekday(year, 1, 0, 3),
             _nth_weekday(year, 2, 0, 3),
             easter_sunday(year) - timedelta(days=2),
@@ -279,7 +305,7 @@ class SIFMAUSCalendar(HolidayCalendar):
             _observed(date(year, 7, 4)),
             _nth_weekday(year, 9, 0, 1),
             _nth_weekday(year, 10, 0, 2),
-            _observed(date(year, 11, 11)),
+            _observed_monday_only(date(year, 11, 11)),
             _nth_weekday(year, 11, 3, 4),
             _observed(date(year, 12, 25)),
         }

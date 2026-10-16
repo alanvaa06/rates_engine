@@ -6,7 +6,12 @@ from datetime import date, timedelta
 
 import pytest
 
-from rates_engine.conventions.calendar import SIFMA_US, BusinessDayConvention, easter_sunday
+from rates_engine.conventions.calendar import (
+    SIFMA_US,
+    BusinessDayConvention,
+    HolidayCalendar,
+    easter_sunday,
+)
 from rates_engine.conventions.daycount import DayCount, day_count_from_name, year_fraction
 from rates_engine.conventions.schedule import Schedule, imm_date, imm_dates, next_imm_on_or_after
 from rates_engine.core.errors import UnsupportedConventionError
@@ -134,10 +139,11 @@ class TestCalendar:
             assert in_may[0].weekday() == 0, year
             assert 25 <= in_may[0].day <= 31, year
 
-
     def test_saturday_holiday_observed_on_the_friday(self):
-        # 4 July 2026 is a Saturday. This is the rule PRD-001 AC-1.2 flags for manual
-        # confirmation, so it is asserted explicitly rather than incidentally.
+        # 4 July 2026 is a Saturday. PRD-001 AC-1.2 flagged this rule for manual
+        # confirmation; the publication record has since confirmed it for
+        # Independence Day and Christmas and refuted it for New Year's Day and
+        # Veterans Day -- see TestSaturdayObservance.
         assert date(2026, 7, 4).weekday() == 5
         assert date(2026, 7, 3) in SIFMA_US.holidays(2026)
         assert not SIFMA_US.is_business_day(date(2026, 7, 3))
@@ -234,50 +240,121 @@ class TestSchedule:
             )
 
 
-class TestObservanceAcrossAYearBoundary:
-    """A v1 bug, found while adding the second calendar.
+class TestSaturdayObservance:
+    """Which Saturday holidays close the Friday before, and which close nothing.
 
-    `holidays(year)` returns the dates a year's holidays are *observed on*,
-    and a weekend rule can push one out of its own year: New Year's Day 2022
-    fell on a Saturday, so it is observed on Friday 31 December 2021 and
-    lives in `holidays(2022)`. `is_business_day` looked only in
-    `holidays(day.year)` and therefore reported that Friday as a business
-    day. Anything that rolled or counted across it — a schedule, an accrual,
-    a settlement date — was off by a day.
+    Independence Day, Juneteenth and Christmas on a Saturday are observed on
+    the Friday; New Year's Day and Veterans Day on a Saturday are not moved at
+    all. A Sunday holiday moves to the Monday in all five cases.
+
+    The publication record is the reference. FRED's SOFR series (downloaded
+    2026-10-15) has a fixing for Friday 31 December 2021 (0.05%), the day
+    before a Saturday New Year's Day, and for Friday 10 November 2023 (5.32%),
+    the day before a Saturday Veterans Day; it has none for Friday 3 July
+    2020 or Friday 24 December 2021. QuantLib 1.44 agrees on all four, in
+    both ``UnitedStates.SOFR`` and ``UnitedStates.GovernmentBond``.
+
+    v0.3 moved all five holidays off a Saturday, which closed 31 December 2021
+    and 10 November 2023 and so threw away the fixings published on them. The
+    test that pinned that rule -- "New Year on a Saturday is observed on the
+    previous Friday", for 2022, 2028 and 2033 -- is the one replaced here.
     """
 
-    @pytest.mark.parametrize("year", [2022, 2028, 2033])
-    def test_new_year_on_a_saturday_is_observed_on_the_previous_friday(self, year):
-        from datetime import date
+    @pytest.mark.parametrize(
+        "friday", [date(2021, 12, 31), date(2027, 12, 31), date(2032, 12, 31)]
+    )
+    def test_new_year_on_a_saturday_leaves_the_friday_open(self, friday):
+        assert date(friday.year + 1, 1, 1).weekday() == 5
+        assert SIFMA_US.is_business_day(friday)
 
-        from rates_engine.conventions.calendar import SIFMA_US
+    @pytest.mark.parametrize(
+        "friday", [date(2023, 11, 10), date(2028, 11, 10), date(2034, 11, 10)]
+    )
+    def test_veterans_day_on_a_saturday_leaves_the_friday_open(self, friday):
+        assert date(friday.year, 11, 11).weekday() == 5
+        assert SIFMA_US.is_business_day(friday)
 
-        if date(year, 1, 1).weekday() != 5:
-            pytest.skip(f"1 January {year} is not a Saturday")
-        friday = date(year - 1, 12, 31)
-        assert friday in SIFMA_US.holidays(year)
+    @pytest.mark.parametrize(
+        "friday",
+        [
+            date(2020, 7, 3),    # Independence Day, Saturday 4 July 2020
+            date(2026, 7, 3),    # Independence Day, Saturday 4 July 2026
+            date(2021, 12, 24),  # Christmas, Saturday 25 December 2021
+            date(2027, 12, 24),  # Christmas, Saturday 25 December 2027
+            date(2027, 6, 18),   # Juneteenth, Saturday 19 June 2027
+        ],
+    )
+    def test_the_other_three_on_a_saturday_close_the_friday(self, friday):
+        assert (friday + timedelta(days=1)).weekday() == 5
         assert not SIFMA_US.is_business_day(friday)
 
+    @pytest.mark.parametrize(
+        "monday",
+        [
+            date(2023, 1, 2),    # New Year's Day, Sunday 1 January 2023
+            date(2018, 11, 12),  # Veterans Day, Sunday 11 November 2018
+            date(2021, 7, 5),    # Independence Day, Sunday 4 July 2021
+            date(2022, 6, 20),   # Juneteenth, Sunday 19 June 2022
+            date(2022, 12, 26),  # Christmas, Sunday 25 December 2022
+        ],
+    )
+    def test_all_five_on_a_sunday_close_the_monday(self, monday):
+        assert (monday - timedelta(days=1)).weekday() == 6
+        assert not SIFMA_US.is_business_day(monday)
+
+    def test_a_saturday_new_year_is_listed_without_closing_a_weekday(self):
+        # The holiday is still SIFMA's, so it is in the list; it simply falls
+        # on a day that was never a business day.
+        assert date(2022, 1, 1) in SIFMA_US.holidays(2022)
+        assert len(SIFMA_US.holidays(2022)) == 12
+        days = SIFMA_US.business_days(date(2021, 12, 29), date(2022, 1, 5))
+        assert days == [
+            date(2021, 12, 29),
+            date(2021, 12, 30),
+            date(2021, 12, 31),
+            date(2022, 1, 3),
+            date(2022, 1, 4),
+        ]
+
+
+class TestObservanceAcrossAYearBoundary:
+    """A v1 bug in the base class, kept pinned now that SIFMA cannot reach it.
+
+    ``holidays(year)`` returns the dates a year's holidays are *observed on*,
+    and a weekend rule can push one out of its own year. ``is_business_day``
+    once looked only in ``holidays(day.year)``, so a holiday observed in the
+    year before its own was reported as a business day. SIFMA's New Year's
+    Day was the case that exposed it, under a Saturday rule that turned out to
+    be wrong (see :class:`TestSaturdayObservance`); with that rule corrected
+    no SIFMA holiday leaves its year. The guard in the base class stays,
+    because a calendar with such a rule is still a calendar it has to serve,
+    so it is tested here on one built for the purpose.
+    """
+
+    class _NewYearBackToFriday(HolidayCalendar):
+        name = "new_year_back_to_friday"
+
+        def holidays(self, year: int) -> frozenset[date]:
+            new_year = date(year, 1, 1)
+            if new_year.weekday() == 5:
+                return frozenset({new_year - timedelta(days=1)})
+            return frozenset({new_year})
+
+    def test_a_holiday_observed_in_the_year_before_is_found(self):
+        calendar = self._NewYearBackToFriday()
+        assert date(2021, 12, 31) in calendar.holidays(2022)
+        assert not calendar.is_business_day(date(2021, 12, 31))
+
     def test_the_roll_lands_past_the_boundary(self):
-        from datetime import date
+        calendar = self._NewYearBackToFriday()
+        assert calendar.next_business_day(date(2021, 12, 30)) == date(2022, 1, 3)
+        days = calendar.business_days(date(2021, 12, 29), date(2022, 1, 5))
+        assert date(2021, 12, 31) not in days
 
-        from rates_engine.conventions.calendar import SIFMA_US
-
-        assert SIFMA_US.next_business_day(date(2021, 12, 30)) == date(2022, 1, 3)
+    def test_no_sifma_holiday_leaves_its_own_year(self):
+        for year in range(2000, 2061):
+            assert all(day.year == year for day in SIFMA_US.holidays(year)), year
 
     def test_an_ordinary_year_end_is_still_a_business_day(self):
-        from datetime import date
-
-        from rates_engine.conventions.calendar import SIFMA_US
-
         # 31 December 2026 is a Thursday and no holiday is observed on it.
         assert SIFMA_US.is_business_day(date(2026, 12, 31))
-
-    def test_business_days_across_the_boundary_omits_it(self):
-        from datetime import date
-
-        from rates_engine.conventions.calendar import SIFMA_US
-
-        days = SIFMA_US.business_days(date(2021, 12, 29), date(2022, 1, 5))
-        assert date(2021, 12, 31) not in days
-        assert date(2022, 1, 3) in days
