@@ -6,10 +6,11 @@ because repeating the last published rate over a non-publication day is a data
 convention, not a product feature: SR1, SR3 and an OIS floating leg all inherit
 it, and they should inherit one implementation.
 
-The repeated rate is weighted, not repeated: a Friday's SOFR accrues over the
-weekend as one simple-interest period of three days, which is how CME settles
-SR3 and how the New York Fed compounds its averages. For SR1's arithmetic
-average the two readings coincide; for anything compounded they do not.
+Repeating a rate does not mean compounding it again: a Friday's SOFR accrues
+over the weekend as one simple-interest period of three days, which is how CME
+settles SR3 and how the New York Fed compounds its averages. For SR1's
+arithmetic average the two readings coincide; for anything compounded they do
+not.
 """
 
 from __future__ import annotations
@@ -244,8 +245,8 @@ class MarketSnapshot:
         ``OvernightIndexedCoupon`` computes. A Friday's rate covers Friday,
         Saturday and Sunday as *one* simple-interest period, ``1 + 3r/360``.
         Compounding the three days separately, ``(1 + r/360)**3``, is what
-        this method did before, and at 4-5% it put SR3 0.02-0.04 bp too high,
-        USD 0.6-1.1 a contract.
+        this method did before, and on flat SOFR of 4.30-5.33% it put SR3
+        0.025-0.045 bp too high, USD 0.6-1.1 a contract.
 
         Adjacent periods multiply to the whole only when the boundary between
         them is a publication day, so that every published rate and the days
