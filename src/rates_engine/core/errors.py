@@ -136,13 +136,12 @@ class IncompatibleDependencyError(MissingDependencyError):
 
 
 class ConfigurationError(RatesEngineError):
-    """The command was asked to run without the configuration it needs.
+    """The configuration cannot be used as given.
 
-    ``describe`` and ``list-instruments`` answer from the build itself; every
-    other command reads a config. Over the CLI argparse enforces that, but the
-    MCP server's tools take the config as an optional argument, so the refusal
-    has to be a named one rather than whatever the first missing key happens
-    to raise.
+    It is absent, has a key a command reached that it neither reads nor
+    documents, or lacks a required key; or, under ``--json``, the command line
+    is one the parser rejects. The message names the path and what to write
+    instead.
     """
 
     exit_code = 1
