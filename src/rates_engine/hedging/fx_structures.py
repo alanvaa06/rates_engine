@@ -334,7 +334,14 @@ class StructureResult(EngineResult):
             unbounded, which is information rather than a gap.
         best_case_rate: The most favourable, or ``None`` when unbounded.
         upside_participation: Fraction of a favourable move retained, in
-            ``[0, 1]``, measured over the reported spot grid.
+            ``[0, 1]``, measured over the reported spot grid: the change in
+            the effective rate as the spot moves from today's spot to the
+            favourable edge of the grid (its bottom for a payable, its top
+            for a receivable), over the change in spot. One is fully open in
+            the good direction, as the unhedged row is; zero is fully fixed,
+            as a full forward is. Because it is measured to the edge of the
+            grid, a structure that caps its gain inside the grid — a sold
+            wing — reads lower on a wider grid.
         hedge_ratio: The fraction of the exposure covered *by a forward*.
             An option structure covers the whole exposure by a different
             mechanism, so this is ``None`` there rather than ``0.0`` —
@@ -487,31 +494,52 @@ def _effective_rate(
     return rate + option_payoff - carried
 
 
-def _summarise(
-    exposure: Exposure, grid: tuple[float, ...], rates: tuple[float, ...]
-) -> tuple[float, float, float]:
-    """Worst case, best case and participation over the grid.
+def _participation(
+    exposure: Exposure,
+    spot: float,
+    grid: tuple[float, ...],
+    rate_at: Callable[[float], float],
+) -> float:
+    """The share of a favourable move from today's spot that the structure keeps.
 
-    Participation is measured against the unhedged position: what fraction
-    of the favourable move the structure keeps. One means fully open in the
-    good direction, zero means fully fixed.
+    Measured against the unhedged position, which keeps all of it: the
+    favourable move is the spot going from where it is to the favourable
+    edge of the grid — down for a payable, up for a receivable — and the
+    structure keeps whatever its effective rate moves by on the way, over
+    what the spot moves by. One means fully open in the good direction, zero
+    means fully fixed.
+
+    This used to take the rate at the *adverse* edge of the grid minus the
+    rate at the favourable one, over the whole grid's span. That mixes the
+    protection bought against an adverse move into the share of a
+    favourable one: an at-the-money call on a payable, which keeps every
+    peso of a fall, read 0.533, and a seagull read above a collar although
+    it sells its put closer to the spot.
     """
     if exposure.direction is ExposureDirection.PAYABLE:
+        favourable = grid[0]
+        move, kept = spot - favourable, rate_at(spot) - rate_at(favourable)
+    else:
+        favourable = grid[-1]
+        move, kept = favourable - spot, rate_at(favourable) - rate_at(spot)
+    if move <= 0.0:
+        return 0.0
+    return max(0.0, min(1.0, kept / move))
+
+
+def _summarise(
+    exposure: Exposure,
+    spot: float,
+    grid: tuple[float, ...],
+    rates: tuple[float, ...],
+    rate_at: Callable[[float], float],
+) -> tuple[float, float, float]:
+    """Worst case, best case and participation."""
+    if exposure.direction is ExposureDirection.PAYABLE:
         worst, best = max(rates), min(rates)
-        favourable = min(grid)
-        unhedged_gain = exposure_spot = None
-        del unhedged_gain, exposure_spot
-        reference = max(grid)
-        open_span = reference - favourable
-        kept = rates[grid.index(reference)] - rates[grid.index(favourable)]
     else:
         worst, best = min(rates), max(rates)
-        favourable = max(grid)
-        reference = min(grid)
-        open_span = favourable - reference
-        kept = rates[grid.index(favourable)] - rates[grid.index(reference)]
-    participation = 0.0 if open_span <= 0.0 else max(0.0, min(1.0, kept / open_span))
-    return worst, best, participation
+    return worst, best, _participation(exposure, spot, grid, rate_at)
 
 
 def _structure(
@@ -529,11 +557,12 @@ def _structure(
     upfront = sum(leg.quantity * quote.price(leg.strike, leg.kind) for leg in legs)
     sources = quote.sources(tuple(leg.strike for leg in legs))
     outright = quote.forward if forward_rate is None else forward_rate
-    rates = tuple(
-        _effective_rate(exposure, quote, legs, forward_amount, outright, upfront, spot)
-        for spot in grid
-    )
-    worst, best, participation = _summarise(exposure, grid, rates)
+
+    def rate_at(spot: float) -> float:
+        return _effective_rate(exposure, quote, legs, forward_amount, outright, upfront, spot)
+
+    rates = tuple(rate_at(spot) for spot in grid)
+    worst, best, participation = _summarise(exposure, quote.spot, grid, rates, rate_at)
     evidence = Evidence(
         produced_by=f"hedging_structures.{name}",
         fields={

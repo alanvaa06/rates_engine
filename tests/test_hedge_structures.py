@@ -274,31 +274,97 @@ class TestTheTradeOff:
         assert collar.upside_participation < otm.upside_participation
 
     def test_participation_is_the_ratio_it_claims_to_be(self, payable):
-        """Asserting only `0 <= p <= 1` was vacuous: the clamp in
-        `_summarise` guarantees it, and a mutation replacing the whole
-        computation with the constant 0.5 passed. This recomputes the ratio
-        from the reported grids instead, so it tests the quantity."""
-        grid = payable.spot_grid
+        """The share of a favourable move the structure keeps, worked out
+        from each row's legs rather than from its payoff grid.
+
+        For a payable the favourable move is the spot falling from 18.50 to
+        the bottom of the grid, 14.80. Every bought call here is struck above
+        the spot, so it plays no part in that move; a sold put fixes the rate
+        below its strike. So a row keeps the stretch between the spot and its
+        sold put, and all of it when it has none. This used to be read off
+        the two ends of the grid -- the rate at the top minus the rate at the
+        bottom -- which mixed the protection bought against a rise into the
+        share of a fall kept: 0.533 for an at-the-money call that keeps every
+        peso of a fall, and a seagull (0.433) ahead of a collar (0.279) when
+        the seagull sells its put closer in. The old test recomputed that
+        same formula from the grid, so it could not tell.
+        """
+        spot, edge = QUOTE.spot, payable.spot_grid[0]
+        assert edge == pytest.approx(14.80)
+        expected = {"unhedged": 1.0, "forward": 0.0}
         for structure in payable.structures:
-            rates = structure.payoff_grid
-            # For a payable the favourable direction is a lower spot.
-            open_span = max(grid) - min(grid)
-            kept = rates[grid.index(max(grid))] - rates[grid.index(min(grid))]
+            if structure.name in expected:
+                continue
+            calls = [k for kind, k, _ in structure.legs if kind == "call"]
+            puts = [k for kind, k, q in structure.legs if kind == "put"]
+            assert all(k > spot for k in calls), structure.name
+            if not puts:
+                expected[structure.name] = 1.0
+                continue
+            (sold_put,) = puts
+            assert edge < sold_put < spot, structure.name
+            expected[structure.name] = (spot - sold_put) / (spot - edge)
+        for structure in payable.structures:
             assert structure.upside_participation == pytest.approx(
-                max(0.0, min(1.0, kept / open_span)), abs=1e-12
+                expected[structure.name], abs=1e-12
+            ), structure.name
+
+    def test_the_reviews_numbers(self, payable):
+        """REVISION finding 3.2, on this market: the protective call and the
+        spread keep a whole fall, the collar a third and the seagull an
+        eighth, because the seagull's sold put sits closest to the spot."""
+        got = {s.name: s.upside_participation for s in payable.structures}
+        assert got["protective_option_atm"] == pytest.approx(1.0)
+        assert got["option_spread"] == pytest.approx(1.0)
+        assert got["collar"] == pytest.approx(0.3387, abs=5e-4)
+        assert got["seagull"] == pytest.approx(0.119, abs=5e-3)
+        assert got["seagull"] < got["collar"]
+
+    def test_a_receivable_keeps_the_rise_its_legs_leave_open(self, receivable):
+        """The mirror, by integrating each row's slope between the spot and
+        the top of the grid. A receivable's at-the-money put is struck at the
+        forward, above this spot, so it keeps nothing of the rise until the
+        forward and everything after it."""
+        spot, edge = QUOTE.spot, receivable.spot_grid[-1]
+
+        def slope(structure, s):
+            # Receivable: the rate is s plus the option payoffs, so a bought
+            # put in the money takes one off the slope and a sold call in the
+            # money takes one off it too.
+            value = 1.0 - abs(structure.forward_amount) / 1_000_000.0
+            for kind, strike, quantity in structure.legs:
+                if kind == "put" and s < strike:
+                    value -= quantity
+                if kind == "call" and s > strike:
+                    value += quantity
+            return value
+
+        for structure in receivable.structures:
+            points = sorted({spot, edge, *(k for _, k, _ in structure.legs if spot < k < edge)})
+            kept = sum(
+                slope(structure, 0.5 * (a + b)) * (b - a)
+                for a, b in zip(points, points[1:], strict=False)
             )
+            assert structure.upside_participation == pytest.approx(
+                kept / (edge - spot), abs=1e-12
+            ), structure.name
+        atm = receivable.by_name("protective_option_atm")
+        assert atm.upside_participation == pytest.approx(
+            (edge - QUOTE.forward) / (edge - spot), abs=1e-12
+        )
 
     def test_the_clamp_never_binds_on_these_structures(self, payable, receivable):
-        """So the assertion above is testing the ratio and not the guard.
-        If a structure ever needs the clamp, this fails and says so rather
-        than hiding it behind a range check that always passes."""
-        for comparison in (payable, receivable):
+        """So the assertions above test the ratio and not the guard. If a
+        structure ever needs the clamp, this fails and says so rather than
+        hiding it behind a range check that always passes."""
+        for comparison, edge in ((payable, 0), (receivable, -1)):
             grid = comparison.spot_grid
             for structure in comparison.structures:
                 rates = structure.payoff_grid
-                span = max(grid) - min(grid)
-                kept = abs(rates[grid.index(max(grid))] - rates[grid.index(min(grid))])
-                assert -1e-12 <= kept / span <= 1.0 + 1e-12
+                middle = grid.index(min(grid, key=lambda g: abs(g - QUOTE.spot)))
+                assert grid[middle] == pytest.approx(QUOTE.spot)
+                ratio = (rates[edge] - rates[middle]) / (grid[edge] - grid[middle])
+                assert -1e-12 <= ratio <= 1.0 + 1e-12, structure.name
 
     def test_the_unhedged_and_forward_rows_bracket_participation(self, payable):
         assert payable.by_name("unhedged").upside_participation == pytest.approx(1.0)
