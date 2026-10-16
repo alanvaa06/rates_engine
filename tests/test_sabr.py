@@ -246,6 +246,111 @@ class TestShiftAndRefusals:
                 function(TRUTH, forward, strike, EXPIRY)
 
 
+def _z_over_x_60_digits(z: float, rho: float) -> float:
+    """``z / x(z)`` from Hagan (2.17a) as written, evaluated in 60-digit decimals.
+
+    The independent reference for the large-``|z|`` tests. The naive form
+    cancels catastrophically in floating point when ``z`` is large and
+    negative, but sixty digits leave forty to spare at ``|z| = 1e9``, so the
+    formula exactly as the paper writes it is the truth here.
+    """
+    from decimal import Decimal, getcontext
+
+    getcontext().prec = 60
+    big_z, big_rho = Decimal(z), Decimal(rho)
+    numerator = (1 - 2 * big_rho * big_z + big_z * big_z).sqrt() + big_z - big_rho
+    return float(big_z / (numerator / (1 - big_rho)).ln())
+
+
+def _hagan_lognormal_60_digits(parameters, forward, strike, expiry):
+    """Hagan (2.17a) end to end in 60-digit decimals, for an unshifted smile."""
+    from decimal import Decimal, getcontext
+
+    getcontext().prec = 60
+    f, k, alpha, beta, rho, nu, t = (
+        Decimal(v)
+        for v in (
+            forward, strike, parameters.alpha, parameters.beta,
+            parameters.rho, parameters.nu, expiry,
+        )
+    )
+    omb = 1 - beta
+    log_fk_product = (f * k).ln()
+    fk_pow = (omb * log_fk_product).exp()
+    correction = 1 + (
+        (omb**2 / 24) * alpha * alpha / fk_pow
+        + Decimal("0.25") * rho * beta * nu * alpha / fk_pow.sqrt()
+        + ((2 - 3 * rho * rho) / 24) * nu * nu
+    ) * t
+    log_fk = (f / k).ln()
+    half_pow = ((omb / 2) * log_fk_product).exp()
+    denominator = half_pow * (1 + (omb**2 / 24) * log_fk**2 + (omb**4 / 1920) * log_fk**4)
+    z = (nu / alpha) * half_pow * log_fk
+    x = (((1 - 2 * rho * z + z * z).sqrt() + z - rho) / (1 - rho)).ln()
+    return float(alpha / denominator * (z / x) * correction)
+
+
+class TestLargeZ:
+    """``x(z)`` without cancellation: far wings and tiny alpha make ``|z|`` huge.
+
+    ``sqrt(1 - 2 rho z + z^2) + z - rho`` subtracts two numbers of size
+    ``|z|`` when ``z`` is large and negative. At ``|z| = 1e7`` the result
+    already carried a relative error of 4e-4; past about ``1e8`` it came out
+    zero or negative, and ``math.log`` raised a bare ``ValueError: math domain
+    error`` that neither ``expansion_is_valid`` nor the calibrator caught.
+    QuantLib's ``sabrVolatility`` has the same cancellation and returns 0.0
+    at the point below; the 60-digit evaluation says the formula is positive.
+    """
+
+    @pytest.mark.parametrize(
+        "rho,z",
+        [
+            (0.5, -1e7), (0.5, -1e8), (0.0, -1e9), (-0.9, -1e8),
+            (0.999, -1e7), (-0.999, -500.0), (0.9, -14.8), (0.5, -142772178.84092295),
+        ],
+    )
+    def test_z_over_x_matches_sixty_digits_in_the_far_wing(self, rho, z):
+        from rates_engine.models.sabr import _z_over_x
+
+        assert _z_over_x(z, rho) == pytest.approx(_z_over_x_60_digits(z, rho), rel=1e-13, abs=0.0)
+
+    @pytest.mark.parametrize("rho,z", [(0.0, 0.5), (0.4, -0.2), (-0.3, 3.0), (0.9, 1e-3)])
+    def test_away_from_the_cancellation_nothing_moves(self, rho, z):
+        # The stable branch is taken only where the naive sum has lost more
+        # than two digits, so ordinary points keep the arithmetic QuantLib's
+        # sabrVolatility uses -- the 3.7e-14 agreement measured against it.
+        from rates_engine.models.sabr import _z_over_x
+
+        naive = math.sqrt(1.0 - 2.0 * rho * z + z * z) + z - rho
+        assert _z_over_x(z, rho) == z / math.log(naive / (1.0 - rho))
+
+    def test_a_tiny_alpha_far_from_the_money_returns_a_volatility(self):
+        # alpha = 1e-9 and K = 2F give z of about -1.4e8.
+        tiny = SABRParameters(alpha=1e-9, beta=0.5, rho=0.5, nu=1.0)
+        assert expansion_is_valid(tiny, 0.03, 0.06, 1.0)
+        assert lognormal_vol(tiny, 0.03, 0.06, 1.0) == pytest.approx(
+            _hagan_lognormal_60_digits(tiny, 0.03, 0.06, 1.0), rel=1e-12, abs=0.0
+        )
+        assert normal_vol(tiny, 0.03, 0.06, 1.0) > 0.0
+
+    def test_the_lognormal_expansion_is_exact_where_quantlib_loses_digits(self):
+        # The worst point of the 7,200-case comparison against QuantLib 1.44:
+        # there QuantLib and the old code are both 7.0e-14 from the 60-digit
+        # value, because the naive sum loses three digits; this is not.
+        smile = SABRParameters(alpha=0.008, beta=0.0, rho=0.9, nu=1.2)
+        forward, strike, expiry = 0.06, 0.1630969097075427, 5.0
+        assert lognormal_vol(smile, forward, strike, expiry) == pytest.approx(
+            _hagan_lognormal_60_digits(smile, forward, strike, expiry), rel=1e-15, abs=0.0
+        )
+
+    def test_the_calibrator_survives_a_tiny_alpha(self):
+        # The lower bound on alpha in the fit is 1e-10; a residual there used
+        # to raise math domain error straight out of least_squares.
+        tiny = SABRParameters(alpha=1e-10, beta=0.5, rho=0.5, nu=1.0)
+        for strike in (0.01, 0.06):
+            assert expansion_is_valid(tiny, 0.03, strike, 1.0)
+
+
 class TestValidityRegion:
     """The expansion's own boundary, measured rather than assumed."""
 

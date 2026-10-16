@@ -163,11 +163,29 @@ def _z_over_x(z: float, rho: float) -> float:
     small to move a price and large enough to make the two branches
     disagree, which is what ``test_the_series_branch_joins_the_ratio_branch``
     is there to catch.
+
+    **The far wing has the opposite problem.** When ``z`` is large and
+    negative -- a strike far above the forward, or an alpha so small that
+    ``nu / alpha`` is huge -- the root is ``|z - rho|`` to within ``1 - rho^2``
+    and the numerator subtracts two numbers of size ``|z|``. At ``|z| = 1e7``
+    that left a relative error of 4e-4; past about ``1e8`` the numerator came
+    out zero or negative and ``math.log`` raised a bare ``ValueError``. The
+    product of the two conjugates is exact,
+    ``(R + z - rho)(R - z + rho) = 1 - rho^2`` with ``R`` the root, so the
+    same logarithm is ``-ln[(R - z + rho) / (1 + rho)]``, a sum of two
+    positive numbers, and ``R = hypot(z - rho, sqrt(1 - rho^2))`` cannot
+    overflow. That branch is taken only where the naive sum has lost more
+    than two significant digits, so everywhere else the arithmetic is the
+    one QuantLib's ``sabrVolatility`` uses and agrees with it to 3.7e-14.
     """
     if abs(z) < Z_SERIES_THRESHOLD:
         return 1.0 - 0.5 * rho * z
-    numerator = math.sqrt(1.0 - 2.0 * rho * z + z * z) + z - rho
-    return z / math.log(numerator / (1.0 - rho))
+    root = math.sqrt(1.0 - 2.0 * rho * z + z * z)
+    numerator = root + z - rho
+    if z - rho >= 0.0 or numerator > 0.01 * root:
+        return z / math.log(numerator / (1.0 - rho))
+    stable_root = math.hypot(z - rho, math.sqrt((1.0 - rho) * (1.0 + rho)))
+    return -z / math.log((stable_root + (rho - z)) / (1.0 + rho))
 
 
 def _checked(value: float, flavour: str, strike: float, expiry: float) -> float:
@@ -503,7 +521,14 @@ def expansion_is_valid(
 
     Returns:
         ``False`` when the expansion has left its validity region or the
-        shifted forward or strike is not positive, ``True`` otherwise.
+        shifted forward or strike is not positive, ``True`` otherwise. A far
+        wing or a tiny alpha is answered, not raised: ``x(z)`` is computed
+        without the cancellation that used to end in ``math domain error``.
+
+    Raises:
+        ValueError: The forward, strike or expiry is not a finite number, or
+            the expiry is negative -- a malformed question, not a point
+            outside the region.
     """
     try:
         normal_vol(parameters, forward, strike, expiry)
