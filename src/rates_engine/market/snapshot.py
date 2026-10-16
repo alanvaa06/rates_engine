@@ -140,9 +140,22 @@ class CompoundedRate:
 class MarketSnapshot:
     """Named series as of one date, each carrying its own provenance.
 
+    **Nothing dated after** ``as_of`` **is served.** :meth:`fixing`,
+    :meth:`compounded` and :meth:`averaged` refuse a date past it with
+    :class:`~rates_engine.core.errors.MissingFixingError`, and
+    :meth:`require` returns the series cut at it. ``as_of`` used to be a
+    label: a snapshot as of 15 January served 10 February's fixing and
+    compounded through 30 January, which in a backtest is the future
+    leaking into the past with nothing in the result to say so. The
+    fixing dated ``as_of`` itself is served, the convention
+    :func:`~rates_engine.market.estimators.realized_sofr_sigma` already
+    used. :attr:`series` keeps what was loaded, so one history can be
+    loaded once and wrapped in a snapshot per backtest date.
+
     Attributes:
         as_of: The valuation date the snapshot describes.
-        series: Series by identifier.
+        series: Series by identifier, as loaded, including any observations
+            dated after ``as_of``; read them through :meth:`require`.
     """
 
     as_of: date
@@ -154,40 +167,58 @@ class MarketSnapshot:
         return {name: s.provenance for name, s in self.series.items()}
 
     def require(self, series_id: str) -> Series:
-        """The named series, or a refusal naming what is missing.
+        """The named series as known on ``as_of``, or a refusal naming what is missing.
 
         Args:
             series_id: Identifier to look up.
 
         Returns:
-            The series.
+            The series without its observations dated after :attr:`as_of`,
+            with the same provenance. The same object when there are none.
 
         Raises:
             MissingFixingError: No such series in this snapshot.
         """
         try:
-            return self.series[series_id]
+            series = self.series[series_id]
         except KeyError:
             raise MissingFixingError(
                 f"snapshot as of {self.as_of} has no series {series_id!r}; "
                 f"it has {sorted(self.series)}"
             ) from None
+        if series.dates and series.dates[-1] > self.as_of:
+            return series.window(series.dates[0], self.as_of)
+        return series
+
+    def _refuse_after_as_of(self, series_id: str, day: date, needed_by: str, remedy: str) -> None:
+        """Raise when ``day`` is after :attr:`as_of`, naming what needed it and the way out."""
+        if day > self.as_of:
+            raise MissingFixingError(
+                f"{needed_by} needs the {series_id!r} fixing for {day}, which is after this "
+                f"snapshot's valuation date {self.as_of}. A snapshot serves nothing dated "
+                f"after its as_of, so that a backtest cannot see the future; {remedy}"
+            )
 
     def fixing(self, series_id: str, day: date) -> float:
         """One published fixing, refusing rather than interpolating.
 
         Args:
             series_id: Series to read.
-            day: Business day the fixing is wanted for.
+            day: Business day the fixing is wanted for, on or before
+                :attr:`as_of`.
 
         Returns:
             The published value as a decimal.
 
         Raises:
-            MissingFixingError: The series has no observation on ``day``. The
-                message names the date, because an interpolated overnight rate
-                silently contaminates every compounded rate spanning it.
+            MissingFixingError: The series has no observation on ``day``, or
+                ``day`` is after :attr:`as_of`. The message names the date,
+                because an interpolated overnight rate silently contaminates
+                every compounded rate spanning it.
         """
+        self._refuse_after_as_of(
+            series_id, day, "this lookup", "build the snapshot as of a later date to read it"
+        )
         value = self.require(series_id).get(day)
         if value is None:
             raise MissingFixingError(
@@ -243,7 +274,8 @@ class MarketSnapshot:
         Raises:
             MissingFixingError: A business day in the period has no fixing,
                 or the period opens on a non-business day and the business
-                day before it has none. An older fixing is never carried in.
+                day before it has none (an older fixing is never carried
+                in), or a business day in the period is after :attr:`as_of`.
             ValueError: ``end`` precedes ``start``.
         """
         factor, business_days, repeated, first, last = self._accrue(
@@ -282,7 +314,8 @@ class MarketSnapshot:
         Raises:
             MissingFixingError: A business day in the period has no fixing,
                 or the period opens on a non-business day and the business
-                day before it has none. An older fixing is never carried in.
+                day before it has none (an older fixing is never carried
+                in), or a business day in the period is after :attr:`as_of`.
             ValueError: ``end`` precedes ``start``.
         """
         total, business_days, repeated, first, last = self._sum(series_id, start, end, calendar)
@@ -294,7 +327,13 @@ class MarketSnapshot:
     def _daily(
         self, series_id: str, start: date, end: date, calendar: HolidayCalendar
     ) -> list[tuple[date, float, bool]]:
-        """Per-calendar-day rates over ``[start, end)``, flagged when repeated."""
+        """Per-calendar-day rates over ``[start, end)``, flagged when repeated.
+
+        A business day after :attr:`as_of` is refused before its fixing is
+        looked up. A non-business day after it is not: what it accrues is
+        fixed by the rate of the business day before it, which the snapshot
+        holds, so a snapshot as of a Friday serves the weekend after it.
+        """
         if end < start:
             raise ValueError(f"end {end} precedes start {start}")
         series = self.require(series_id)
@@ -303,6 +342,14 @@ class MarketSnapshot:
         last_published: float | None = None
         while day < end:
             if calendar.is_business_day(day):
+                self._refuse_after_as_of(
+                    series_id,
+                    day,
+                    f"the period [{start}, {end})",
+                    f"accrue the realised part only up to {self.as_of + timedelta(days=1)} "
+                    "and project the rest from a curve, or build the snapshot as of a later "
+                    "date",
+                )
                 value = series.get(day)
                 if value is None:
                     raise MissingFixingError(
@@ -318,9 +365,8 @@ class MarketSnapshot:
             day += timedelta(days=1)
         return out
 
-    @staticmethod
     def _carried_in(
-        series: Series, series_id: str, day: date, calendar: HolidayCalendar
+        self, series: Series, series_id: str, day: date, calendar: HolidayCalendar
     ) -> float:
         """The rate a period opening on non-publication ``day`` carries in.
 
@@ -332,6 +378,12 @@ class MarketSnapshot:
         here exactly as it is on a business day inside the period.
         """
         previous = calendar.previous_business_day(day)
+        self._refuse_after_as_of(
+            series_id,
+            previous,
+            f"the period opening on {day}",
+            "build the snapshot as of a later date",
+        )
         value = series.get(previous)
         if value is None:
             held = series.last_on_or_before(previous)

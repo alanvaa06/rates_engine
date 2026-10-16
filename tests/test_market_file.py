@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
@@ -20,6 +20,18 @@ from rates_engine.market.providers.file import (
     load_snapshot_csv,
 )
 from rates_engine.market.snapshot import MarketSnapshot, Series
+
+
+@pytest.fixture(scope="module")
+def late_snapshot(fixtures_dir) -> MarketSnapshot:
+    """The fixture fixings as of their own last date, for periods past the suite's.
+
+    The shared ``snapshot`` is as of 2026-01-15, and a snapshot serves nothing
+    dated after its valuation date. A test about weekends and holidays in late
+    January needs one dated after them, not one that leaks the future.
+    """
+    series = load_series_csv(fixtures_dir / "sofr_fixings.csv", "SOFR")
+    return MarketSnapshot(as_of=series.dates[-1], series={"SOFR": series})
 
 
 class TestLoading:
@@ -241,20 +253,20 @@ class TestNonPublicationDays:
         short = snapshot.compounded("SOFR", date(2026, 1, 9), date(2026, 1, 11))
         assert short.accrual_factor == pytest.approx(1 + friday * 2 / 360, rel=1e-15)
 
-    def test_holiday_repeats_too(self, snapshot):
+    def test_holiday_repeats_too(self, late_snapshot):
         # 19 January 2026 is Martin Luther King Jr Day.
         assert not SIFMA_US.is_business_day(date(2026, 1, 19))
-        result = snapshot.compounded("SOFR", date(2026, 1, 16), date(2026, 1, 20))
+        result = late_snapshot.compounded("SOFR", date(2026, 1, 16), date(2026, 1, 20))
         assert result.repeated_days == 3
         assert result.business_days == 1
 
-    def test_compounding_telescopes_across_a_publication_day(self, snapshot):
+    def test_compounding_telescopes_across_a_publication_day(self, late_snapshot):
         # Two adjacent periods multiply to the whole when the boundary is a
         # publication day (Monday 12 January), because every published rate
         # and the days it covers then sit inside one of the two periods.
-        first = snapshot.compounded("SOFR", date(2026, 1, 5), date(2026, 1, 12))
-        second = snapshot.compounded("SOFR", date(2026, 1, 12), date(2026, 1, 20))
-        whole = snapshot.compounded("SOFR", date(2026, 1, 5), date(2026, 1, 20))
+        first = late_snapshot.compounded("SOFR", date(2026, 1, 5), date(2026, 1, 12))
+        second = late_snapshot.compounded("SOFR", date(2026, 1, 12), date(2026, 1, 20))
+        whole = late_snapshot.compounded("SOFR", date(2026, 1, 5), date(2026, 1, 20))
         assert first.accrual_factor * second.accrual_factor == pytest.approx(
             whole.accrual_factor, rel=1e-14
         )
@@ -315,9 +327,9 @@ class TestNonPublicationDays:
         result = snapshot.averaged("SOFR", date(2026, 1, 1), date(2026, 1, 2))
         assert result.rate == pytest.approx(new_year_s_eve, rel=1e-15)
 
-    def test_average_and_compounded_differ(self, snapshot):
-        averaged = snapshot.averaged("SOFR", date(2026, 1, 1), date(2026, 2, 1))
-        compounded = snapshot.compounded("SOFR", date(2026, 1, 1), date(2026, 2, 1))
+    def test_average_and_compounded_differ(self, late_snapshot):
+        averaged = late_snapshot.averaged("SOFR", date(2026, 1, 1), date(2026, 2, 1))
+        compounded = late_snapshot.compounded("SOFR", date(2026, 1, 1), date(2026, 2, 1))
         assert compounded.rate > averaged.rate
         assert averaged.repeated_days == compounded.repeated_days
 
@@ -325,6 +337,79 @@ class TestNonPublicationDays:
         result = snapshot.compounded("SOFR", date(2026, 1, 5), date(2026, 1, 5))
         assert result.accrual_factor == 1.0
         assert result.business_days == 0
+
+
+def _review_lookahead_snapshot() -> MarketSnapshot:
+    """The review's look-ahead case: 4% up to the valuation date, 3% after it."""
+    as_of = date(2026, 1, 15)
+    days = [
+        date(2025, 12, 1) + timedelta(days=k)
+        for k in range(89)
+        if SIFMA_US.is_business_day(date(2025, 12, 1) + timedelta(days=k))
+    ]
+    values = tuple(0.0400 if d <= as_of else 0.0300 for d in days)
+    return MarketSnapshot(
+        as_of=as_of,
+        series={"SOFR": Series("SOFR", tuple(days), values, Provenance("fred", "SOFR"))},
+    )
+
+
+class TestTheValuationDate:
+    """A snapshot as of a date serves nothing dated after it.
+
+    ``as_of`` was a label: a snapshot as of 15 January served 10 February's
+    fixing and compounded through 30 January, which in a backtest is the
+    future leaking into the past with nothing in the result to show it.
+    """
+
+    def test_a_fixing_after_the_valuation_date_refuses(self):
+        snapshot = _review_lookahead_snapshot()
+        with pytest.raises(MissingFixingError) as excinfo:
+            snapshot.fixing("SOFR", date(2026, 2, 10))
+        message = str(excinfo.value)
+        assert "2026-02-10" in message and "2026-01-15" in message
+
+    def test_the_valuation_date_s_own_fixing_is_served(self):
+        snapshot = _review_lookahead_snapshot()
+        assert snapshot.fixing("SOFR", date(2026, 1, 15)) == 0.0400
+
+    @pytest.mark.parametrize("method", ["compounded", "averaged"])
+    def test_accruing_past_the_valuation_date_refuses(self, method):
+        snapshot = _review_lookahead_snapshot()
+        with pytest.raises(MissingFixingError) as excinfo:
+            getattr(snapshot, method)("SOFR", date(2026, 1, 2), date(2026, 2, 2))
+        message = str(excinfo.value)
+        assert "2026-01-16" in message and "2026-01-15" in message
+
+    def test_accruing_up_to_the_valuation_date_is_served(self):
+        snapshot = _review_lookahead_snapshot()
+        result = snapshot.compounded("SOFR", date(2026, 1, 2), date(2026, 1, 16))
+        assert result.last_fixing_date == date(2026, 1, 15)
+        assert result.rate == pytest.approx(0.04, abs=1e-4)  # none of the 3% after it
+
+    def test_a_weekend_after_a_friday_valuation_date_takes_friday_s_rate(self, fixtures_dir):
+        # What a Saturday accrues is fixed by Friday's rate the moment it is
+        # published, so a snapshot as of Friday can serve it. Monday's rate
+        # it cannot.
+        series = load_series_csv(fixtures_dir / "sofr_fixings.csv", "SOFR")
+        snap = MarketSnapshot(date(2026, 1, 9), {"SOFR": series})
+        result = snap.compounded("SOFR", date(2026, 1, 5), date(2026, 1, 12))
+        assert result.last_fixing_date == date(2026, 1, 9)
+        with pytest.raises(MissingFixingError, match="2026-01-12"):
+            snap.compounded("SOFR", date(2026, 1, 5), date(2026, 1, 13))
+
+    def test_the_series_it_serves_stop_at_the_valuation_date(self, snapshot):
+        assert snapshot.require("SOFR").dates[-1] <= snapshot.as_of
+        # What was loaded is kept as loaded; only what is served is cut.
+        assert snapshot.series["SOFR"].dates[-1] > snapshot.as_of
+
+    def test_realised_sigma_cannot_be_measured_at_a_later_date(self, snapshot):
+        from rates_engine.market.estimators import realized_sofr_sigma
+
+        with pytest.raises(MissingFixingError, match=str(snapshot.as_of)):
+            realized_sofr_sigma(snapshot, as_of=date(2026, 6, 1))
+        earlier = realized_sofr_sigma(snapshot, as_of=date(2025, 12, 31))
+        assert earlier.end <= date(2025, 12, 31)
 
 
 class TestTreasuryClassification:
