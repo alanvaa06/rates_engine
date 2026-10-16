@@ -15,19 +15,30 @@ units of the quote, so passing a normal volatility prices under Bachelier and
 a lognormal one under Black, and there is no third possibility to get wrong.
 
 **What has already happened is not an option.** A cap or floor valued after
-it started has three kinds of period. One paid on or before the valuation
-date is gone and is not valued. One whose rate fixed on or before it is
-still to be paid, and is worth its intrinsic value on the *published*
-fixing -- passed as ``fixings``, a
-:class:`~rates_engine.market.snapshot.MarketSnapshot` -- with no time value
-left. The rest are options. Anything dated on the valuation date has
-happened, as a payment made that day has been made. QuantLib's caps follow
-the same rule. v0.3 had no notion of any of it: the curve's discount factor
-is one on and before its date, so a floor from 2025-01-15 valued on
-2026-01-15 counted 231,666.67 of periods paid in 2025 inside a 314,181.72
-price, and the running period of a cap was priced off a "forward" read
-across the valuation date -- 2.61% on a 4% curve. A swaption at or past its
-expiry is refused the same way: it is no longer an option.
+it started has these kinds of period, by QuantLib's rule with its default
+``enforcesTodaysHistoricFixings = False``:
+
+- paid on or before the valuation date: gone, and not valued;
+- fixed *before* the valuation date and still to be paid: its intrinsic
+  value on the *published* fixing -- passed as ``fixings``, a
+  :class:`~rates_engine.market.snapshot.MarketSnapshot` -- with no time
+  value left, and refused without it;
+- fixing *on* the valuation date: its intrinsic value on that day's fixing
+  when ``fixings`` holds it, and otherwise on the curve's forward with no
+  time left -- the rate is being published that day, and the forward is
+  the curve's estimate of it. The evidence says which of the two it was;
+- the rest are options, to their fixing dates.
+
+v0.3 had no notion of any of it: the curve's discount factor is one on and
+before its date, so a floor from 2025-01-15 valued on 2026-01-15 counted
+231,666.67 of periods paid in 2025 inside a 314,181.72 price, and the
+running period of a cap was priced off a "forward" read across the
+valuation date -- 2.61% on a 4% curve. A swaption past its expiry is refused:
+it is no longer an option. One expiring on the valuation date is its
+intrinsic value on the forward swap rate, with no time left: it can still be
+exercised that day. That is QuantLib with ``includeReferenceDateEvents =
+True``; with its default, ``False``, QuantLib counts an exercise dated on the
+evaluation date as already happened and values the swaption at zero.
 """
 
 from __future__ import annotations
@@ -316,17 +327,19 @@ def swaption_pv(
         source_evidence: Evidence of the curves and the volatility surface.
 
     Returns:
-        The :class:`OptionPriceResult`.
+        The :class:`OptionPriceResult`. A swaption expiring on the valuation
+        date has no time left and is worth its intrinsic value on the forward
+        swap rate, ``annuity * max(+-(F - K), 0)``; the evidence says so.
 
     Raises:
-        ValueError: The swaption expires on or before the valuation date.
-            It is no longer an option: value the swap it became, or nothing.
+        ValueError: The swaption expired before the valuation date. It is no
+            longer an option: value the swap it became, or nothing.
         ShiftRequiredError: Black was implied and the forward is not positive.
     """
     valuation = as_of or curve_set.as_of
-    if swaption.expiry <= valuation:
+    if swaption.expiry < valuation:
         raise ValueError(
-            f"the swaption expired on {swaption.expiry}, on or before the valuation date "
+            f"the swaption expired on {swaption.expiry}, before the valuation date "
             f"{valuation}: it is no longer an option. If it was exercised, value the swap "
             "it became with pv(); if it lapsed it is worth nothing. Priced as an option "
             "it would report the intrinsic value of a right that no longer exists."
@@ -346,6 +359,7 @@ def swaption_pv(
                 "strike": swaption.strike,
                 "expiry_years": expiry,
                 "annuity": numeraire,
+                "expires_on_valuation_date": swaption.expiry == valuation,
                 "numeraire_note": (
                     "The swap annuity. Under the annuity measure the forward swap rate "
                     "is a martingale, which is what makes a one-dimensional option "
@@ -371,15 +385,22 @@ class PeriodStatus(StrEnum):
     ``PAID``
         Paid on or before the valuation date. Gone, and not valued.
     ``FIXED``
-        Its rate fixed on or before the valuation date and it is still to be
-        paid. Nothing optional is left: it is worth its intrinsic value on
-        the published fixing.
+        Still to be paid, and valued on its published fixing: one dated
+        before the valuation date, which is required, or one dated on it
+        that the fixings supplied. Nothing optional is left: it is worth its
+        intrinsic value on that fixing.
+    ``FIXES_TODAY``
+        Fixes on the valuation date and the fixings did not hold that day's
+        rate. Valued on the curve's forward with no time left -- its
+        intrinsic value on the forward -- as QuantLib does when today's
+        fixing is not in the history.
     ``LIVE``
         Fixes after the valuation date. An option.
     """
 
     PAID = "paid"
     FIXED = "fixed"
+    FIXES_TODAY = "fixes_today"
     LIVE = "live"
 
 
@@ -389,13 +410,15 @@ class CapletValuation:
 
     Attributes:
         caplet: The period's terms.
-        status: ``FIXED`` or ``LIVE``; a paid period is never valued.
-        forward: The projected rate as a decimal for a live period, ``None``
-            for a fixed one, whose rate is known.
+        status: ``FIXED``, ``FIXES_TODAY`` or ``LIVE``; a paid period is
+            never valued.
+        forward: The projected rate as a decimal for a live period or one
+            fixing today without its fixing, ``None`` for a fixed one, whose
+            rate is known.
         fixing: The published fixing as a decimal for a fixed period,
-            ``None`` for a live one.
+            ``None`` otherwise.
         expiry: Years from the valuation date to the fixing, on the curve's
-            time basis; zero for a fixed period.
+            time basis; zero for a fixed period and one fixing today.
         numeraire: ``notional * year_fraction * P(payment)``, in the
             caplet's currency.
         value: Present value in the caplet's currency.
@@ -414,6 +437,7 @@ class CapletValuation:
         return {
             **self.caplet.describe(),
             "status": self.status.value,
+            "fixing_source": _FIXING_SOURCE[self.status],
             "forward": self.forward,
             "fixing": self.fixing,
             "expiry_years": self.expiry,
@@ -422,25 +446,81 @@ class CapletValuation:
         }
 
 
+_FIXING_SOURCE: dict[PeriodStatus, str | None] = {
+    PeriodStatus.FIXED: "published",
+    PeriodStatus.FIXES_TODAY: "curve_forward_on_fixing_day",
+    PeriodStatus.LIVE: None,
+    PeriodStatus.PAID: None,
+}
+"""What a period's rate was taken from, for the evidence: the fixing, the curve, or neither yet."""
+
+
 def _status(caplet: Caplet, valuation: date) -> PeriodStatus:
+    """Paid, fixed before the valuation date, fixing on it, or live.
+
+    ``FIXES_TODAY`` is provisional: it becomes ``FIXED`` when the fixings
+    hold that day's rate.
+    """
     if caplet.payment <= valuation:
         return PeriodStatus.PAID
-    if caplet.fixing_date <= valuation:
+    if caplet.fixing_date < valuation:
         return PeriodStatus.FIXED
+    if caplet.fixing_date == valuation:
+        return PeriodStatus.FIXES_TODAY
     return PeriodStatus.LIVE
+
+
+def _period_name(caplet: Caplet, valuation: date) -> str:
+    kind = "caplet" if caplet.kind is OptionKind.CALL else "floorlet"
+    return (
+        f"the {kind} from {caplet.accrual_start} to {caplet.accrual_end}, paid "
+        f"{caplet.payment}, fixed on {caplet.fixing_date}, before the valuation "
+        f"date {valuation}"
+    )
+
+
+def _finite_fixing(caplet: Caplet, rate: float, what: str) -> float:
+    if not math.isfinite(rate):
+        raise MissingFixingError(
+            f"{what}, and its fixing in the series {caplet.index.name!r} is {rate!r}, not "
+            "a finite number. A NaN here is usually a gap in the source file."
+        )
+    return rate
+
+
+def _todays_fixing(
+    caplet: Caplet, valuation: date, fixings: MarketSnapshot | None
+) -> tuple[float, Provenance] | None:
+    """The fixing published on the valuation date, or ``None`` when it was not supplied.
+
+    Absent is not an error on the fixing day itself: the rate is being
+    published that day, so the curve's forward stands in for it -- QuantLib's
+    default, ``enforcesTodaysHistoricFixings = False`` -- and the period says
+    so in the evidence. A fixing that is there and is not a number is still
+    refused.
+    """
+    if fixings is None:
+        return None
+    series_id = caplet.index.name
+    try:
+        rate = fixings.fixing(series_id, caplet.fixing_date)
+    except MissingFixingError:
+        # Not published yet, or not supplied: the documented fallback above,
+        # recorded per period as fixing_source = curve_forward_on_fixing_day.
+        return None
+    what = (
+        f"the period from {caplet.accrual_start} to {caplet.accrual_end} fixes on the "
+        f"valuation date {valuation}"
+    )
+    return _finite_fixing(caplet, rate, what), fixings.require(series_id).provenance
 
 
 def _published_fixing(
     caplet: Caplet, valuation: date, fixings: MarketSnapshot | None
 ) -> tuple[float, Provenance]:
-    """The published rate of a period that has fixed, refusing rather than projecting it."""
+    """The published rate of a period fixed before the valuation date; never projected."""
     series_id = caplet.index.name
-    kind = "caplet" if caplet.kind is OptionKind.CALL else "floorlet"
-    what = (
-        f"the {kind} from {caplet.accrual_start} to {caplet.accrual_end}, paid "
-        f"{caplet.payment}, fixed on {caplet.fixing_date}, on or before the valuation "
-        f"date {valuation}"
-    )
+    what = _period_name(caplet, valuation)
     if fixings is None:
         raise MissingFixingError(
             f"{what}: its rate is a published {caplet.index.label} fixing now, not a "
@@ -455,12 +535,7 @@ def _published_fixing(
             f"{what}, and the fixings passed do not have it ({missing}). Add the "
             f"{caplet.fixing_date} fixing to the series {series_id!r}, as a decimal."
         ) from missing
-    if not math.isfinite(rate):
-        raise MissingFixingError(
-            f"{what}, and its fixing in the series {series_id!r} is {rate!r}, not a "
-            "finite number. A NaN here is usually a gap in the source file."
-        )
-    return rate, fixings.require(series_id).provenance
+    return _finite_fixing(caplet, rate, what), fixings.require(series_id).provenance
 
 
 def _value_period(
@@ -475,13 +550,32 @@ def _value_period(
     if status is PeriodStatus.PAID:
         return None, None
     numeraire = caplet_numeraire(caplet, curve_set)
+    published: tuple[float, Provenance] | None = None
     if status is PeriodStatus.FIXED:
-        rate, provenance = _published_fixing(caplet, valuation, fixings)
+        published = _published_fixing(caplet, valuation, fixings)
+    elif status is PeriodStatus.FIXES_TODAY:
+        published = _todays_fixing(caplet, valuation, fixings)
+        if published is None:
+            forward = caplet_forward_rate(caplet, curve_set)
+            return (
+                CapletValuation(
+                    caplet=caplet,
+                    status=status,
+                    forward=forward,
+                    fixing=None,
+                    expiry=0.0,
+                    numeraire=numeraire,
+                    value=numeraire * max(caplet.kind.sign * (forward - caplet.strike), 0.0),
+                ),
+                None,
+            )
+    if published is not None:
+        rate, provenance = published
         intrinsic = max(caplet.kind.sign * (rate - caplet.strike), 0.0)
         return (
             CapletValuation(
                 caplet=caplet,
-                status=status,
+                status=PeriodStatus.FIXED,
                 forward=None,
                 fixing=rate,
                 expiry=0.0,
@@ -524,19 +618,22 @@ def caplet_pv(
         volatility: The quote for this period.
         as_of: Valuation date. Defaults to the curve's.
         fixings: Published fixings, as decimals, in a series named after the
-            caplet's index (``"TERM_SOFR_3M"``). Needed only when the period
-            fixed on or before the valuation date.
+            caplet's index (``"TERM_SOFR_3M"``). Required when the period
+            fixed before the valuation date; read, if present, when it fixes
+            on it.
 
     Returns:
         The present value in the caplet's currency: zero for a period paid
-        on or before the valuation date, the discounted intrinsic value on
-        the published fixing for one that has fixed, and the option price
-        to the fixing date otherwise.
+        on or before the valuation date; the discounted intrinsic value on
+        the published fixing for one that has fixed, or on the curve's
+        forward for one fixing on the valuation date whose fixing was not
+        supplied; and the option price to the fixing date otherwise.
 
     Raises:
         MissingForwardError: The period ends past the projection curve.
-        MissingFixingError: The period has fixed and ``fixings`` does not
-            hold its fixing.
+        MissingFixingError: The period fixed before the valuation date and
+            ``fixings`` does not hold its fixing, or a fixing it holds is
+            not a finite number.
     """
     valuation = as_of or curve_set.as_of
     period, _ = _value_period(caplet, curve_set, volatility, valuation, fixings)
@@ -570,8 +667,8 @@ def cap_floor_periods(
 
     Raises:
         MissingForwardError: A live period ends past the projection curve.
-        MissingFixingError: A period has fixed and ``fixings`` does not hold
-            its fixing.
+        MissingFixingError: A period fixed before the valuation date and
+            ``fixings`` does not hold its fixing.
     """
     valuation = as_of or curve_set.as_of
     periods = []
@@ -604,9 +701,10 @@ def cap_floor_pv(
         volatility: The flat quote. Its units pick the model.
         as_of: Valuation date. Defaults to the curve's.
         fixings: Published fixings, as decimals, in a series named after the
-            cap's index (``"TERM_SOFR_3M"``). Needed only when a period still
-            to be paid fixed on or before the valuation date; a strip that
-            starts later never reads it.
+            cap's index (``"TERM_SOFR_3M"``). Required for a period still
+            to be paid that fixed before the valuation date; read, if
+            present, for one fixing on it; never read by a strip that fixes
+            later.
         source_evidence: Evidence of the curves and the surface.
 
     Returns:
@@ -617,8 +715,9 @@ def cap_floor_pv(
     Raises:
         ValueError: The strip has no periods, or every one has been paid.
         MissingForwardError: A live period ends past the projection curve.
-        MissingFixingError: A period has fixed and ``fixings`` does not hold
-            its fixing; the message names the series and the date.
+        MissingFixingError: A period fixed before the valuation date and
+            ``fixings`` does not hold its fixing; the message names the
+            series and the date.
     """
     valuation = as_of or curve_set.as_of
     caplets = cap.caplets
@@ -659,8 +758,10 @@ def cap_floor_pv(
                 ),
                 "seasoning_note": (
                     "A period paid on or before the valuation date is not valued. One "
-                    "that fixed on or before it is its intrinsic value on the published "
-                    "fixing, with no time value. Only the rest are options."
+                    "fixed before it is its intrinsic value on the published fixing. One "
+                    "fixing on it is its intrinsic value on that day's fixing if supplied, "
+                    "else on the curve's forward (fixing_source says which). Only the "
+                    "rest are options."
                 ),
                 "per_period": [p.describe() for p in periods],
             },

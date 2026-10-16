@@ -103,10 +103,11 @@ def _decayed_one_day(
     """The price with every expiry measured from tomorrow and nothing else moved.
 
     Away from any event this is exactly the price at ``as_of`` tomorrow, the
-    same arithmetic in the same order. It differs where tomorrow is an event:
-    a swaption expiring then decays to its intrinsic value rather than being
-    refused as expired, and a caplet fixing then decays to its intrinsic value
-    on the forward rather than asking for a fixing that is not published yet.
+    same arithmetic in the same order. It differs where an event falls today
+    or tomorrow: a caplet fixing today keeps today's value rather than, seen
+    from tomorrow, demanding today's fixing; a period paid tomorrow does not
+    drop out; and a swaption or caplet expiring tomorrow decays to its
+    intrinsic value on the forward.
     """
     tomorrow = valuation + timedelta(days=1)
     if isinstance(option, Swaption):
@@ -277,10 +278,10 @@ def option_greeks(
 
     Raises:
         ValueError: Either bump is not positive, ``option`` is neither a
-            swaption nor a cap, a swaption has expired, or every period of a
-            cap has been paid.
-        MissingFixingError: A period of a cap has fixed and ``fixings`` does
-            not hold its fixing.
+            swaption nor a cap, a swaption expired before the valuation date,
+            or every period of a cap has been paid.
+        MissingFixingError: A period of a cap fixed before the valuation date
+            and ``fixings`` does not hold its fixing.
     """
 
     if rate_bump_bp <= 0.0 or vol_bump_bp <= 0.0:
@@ -312,6 +313,10 @@ def option_greeks(
             volatility.as_normal_bp() + vol_bump_bp, VolUnits.NORMAL_BP
         )
         bumped = at(curve_set, bumped_vol)
+    elif isinstance(option, Swaption) and option.time_to_expiry(valuation) == 0.0:
+        # Expiring today: the price is the intrinsic value whatever the
+        # volatility, and there is no normal volatility to invert for.
+        bumped = base
     elif isinstance(option, Swaption):
         sigma = _lognormal_after_normal_bump(
             volatility.as_lognormal_decimal(),

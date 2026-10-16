@@ -310,6 +310,30 @@ SEASONED_QL = {
 SEASONED_CAP_QL = {"normal": 206098.42405991862, "lognormal": 204921.42004308637}
 """QuantLib 1.44 as above, cap at 3% from 2025-12-15 to 2027-12-15, 2025-12-11 fixed at 4.30%."""
 
+SEASONED_WITHOUT_TODAY_QL = {
+    # QuantLib 1.44 as SEASONED_QL, but with only the fixings dated *before*
+    # 2026-01-15 in the history. With enforcesTodaysHistoricFixings = False,
+    # its default, QuantLib forecasts the period fixing that day from the
+    # curve and values it with no time left. Script: work-fix-options-vol/
+    # ql_today.py in the review scratchpad.
+    ("cap", "normal"): 230920.174553038,
+    ("cap", "lognormal"): 229611.5301420325,
+    ("floor", "normal"): 11200.150898214792,
+    ("floor", "lognormal"): 9891.506487209324,
+}
+QL_TODAYS_FORECAST = 0.03964725409627512
+"""QuantLib's forecast of the 2026-01-15 fixing for the period 2026-01-20 to 2026-04-20."""
+
+FIRST_FIXING_TODAY_QL = {
+    # QuantLib 1.44, cap at 4.2% on 10M from 2026-01-20 to 2027-01-20, whose
+    # first period fixes on the evaluation date 2026-01-15: no history, and
+    # with a 4.50% fixing for that day added. Same script.
+    ("normal", None): 11018.001739678133,
+    ("lognormal", None): 13288.573871299286,
+    ("normal", 0.045): 18440.324596276183,
+    ("lognormal", 0.045): 20710.896727897336,
+}
+
 
 def _fixings(*days: date, rate: float = 0.043) -> MarketSnapshot:
     """Term SOFR 3M fixings, all at ``rate``, under the index's name."""
@@ -399,14 +423,43 @@ class TestASeasonedCapOrFloor:
         assert "'TERM_SOFR_3M'" in message
         assert "2025-10-16" in message
 
-    def test_a_fixing_on_the_valuation_date_is_needed_too(self, option_curve_set):
+    @pytest.mark.parametrize("product", ["cap", "floor"])
+    @pytest.mark.parametrize(
+        "units,vol",
+        [("normal", Volatility.normal_bp(90.0)), ("lognormal", Volatility.lognormal_percent(25.0))],
+    )
+    def test_a_fixing_on_the_valuation_date_comes_from_the_curve_when_absent(
+        self, option_curve_set, product, units, vol
+    ):
         # 2026-01-15 is both the valuation date and the fixing of the period
-        # from 2026-01-20: anything dated on or before the valuation date has
-        # happened, as a payment on it has been made.
-        with pytest.raises(MissingFixingError, match="2026-01-15"):
-            cap_floor_pv(
-                _seasoned("floor"), option_curve_set, VOL, fixings=_fixings(date(2025, 10, 16))
-            )
+        # from 2026-01-20. Without that day's fixing the period is valued on
+        # the curve's forward with no time left -- QuantLib's default -- and
+        # the evidence says so; the fixing before it is still required.
+        result = cap_floor_pv(
+            _seasoned(product), option_curve_set, vol, fixings=_fixings(date(2025, 10, 16))
+        )
+        assert result.value == pytest.approx(
+            SEASONED_WITHOUT_TODAY_QL[(product, units)], rel=1e-13, abs=0.0
+        )
+        today = next(
+            p for p in result.evidence.fields["per_period"] if p["fixing_date"] == "2026-01-15"
+        )
+        assert today["status"] == "fixes_today"
+        assert today["fixing_source"] == "curve_forward_on_fixing_day"
+        assert today["fixing"] is None
+        assert today["expiry_years"] == 0.0
+        assert today["forward"] == pytest.approx(QL_TODAYS_FORECAST, rel=1e-13, abs=0.0)
+
+    def test_a_fixing_on_the_valuation_date_is_used_when_supplied(self, option_curve_set):
+        result = cap_floor_pv(
+            _seasoned("cap"), option_curve_set, VOL, fixings=_fixings(*SEASONED_FIXINGS)
+        )
+        today = next(
+            p for p in result.evidence.fields["per_period"] if p["fixing_date"] == "2026-01-15"
+        )
+        assert today["status"] == "fixed"
+        assert today["fixing_source"] == "published"
+        assert today["fixing"] == 0.043
 
     @pytest.mark.parametrize("rate", [float("nan"), float("inf")])
     def test_a_fixing_that_is_not_a_number_is_never_valued(self, option_curve_set, rate):
@@ -490,6 +543,12 @@ class TestASeasonedCapOrFloor:
         statuses = [p.status for p in periods]
         assert statuses[:2] == [PeriodStatus.FIXED, PeriodStatus.FIXED]
         assert set(statuses[2:]) == {PeriodStatus.LIVE}
+        without_today = cap_floor_periods(
+            _seasoned("floor"), option_curve_set, VOL, fixings=_fixings(date(2025, 10, 16))
+        )
+        assert [p.status for p in without_today[:2]] == [
+            PeriodStatus.FIXED, PeriodStatus.FIXES_TODAY,
+        ]
 
     def test_a_seasoned_cap_has_greeks(self, option_curve_set):
         cap = CapFloor(
@@ -584,3 +643,65 @@ class TestALognormalCapHasTheVegaOfItsCaplets:
             Volatility.lognormal_percent(25.0),
         ).vega
         assert whole == pytest.approx(live_only, rel=1e-12, abs=0.0)
+
+
+class TestACapWhoseFirstFixingIsToday:
+    """A spot-starting strip valued on its first fixing day.
+
+    The cap from 2026-01-20 fixes its first period on 2026-01-15, the
+    valuation date. It needs no fixings to be priced -- the curve's forward
+    stands in for that day's rate -- and uses the fixing when given one.
+    """
+
+    @staticmethod
+    def _cap() -> CapFloor:
+        return CapFloor(
+            effective=date(2026, 1, 20), maturity=date(2027, 1, 20), strike=0.042,
+            notional=10_000_000.0,
+        )
+
+    @pytest.mark.parametrize(
+        "units,vol",
+        [("normal", Volatility.normal_bp(90.0)), ("lognormal", Volatility.lognormal_percent(25.0))],
+    )
+    def test_without_the_fixing_it_matches_quantlibs_forecast(self, option_curve_set, units, vol):
+        cap = self._cap()
+        assert cap.caplets[0].fixing_date == AS_OF
+        value = cap_floor_pv(cap, option_curve_set, vol).value
+        assert value == pytest.approx(FIRST_FIXING_TODAY_QL[(units, None)], rel=1e-13, abs=0.0)
+
+    @pytest.mark.parametrize(
+        "units,vol",
+        [("normal", Volatility.normal_bp(90.0)), ("lognormal", Volatility.lognormal_percent(25.0))],
+    )
+    def test_with_the_fixing_it_is_the_intrinsic_value_on_it(self, option_curve_set, units, vol):
+        result = cap_floor_pv(
+            self._cap(), option_curve_set, vol, fixings=_fixings(AS_OF, rate=0.045)
+        )
+        assert result.value == pytest.approx(
+            FIRST_FIXING_TODAY_QL[(units, 0.045)], rel=1e-13, abs=0.0
+        )
+        # Closed form: (4.50% - 4.2%) on 90/360 of 10M, paid 2026-04-20,
+        # 95 days out on a flat 4% continuous ACT/365F curve.
+        first = result.evidence.fields["per_period"][0]
+        intrinsic = 0.003 * (90 / 360) * 10_000_000.0 * math.exp(-0.04 * 95 / 365)
+        assert first["status"] == "fixed"
+        assert first["value"] == pytest.approx(intrinsic, rel=1e-13, abs=0.0)
+
+    def test_the_period_fixing_today_has_no_theta_and_no_vega(self, option_curve_set):
+        # Its value is intrinsic whatever the volatility and whatever the day,
+        # so the strip's theta and vega are those of the periods after it.
+        vol = Volatility.lognormal_percent(25.0)
+        whole = option_greeks(self._cap(), option_curve_set, vol)
+        rest = option_greeks(
+            replace(self._cap(), include_first_period=False), option_curve_set, vol
+        )
+        assert whole.theta == pytest.approx(rest.theta, rel=1e-12, abs=0.0)
+        assert whole.vega == pytest.approx(rest.vega, rel=1e-12, abs=0.0)
+        assert whole.theta < 0.0
+
+    def test_theta_still_asks_for_no_fixing_tomorrow(self, option_curve_set):
+        # Seen from tomorrow, today's fixing would be in the past and
+        # required; theta holds every period's status at the valuation date.
+        greeks = option_greeks(self._cap(), option_curve_set, VOL)
+        assert math.isfinite(greeks.theta)
