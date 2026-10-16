@@ -16,7 +16,38 @@ from rates_engine.core.evidence import DataQuality, Provenance
 from rates_engine.market.classify import classify_series
 from rates_engine.market.snapshot import MarketSnapshot, Series
 
-__all__ = ["load_series_csv", "load_snapshot_csv", "FuturesSettlement", "load_settlements_csv"]
+__all__ = [
+    "MISSING_VALUE_MARKERS",
+    "is_missing_value",
+    "load_series_csv",
+    "load_snapshot_csv",
+    "FuturesSettlement",
+    "load_settlements_csv",
+]
+
+MISSING_VALUE_MARKERS = frozenset({"", ".", "na", "n/a", "nan"})
+"""How a CSV spells "no observation", compared stripped and case-insensitively.
+
+``"."`` is FRED's, ``"nan"`` is what ``str(float("nan"))`` and numpy write,
+``"NA"`` and ``"N/A"`` are R's and Excel's. The set used to be ``{"", ".",
+"NA", "NaN"}``, case-sensitive, so a lower-case ``nan`` was read as a NaN
+fixing and compounded into a NaN settlement. Anything else that parses as a
+non-finite number is refused by :class:`~rates_engine.market.snapshot.Series`
+rather than skipped: ``inf`` is not a way of saying a day is missing.
+"""
+
+
+def is_missing_value(raw: str) -> bool:
+    """Whether a CSV cell says the day has no observation.
+
+    Args:
+        raw: The cell's text, as read.
+
+    Returns:
+        ``True`` for every spelling in :data:`MISSING_VALUE_MARKERS`, in any
+        case and with surrounding whitespace.
+    """
+    return raw.strip().lower() in MISSING_VALUE_MARKERS
 
 
 def _parse_date(text: str) -> date:
@@ -35,8 +66,9 @@ def load_series_csv(
 
     Args:
         path: CSV file with a date column and a value column. Rows whose value
-            is empty or ``"."`` — how FRED marks a non-publication day — are
-            skipped rather than read as zero.
+            is a :data:`MISSING_VALUE_MARKERS` spelling -- empty, FRED's
+            ``"."``, ``nan``, ``NA``, ``N/A`` in any case -- are skipped
+            rather than read as zero or as NaN.
         series_id: Identifier to record on the series.
         value_column: Name of the value column.
         date_column: Name of the date column, ISO format.
@@ -50,7 +82,8 @@ def load_series_csv(
 
     Raises:
         FileNotFoundError: The path does not exist.
-        ValueError: A row's date or value cannot be parsed.
+        ValueError: A row's date or value cannot be parsed, or a value is
+            infinite; the message names the date.
     """
     path = Path(path)
     kind, quality, note = classify_series(series_id)
@@ -58,7 +91,7 @@ def load_series_csv(
     with path.open(newline="", encoding="utf-8") as handle:
         for row in csv.DictReader(handle):
             raw = (row.get(value_column) or "").strip()
-            if raw in {"", ".", "NA", "NaN"}:
+            if is_missing_value(raw):
                 continue
             rows.append((_parse_date(row[date_column]), float(raw)))
     rows.sort(key=lambda item: item[0])

@@ -61,6 +61,28 @@ class TestLoading:
         assert len(series) == 2
         assert series.get(date(2026, 1, 6)) is None
 
+    @pytest.mark.parametrize(
+        "marker", ["", ".", " . ", "nan", "NaN", "NAN", "na", "NA", "n/a", "N/A"]
+    )
+    def test_every_spelling_of_missing_is_skipped(self, tmp_path, marker):
+        # "nan" is what str(float("nan")) and numpy write; "." is FRED's;
+        # "NA" and "N/A" are R's and Excel's. Lower-case "nan" used to load
+        # as a NaN fixing and compound into a NaN settlement with no refusal.
+        path = tmp_path / "gappy.csv"
+        path.write_text(
+            f"date,value\n2026-01-05,0.0431\n2026-01-06,{marker}\n2026-01-07,0.0432\n",
+            encoding="utf-8",
+        )
+        series = load_series_csv(path, "SOFR")
+        assert series.dates == (date(2026, 1, 5), date(2026, 1, 7))
+
+    @pytest.mark.parametrize("value", ["inf", "-inf", "Infinity"])
+    def test_an_infinite_value_refuses_and_names_the_date(self, tmp_path, value):
+        path = tmp_path / "infinite.csv"
+        path.write_text(f"date,value\n2026-01-05,0.0431\n2026-01-06,{value}\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="2026-01-06"):
+            load_series_csv(path, "SOFR")
+
 
 class TestRefusals:
     """PRD-001 AC-2.3: a fixing that is not there is never made up."""
@@ -101,6 +123,19 @@ class TestRefusals:
     def test_series_with_mismatched_columns_refuses(self):
         with pytest.raises(ValueError, match="2 dates"):
             Series("X", (date(2026, 1, 1), date(2026, 1, 2)), (0.01,), Provenance("file"))
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+    def test_a_non_finite_value_refuses_and_names_the_date(self, value):
+        # A NaN fixing passed every check and came out of compounding as a
+        # NaN settlement price. A missing observation is left out of a
+        # series, which is what the refusals above are built on.
+        with pytest.raises(ValueError, match="2026-01-02"):
+            Series(
+                "SOFR",
+                (date(2026, 1, 1), date(2026, 1, 2)),
+                (0.0431, value),
+                Provenance("file"),
+            )
 
 
 class TestNonPublicationDays:

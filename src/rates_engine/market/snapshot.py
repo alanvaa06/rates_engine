@@ -15,6 +15,7 @@ average the two readings coincide; for anything compounded they do not.
 from __future__ import annotations
 
 import bisect
+import math
 from dataclasses import dataclass
 from datetime import date, timedelta
 
@@ -33,7 +34,8 @@ class Series:
         series_id: Identifier, e.g. ``"SOFR"`` or ``"DGS2"``.
         dates: Observation dates, strictly increasing.
         values: Observations, in the series' own units. Overnight rates are
-            decimals, so 5.31% is ``0.0531``.
+            decimals, so 5.31% is ``0.0531``. Finite: a day without an
+            observation is absent from ``dates``, not present as NaN.
         provenance: Source, retrieval time and data quality.
     """
 
@@ -50,6 +52,17 @@ class Series:
             )
         if any(b <= a for a, b in zip(self.dates, self.dates[1:], strict=False)):
             raise ValueError(f"series {self.series_id!r} dates must be strictly increasing")
+        # A NaN is not None, so every "is there a fixing?" check downstream
+        # counted it as present, and it came out of compounding as a NaN
+        # settlement price with no error. A missing observation is left out
+        # of the series, which is what MissingFixingError then catches.
+        for day, value in zip(self.dates, self.values, strict=True):
+            if not math.isfinite(value):
+                raise ValueError(
+                    f"series {self.series_id!r} has {value!r} on {day}. A missing "
+                    "observation is left out of the series, never stored as NaN or "
+                    "infinity; drop the row, or supply the value"
+                )
 
     def __len__(self) -> int:
         """Number of observations."""

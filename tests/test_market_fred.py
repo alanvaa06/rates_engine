@@ -61,6 +61,18 @@ def test_a_non_publication_marker_is_skipped_not_read_as_zero(stub_urlopen):
     assert series.get(date(2026, 1, 15)) is None
 
 
+def test_every_spelling_of_missing_is_skipped(monkeypatch):
+    # The same markers as the file provider, so that a download and a file
+    # cannot disagree about which days exist.
+    payload = (
+        "observation_date,SOFR\n2026-01-12,4.31\n2026-01-13,nan\n2026-01-14,NaN\n"
+        "2026-01-15,N/A\n2026-01-16,na\n2026-01-20,4.33\n"
+    )
+    monkeypatch.setattr("urllib.request.urlopen", lambda url, timeout=None: _Response(payload))
+    series = fred.fetch_series("SOFR")
+    assert series.dates == (date(2026, 1, 12), date(2026, 1, 20))
+
+
 def test_it_calls_the_documented_endpoint(stub_urlopen):
     fred.fetch_series("DGS2")
     assert stub_urlopen == ["https://fred.stlouisfed.org/graph/fredgraph.csv?id=DGS2"]

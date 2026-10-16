@@ -16,6 +16,7 @@ from datetime import UTC, date, datetime
 
 from rates_engine.core.evidence import Provenance
 from rates_engine.market.classify import classify_series
+from rates_engine.market.providers.file import is_missing_value
 from rates_engine.market.snapshot import MarketSnapshot, Series
 
 __all__ = ["FRED_CSV_URL", "fetch_series", "fetch_snapshot"]
@@ -54,7 +55,7 @@ def fetch_series(series_id: str, *, timeout: float = 30.0) -> Series:
     value_index = 1 if len(header) > 1 else 0
     for row in reader:
         raw = row[value_index].strip()
-        if raw in {"", ".", "NA"}:
+        if is_missing_value(raw):
             continue
         rows.append((date.fromisoformat(row[0].strip()), float(raw) / 100.0))
     rows.sort(key=lambda item: item[0])
