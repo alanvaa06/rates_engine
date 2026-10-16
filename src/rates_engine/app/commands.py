@@ -325,7 +325,7 @@ def fx_forward(config: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def hedge_structures(config: dict[str, Any] | None) -> dict[str, Any]:
-    """Compare the seven hedge structures against a transaction exposure.
+    """Compare the eight hedge structures against a transaction exposure.
 
     Args:
         config: The whole configuration mapping. ``None`` is refused by name.

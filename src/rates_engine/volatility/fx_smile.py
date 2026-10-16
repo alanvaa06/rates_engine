@@ -257,7 +257,7 @@ class SmileReading(EngineResult):
 
 @dataclass(frozen=True)
 class VannaVolgaSmile:
-    """Three quotes, three pillar strikes, and a volatility at any strike.
+    """Three or five quotes, their pillar strikes, and a volatility at any strike.
 
     Attributes:
         spot: Spot rate, quote currency per unit of base.
