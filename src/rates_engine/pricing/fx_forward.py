@@ -92,9 +92,10 @@ from rates_engine.core.errors import (
     CurveMismatchError,
     ImplausibleInputError,
 )
-from rates_engine.core.evidence import Evidence
+from rates_engine.core.evidence import Degradation, Evidence
 from rates_engine.core.results import EngineResult
-from rates_engine.curves.discount import DiscountCurve
+from rates_engine.curves.discount import CurveSet, DiscountCurve
+from rates_engine.pricing.collateral import curve_warnings, merge_warnings
 
 __all__ = [
     "BASIS_LEG",
@@ -206,6 +207,21 @@ def _check(pair: CurrencyPair, domestic: DiscountCurve, foreign: DiscountCurve) 
         )
 
 
+def _curve_warnings(domestic: DiscountCurve, foreign: DiscountCurve) -> tuple[Degradation, ...]:
+    """What every valuation on these two curves carries, each code once.
+
+    The same rule as a swap or an option: the curves' own provenance and the
+    collateral assumption of their currency, through
+    :func:`~rates_engine.pricing.collateral.curve_warnings`. The forward
+    discounts the quote leg on a peso curve, so it inherits the unresolved
+    MXN conventions and reads ``assumed`` — which it did not, until the
+    review found a forward on a TIIE de Fondeo curve reporting ``observed``.
+    """
+    return merge_warnings(
+        curve_warnings(CurveSet(domestic)), curve_warnings(CurveSet(foreign))
+    )
+
+
 def _spot_date(pair: CurrencyPair, delivery: date, as_of: date) -> date:
     """The pair's spot date, refusing a delivery that is not after it."""
     spot_date = pair.spot_date(as_of)
@@ -266,7 +282,9 @@ def forward_from_curves(
         source_evidence: Evidence of the curves, chained in.
 
     Returns:
-        The :class:`FXForwardResult`.
+        The :class:`FXForwardResult`. Its evidence carries the curves'
+        degradations and their currencies' collateral assumptions, so a
+        forward on a peso curve reads ``assumed``.
 
     Raises:
         CurrencyMismatchError: Either curve is not in the currency the pair
@@ -324,6 +342,7 @@ def forward_from_curves(
             "outright": outright,
             "cip_note": CIP_BROKEN_NOTE,
         },
+        warnings=_curve_warnings(domestic, foreign),
         sources=source_evidence,
     )
     return FXForwardResult(
@@ -430,6 +449,7 @@ def implied_basis(
                 "hide the same number inside the curve."
             ),
         },
+        warnings=_curve_warnings(domestic, foreign),
         sources=source_evidence,
     )
     return FXForwardResult(

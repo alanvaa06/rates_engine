@@ -472,3 +472,79 @@ class TestTheForwardRunsFromTheSpotDate:
         assert fields["year_fraction"] == pytest.approx(0.2493150684931507, rel=1e-12)
         assert result.payload_fields()["spot_date"] == "2026-09-17"
         assert result.spot_date == date(2026, 9, 17)
+
+
+class TestAForwardInheritsItsCurvesAssumptions:
+    """The review's finding 1.4 (evidence): a peso forward came back `observed`.
+
+    `llms.txt` promises that every price discounted on a peso curve carries
+    the unresolved MXN conventions, so its quality reads `assumed`. The
+    forward discounts the quote leg on the peso curve and ignored both
+    curves' provenance (`REVISION-rates_engine-2026-10-15-repro/risk-app/
+    r03_fx_evidence.py`: a TIIE de Fondeo curve with seven assumptions in
+    its provenance gave a forward reading `observed`). It now carries what
+    `pricing.collateral.curve_warnings` says every valuation on those curves
+    carries.
+    """
+
+    @staticmethod
+    def _peso_curve():
+        from rates_engine.curves.bootstrap import RealizedStubNode
+        from rates_engine.curves.mxn import TIIEBenchmark, bootstrap_mxn_curve
+
+        end = date(2027, 9, 16)
+        stub = RealizedStubNode(end=end, accrual_factor=1.0 + R_MXN * (end - AS_OF).days / 360.0)
+        return bootstrap_mxn_curve(AS_OF, (stub,), TIIEBenchmark.TIIE_FONDEO).curve
+
+    def test_a_bootstrapped_peso_curve_makes_the_forward_assumed(self, usd, delivery):
+        from rates_engine.core.evidence import DataQuality
+
+        peso = self._peso_curve()
+        assert peso.provenance, "the fixture should carry the MXN assumptions"
+        result = forward_from_curves(USDMXN, SPOT, delivery, peso, usd)
+        assert result.evidence.worst_quality is DataQuality.ASSUMED
+        codes = {w.code for w in result.evidence.warnings}
+        assert {d.code for d in peso.provenance} <= codes
+
+    def test_a_hand_built_peso_curve_still_carries_the_collateral_assumption(
+        self, usd, mxn, delivery
+    ):
+        """No provenance on the curve, but the rate peso collateral earns is
+        itself unverified, which `collateral_warnings` reports for any MXN
+        discounting."""
+        from rates_engine.core.evidence import DataQuality
+
+        assert mxn.provenance == ()
+        result = forward_from_curves(USDMXN, SPOT, delivery, mxn, usd)
+        assert result.evidence.worst_quality is DataQuality.ASSUMED
+        assert "unresolved_convention:mxn_collateral_rate" in {
+            w.code for w in result.evidence.warnings
+        }
+
+    def test_a_degraded_dollar_curve_is_carried_too(self, mxn, delivery):
+        from rates_engine.core.evidence import DataQuality, Degradation
+
+        proxy = Degradation(
+            code="treasury_par_proxy",
+            message="long end from Treasury par yields",
+            data_quality=DataQuality.PROXY,
+        )
+        nodes = tuple(AS_OF + timedelta(days=365 * k) for k in (1, 2, 3, 5))
+        usd = DiscountCurve(
+            AS_OF, nodes, tuple(math.exp(-R_USD * k) for k in (1, 2, 3, 5)),
+            currency=Currency.USD, provenance=(proxy,),
+        )
+        result = forward_from_curves(USDMXN, SPOT, delivery, mxn, usd)
+        assert "treasury_par_proxy" in {w.code for w in result.evidence.warnings}
+
+    def test_each_code_is_reported_once(self, usd, delivery):
+        peso = self._peso_curve()
+        codes = [w.code for w in forward_from_curves(USDMXN, SPOT, delivery, peso, usd).evidence.warnings]
+        assert len(codes) == len(set(codes))
+
+    def test_the_inverse_carries_them_as_well(self, usd, delivery):
+        from rates_engine.core.evidence import DataQuality
+
+        peso = self._peso_curve()
+        back = implied_basis(USDMXN, SPOT, 19.60, delivery, peso, usd)
+        assert back.evidence.worst_quality is DataQuality.ASSUMED
