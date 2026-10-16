@@ -10,7 +10,11 @@ import pytest
 from rates_engine.app import commands
 from rates_engine.app.builders import calibration_nodes
 from rates_engine.conventions.schedule import imm_date, next_imm_on_or_after
-from rates_engine.core.errors import ConfigurationError, IncompleteStripError
+from rates_engine.core.errors import (
+    ConfigurationError,
+    IncompleteStripError,
+    UnderdeterminedCurveError,
+)
 from rates_engine.core.evidence import DataQuality
 from rates_engine.curves.bootstrap import FuturesNode, RealizedStubNode, bootstrap_discount_curve
 from rates_engine.curves.discount import CurveSet
@@ -145,6 +149,13 @@ class TestContractsThatShareALabel:
             relabelled.append(i)
         with pytest.raises(ValueError, match="label"):
             strip_hedge(par_swap, tuple(relabelled), as_of=as_of)
+
+    def test_a_contract_passed_twice_is_refused_by_the_bootstrap(self, par_swap, strip, as_of):
+        # Same label and same period end: that is one node pinned twice, and
+        # the bootstrap's refusal names it, rather than a label clash.
+        twice = strip + (next(i for i in strip if isinstance(i, FuturesNode)),)
+        with pytest.raises(UnderdeterminedCurveError, match="both pin the node"):
+            strip_hedge(par_swap, twice, as_of=as_of)
 
 
 #: One SR1 contract, in USD per basis point: USD 5,000,000 x 30/360 x 1bp,

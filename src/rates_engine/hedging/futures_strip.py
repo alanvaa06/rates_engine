@@ -240,6 +240,12 @@ def strip_hedge(
     if require_full_coverage:
         _check_coverage(futures, start, end)
 
+    # The bootstrap first: it refuses two instruments pinning one node, which
+    # is what a contract passed twice is, under its own name.
+    base = bootstrap_discount_curve(as_of, instruments, long_end_source=long_end_source)
+    curve_set = CurveSet(base.curve)
+    swap_dv01 = dv01(swap, curve_set, source_evidence=(base.evidence,)).value
+
     # Every dict below is keyed per contract, not per label. Two futures with
     # the same label -- the default "future", or "SR3" on every row of a CLI
     # config -- once shared one entry, so each overwrote the last and the
@@ -247,10 +253,6 @@ def strip_hedge(
     # contracts instead of 878, with no error.
     keys = _contract_keys(futures)
     sizes, sizing = _contract_sizes(futures, keys, contract_dv01)
-
-    base = bootstrap_discount_curve(as_of, instruments, long_end_source=long_end_source)
-    curve_set = CurveSet(base.curve)
-    swap_dv01 = dv01(swap, curve_set, source_evidence=(base.evidence,)).value
 
     deltas: dict[str, float] = {}
     contracts: dict[str, float] = {}
