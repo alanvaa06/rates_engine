@@ -149,11 +149,10 @@ class Schedule:
         ``effective`` rolled by ``convention``, as in QuantLib's ``Schedule``,
         which adjusts its first date with the same convention as the rolls.
         Until v0.4 it was used as given, so a swap struck to start on the
-        June 2030 IMM date --
-        Juneteenth, a SIFMA holiday -- accrued from the holiday rather than
-        from the Thursday after. This moves a number only when ``effective``
-        is not a business day; on a business day the adjustment returns it
-        unchanged.
+        June 2030 IMM date -- Juneteenth, a SIFMA holiday -- accrued from the
+        holiday rather than from the Thursday after. This moves a number only
+        when ``effective`` is not a business day; on a business day the
+        adjustment returns it unchanged.
 
         **A first period that rolls onto the start is dropped.** When the
         convention pulls the first roll date back onto the adjusted

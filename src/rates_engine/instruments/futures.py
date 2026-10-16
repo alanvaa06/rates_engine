@@ -3,9 +3,13 @@
 The two contracts settle on different functions of the same fixings, and the
 difference is not cosmetic. SR1 averages the daily rates arithmetically over a
 calendar month; SR3 compounds them between IMM dates. At 5% overnight the
-compounded rate exceeds the average by roughly a tenth of a basis point over
-three months — larger than the 0.1 bp tolerance the settlement tests hold, so
-using one formula for both contracts fails loudly rather than quietly.
+compounded rate exceeds the average by about three basis points over three
+months: 3.10 bp across the IMM quarter from 18 March to 17 June 2026, each
+business day's rate accruing over the calendar days it covers, which is close
+to the continuous-time r * (1 + r T / 2) - r = 3.16 bp. That is thirty times
+the 0.1 bp tolerance the settlement tests hold, so using one formula for both
+contracts fails loudly rather than quietly. (Until v0.4 this paragraph said
+"roughly a tenth of a basis point", which is thirty times too small.)
 
 **Contract size and DV01.** Both are derived from notional and tenor rather
 than quoted from a table, so the arithmetic is visible:

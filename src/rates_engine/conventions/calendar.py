@@ -296,8 +296,11 @@ class HolidayCalendar:
 class SIFMAUSCalendar(HolidayCalendar):
     """SIFMA's recommended US holiday schedule for the fixed income market.
 
-    Twelve holidays. Juneteenth only from 2022, the year it became a federal
-    holiday; asking about 2021 correctly reports 19 June as a business day.
+    Twelve holidays. Juneteenth only from 2022. It became a federal holiday
+    in June 2021, first observed on Friday 18 June, but SIFMA did not
+    recommend a close for it until 2022, and the New York Fed published SOFR
+    for 18 June 2021 (0.05%, FRED). Asking about 2021 correctly reports that
+    Friday as a business day.
 
     **It is the calendar SOFR fixes on**, and where that and SIFMA's
     recommendation part, it follows SOFR. The one place they do is Good
