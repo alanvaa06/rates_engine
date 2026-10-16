@@ -127,6 +127,13 @@ class FuturesNode:
         label: Name for the evidence record.
         provenance: Where the settlement price came from.
         convexity: Model, sigma, kappa and adjustment in bp, for the evidence.
+        contract: Which SOFR future this is, ``"SR1"`` or ``"SR3"``, or
+            ``None`` to leave it to the period. The curve does not read it;
+            :func:`~rates_engine.hedging.futures_strip.strip_hedge` does,
+            because the two are worth different amounts per basis point (USD
+            41.67 and USD 25.00) and a hedge sized at the wrong one buys the
+            wrong number of contracts. Left as ``None``, a calendar-month
+            period is an SR1 and anything else is sized as an SR3.
     """
 
     start: date
@@ -137,6 +144,18 @@ class FuturesNode:
         default_factory=lambda: Provenance(source="file", instrument_kind="futures_settlement")
     )
     convexity: dict[str, Any] = field(default_factory=dict)
+    contract: str | None = None
+
+    def __post_init__(self) -> None:
+        # The names are checked here, where the node is built, rather than
+        # when a hedge first reads them: a misspelt contract would otherwise
+        # pass through every bootstrap unnoticed. What each one is worth is
+        # the hedging layer's business, which is why only the names live here.
+        if self.contract is not None and self.contract not in ("SR1", "SR3"):
+            raise ValueError(
+                f"{self.label}: contract must be 'SR1' or 'SR3', or None to read it from "
+                f"the period; got {self.contract!r}"
+            )
 
     @property
     def node_date(self) -> date:
@@ -150,12 +169,15 @@ class FuturesNode:
 
     def describe(self) -> dict[str, Any]:
         """Terms of the futures node, including how its forward was adjusted."""
+        # ``contract`` only when it was given, so that the bootstrap payload of
+        # every node built before the field existed reads exactly as it did.
         return {
             "kind": "future",
             "start": self.start.isoformat(),
             "end": self.end.isoformat(),
             "forward_rate": self.forward_rate,
             "convexity": dict(self.convexity) or None,
+            **({"contract": self.contract} if self.contract is not None else {}),
         }
 
 

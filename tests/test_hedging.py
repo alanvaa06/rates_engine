@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import timedelta
+from datetime import date, timedelta
 
 import pytest
 
 from rates_engine.app import commands
+from rates_engine.app.builders import calibration_nodes
 from rates_engine.conventions.schedule import imm_date, next_imm_on_or_after
-from rates_engine.core.errors import IncompleteStripError
-from rates_engine.curves.bootstrap import FuturesNode
-from rates_engine.hedging.futures_strip import SR3_DV01, shock_table, strip_hedge
+from rates_engine.core.errors import ConfigurationError, IncompleteStripError
+from rates_engine.core.evidence import DataQuality
+from rates_engine.curves.bootstrap import FuturesNode, RealizedStubNode, bootstrap_discount_curve
+from rates_engine.curves.discount import CurveSet
+from rates_engine.hedging.futures_strip import SR1_DV01, SR3_DV01, shock_table, strip_hedge
+from rates_engine.instruments.swaps import OISSwap
+from rates_engine.pricing.linear import par_rate
 from rates_engine.risk.sensitivities import money_convexity
 
 
@@ -140,6 +145,186 @@ class TestContractsThatShareALabel:
             relabelled.append(i)
         with pytest.raises(ValueError, match="label"):
             strip_hedge(par_swap, tuple(relabelled), as_of=as_of)
+
+
+#: One SR1 contract, in USD per basis point: USD 5,000,000 x 30/360 x 1bp,
+#: the figure CME publishes for the one-month SOFR future (41.67). Written
+#: out here rather than imported, so the test does not lean on the constant
+#: it checks.
+SR1_TICK = 5_000_000 * (30 / 360) * 1e-4
+#: One SR3 contract: USD 1,000,000 x 0.25 x 1bp.
+SR3_TICK = 1_000_000 * 0.25 * 1e-4
+
+MIX_AS_OF = date(2026, 1, 15)
+
+
+def _sr1_sr3_mix(*, declare: bool = True) -> tuple:
+    """Three SR1 months under three SR3 quarters, as PRD-001 US-3 builds a front end.
+
+    The first SR3 quarter (18 March to 17 June) overlaps the SR1 months of
+    March and April, which is how the two contracts are traded together.
+    """
+    rate = 0.04
+    sr1 = {"contract": "SR1"} if declare else {}
+    sr3 = {"contract": "SR3"} if declare else {}
+    return (
+        RealizedStubNode(end=date(2026, 2, 1), accrual_factor=1 + rate * 17 / 360),
+        FuturesNode(date(2026, 2, 1), date(2026, 3, 1), rate, label="SR1-G6", **sr1),
+        FuturesNode(date(2026, 3, 1), date(2026, 4, 1), rate, label="SR1-H6", **sr1),
+        FuturesNode(date(2026, 4, 1), date(2026, 5, 1), rate, label="SR1-J6", **sr1),
+        FuturesNode(date(2026, 3, 18), date(2026, 6, 17), rate, label="SR3-H6", **sr3),
+        FuturesNode(date(2026, 6, 17), date(2026, 9, 16), rate, label="SR3-M6", **sr3),
+        FuturesNode(date(2026, 9, 16), date(2026, 12, 16), rate, label="SR3-U6", **sr3),
+    )
+
+
+def _mix_swap(instruments) -> OISSwap:
+    curve_set = CurveSet(bootstrap_discount_curve(MIX_AS_OF, instruments).curve)
+    provisional = OISSwap(
+        effective=date(2026, 2, 3), maturity=date(2026, 12, 16), fixed_rate=0.04,
+        notional=100_000_000.0,
+    )
+    return replace(provisional, fixed_rate=par_rate(provisional, curve_set).value)
+
+
+def _mix_hedge(*, declare: bool = True, **kwargs):
+    instruments = _sr1_sr3_mix(declare=declare)
+    return strip_hedge(
+        _mix_swap(instruments), instruments, as_of=MIX_AS_OF, require_full_coverage=False,
+        **kwargs,
+    )
+
+
+class TestContractSize:
+    """An SR1 is worth USD 41.67 a basis point and an SR3 USD 25.00; each is sized at its own.
+
+    Every contract used to be divided by one ``contract_dv01``, 25.00 by
+    default, so an SR1 month was bought 1.67 times over: the February
+    contract of this strip carries -718.3 USD/bp of the swap and came out at
+    28.7 contracts where 17.2 offset it. Nothing in the result was
+    inconsistent, because the strip DV01 was multiplied back by the same
+    wrong tick; the error was in the number of contracts a trader would buy.
+    """
+
+    def test_an_sr1_contract_is_sized_at_its_own_tick(self):
+        hedge = _mix_hedge()
+        for label in ("SR1-G6", "SR1-H6", "SR1-J6"):
+            delta = hedge.bucketed_delta_by_instrument[label]
+            assert hedge.contracts[label] == pytest.approx(-delta / SR1_TICK, rel=1e-12)
+        # The review's figures for the February contract.
+        assert hedge.bucketed_delta_by_instrument["SR1-G6"] == pytest.approx(-718.3, abs=0.05)
+        assert hedge.contracts["SR1-G6"] == pytest.approx(17.2, abs=0.05)
+
+    def test_the_sr3_contracts_beside_them_stay_at_twenty_five(self):
+        hedge = _mix_hedge()
+        for label in ("SR3-H6", "SR3-M6", "SR3-U6"):
+            delta = hedge.bucketed_delta_by_instrument[label]
+            assert hedge.contracts[label] == pytest.approx(-delta / SR3_TICK, rel=1e-12)
+
+    def test_each_contract_reports_its_tick(self):
+        hedge = _mix_hedge()
+        assert hedge.contract_dv01_by_label["SR1-G6"] == pytest.approx(SR1_TICK, rel=1e-12)
+        assert hedge.contract_dv01_by_label["SR3-H6"] == pytest.approx(SR3_TICK, rel=1e-12)
+        assert SR1_DV01 == pytest.approx(41.67, abs=0.005)
+        # A mixed strip has no single contract DV01, and says so rather than
+        # reporting one of the two.
+        assert hedge.contract_dv01 is None
+        assert hedge.to_dict()["contract_dv01_by_label"]["SR1-H6"] == pytest.approx(SR1_TICK)
+
+    def test_the_strip_dv01_adds_each_contract_at_its_own_tick(self):
+        hedge = _mix_hedge()
+        expected = sum(
+            count * (SR1_TICK if label.startswith("SR1") else SR3_TICK)
+            for label, count in hedge.contracts.items()
+        )
+        assert hedge.strip_dv01 == pytest.approx(expected, rel=1e-12)
+        assert hedge.hedge_ratio == pytest.approx(-1.0, abs=1e-6)
+
+    def test_a_calendar_month_is_read_as_sr1_when_undeclared(self):
+        # The SR1 reference period is the calendar month and the SR3 one runs
+        # IMM date to IMM date; no SR3 can start on the first of a month, so
+        # the period says which contract an undeclared node is.
+        declared, undeclared = _mix_hedge(declare=True), _mix_hedge(declare=False)
+        assert undeclared.contracts == declared.contracts
+        sizing = undeclared.evidence.fields["contract_sizing"]
+        assert sizing["SR1-G6"]["contract"] == "SR1"
+        assert sizing["SR1-G6"]["basis"] == "calendar_month"
+        assert sizing["SR3-M6"]["basis"] == "imm_quarter"
+        assert declared.evidence.fields["contract_sizing"]["SR1-G6"]["basis"] == "declared"
+
+    def test_a_period_that_is_neither_is_sized_as_sr3_and_says_so(self, par_swap, strip, as_of):
+        shifted = tuple(
+            replace(i, start=i.start + timedelta(days=1)) if isinstance(i, FuturesNode) else i
+            for i in strip
+        )
+        hedge = strip_hedge(par_swap, shifted, as_of=as_of, require_full_coverage=False)
+        assert hedge.contract_dv01 == pytest.approx(SR3_TICK)
+        assert {s["basis"] for s in hedge.evidence.fields["contract_sizing"].values()} == {
+            "assumed"
+        }
+
+    def test_the_shock_table_prices_each_contract_at_its_own_tick(self):
+        # Sized at 41.67 but priced at 25 the SR1 leg would leave a
+        # first-order residual, and +10 and -10 would net to opposite signs.
+        rows = shock_table(_mix_hedge(), (-10.0, 10.0)).table.set_index("shock_bp")
+        assert rows.loc[10.0, "net_pnl"] == pytest.approx(rows.loc[-10.0, "net_pnl"], rel=0.05)
+        assert abs(rows.loc[10.0, "net_pnl"]) < 100.0
+
+    def test_the_evidence_derives_each_tick_it_used(self):
+        derivation = _mix_hedge().evidence.fields["contract_dv01_derivation"]
+        assert derivation["SR1"].startswith("5,000,000 x 30/360 x 1bp = 41.67 USD/bp")
+        assert derivation["SR3"] == "1,000,000 x 0.25 x 1bp = 25.00 USD/bp"
+
+    def test_an_sr3_strip_derives_only_the_sr3_tick(self, par_swap, strip, as_of):
+        derivation = strip_hedge(par_swap, strip, as_of=as_of).evidence.fields[
+            "contract_dv01_derivation"
+        ]
+        assert derivation == {"SR3": "1,000,000 x 0.25 x 1bp = 25.00 USD/bp"}
+
+    def test_the_assumed_sr1_notional_is_carried_into_the_hedge(self, par_swap, strip, as_of):
+        hedge = _mix_hedge()
+        assert "sr1_notional_assumed" in {w.code for w in hedge.evidence.warnings}
+        assert hedge.evidence.worst_quality is DataQuality.ASSUMED
+        sr3_only = strip_hedge(par_swap, strip, as_of=as_of)
+        assert sr3_only.evidence.warnings == ()
+
+    def test_a_caller_contract_dv01_applies_to_every_undeclared_contract(
+        self, par_swap, strip, as_of
+    ):
+        hedge = strip_hedge(par_swap, strip, as_of=as_of, contract_dv01=30.0)
+        assert hedge.contract_dv01 == 30.0
+        for label, delta in hedge.bucketed_delta_by_instrument.items():
+            assert hedge.contracts[label] == pytest.approx(-delta / 30.0, rel=1e-12)
+        assert "given by the caller" in hedge.evidence.fields["contract_dv01_derivation"]["caller"]
+
+    def test_a_caller_contract_dv01_that_contradicts_a_declared_contract_refuses(self):
+        with pytest.raises(ValueError, match="SR1-G6"):
+            _mix_hedge(contract_dv01=25.0)
+
+    def test_a_caller_contract_dv01_equal_to_the_declared_tick_is_accepted(
+        self, par_swap, strip, as_of
+    ):
+        declared = tuple(
+            replace(i, contract="SR3") if isinstance(i, FuturesNode) else i for i in strip
+        )
+        hedge = strip_hedge(par_swap, declared, as_of=as_of, contract_dv01=25.0)
+        assert hedge.contract_dv01 == 25.0
+
+    def test_a_declared_contract_that_contradicts_its_period_refuses(self, par_swap, strip, as_of):
+        wrong = tuple(
+            replace(i, contract="SR1") if isinstance(i, FuturesNode) else i for i in strip
+        )
+        with pytest.raises(ValueError, match="IMM"):
+            strip_hedge(par_swap, wrong, as_of=as_of)
+
+    def test_an_unknown_contract_is_refused_when_the_node_is_built(self):
+        with pytest.raises(ValueError, match="SR1"):
+            FuturesNode(date(2026, 3, 18), date(2026, 6, 17), 0.04, contract="SR2")
+
+    def test_an_undeclared_node_describes_itself_as_before(self, strip):
+        node = next(i for i in strip if isinstance(i, FuturesNode))
+        assert "contract" not in node.describe()
+        assert replace(node, contract="SR3").describe()["contract"] == "SR3"
 
 
 class TestIncompleteStrip:
@@ -314,3 +499,62 @@ class TestTheHedgeCommand:
         assert payload["hedge_ratio"] == pytest.approx(-1.0, abs=1e-6)
         labelled = commands.hedge(_hedge_config(as_of))
         assert payload["total_contracts"] == labelled["total_contracts"]
+
+    def test_a_futures_row_can_name_its_contract(self, as_of):
+        config = _hedge_config(as_of)
+        config["curve"]["futures"][0]["contract"] = "SR3"
+        nodes = [n for n in calibration_nodes(config, as_of) if isinstance(n, FuturesNode)]
+        assert nodes[0].contract == "SR3"
+        assert nodes[1].contract is None
+
+    @pytest.mark.parametrize("value", ["SR2", "sr3", 3])
+    def test_a_contract_the_engine_does_not_size_is_refused_by_its_path(self, as_of, value):
+        config = _hedge_config(as_of)
+        config["curve"]["futures"][2]["contract"] = value
+        with pytest.raises(ConfigurationError, match=r"curve\.futures\[2\]\.contract"):
+            commands.hedge(config)
+
+    def test_sr1_rows_are_sized_at_the_sr1_tick(self, as_of):
+        # Eleven calendar months, read as SR1 from their periods. The command
+        # used to pass contract_dv01=25.00 for every row whatever it was.
+        payload = commands.hedge(_sr1_config(as_of))
+        assert payload["contract_dv01"] == pytest.approx(SR1_TICK, rel=1e-12)
+        for label, delta in payload["bucketed_delta_by_instrument"].items():
+            assert payload["contracts"][label] == pytest.approx(-delta / SR1_TICK, rel=1e-12)
+        declared = _sr1_config(as_of)
+        for row in declared["curve"]["futures"]:
+            row["contract"] = "SR1"
+        assert commands.hedge(declared)["contracts"] == payload["contracts"]
+
+    def test_a_contract_dv01_in_the_hedge_block_still_overrides(self, as_of):
+        config = _hedge_config(as_of)
+        config["hedge"]["contract_dv01"] = 30.0
+        payload = commands.hedge(config)
+        assert payload["contract_dv01"] == 30.0
+
+
+def _sr1_config(as_of) -> dict:
+    """A ``hedge`` config on SR1 months, February to December 2026, at 96.00."""
+    futures = []
+    for month in range(2, 13):
+        start = date(2026, month, 1)
+        end = date(2026 + month // 12, month % 12 + 1, 1)
+        futures.append(
+            {"label": f"SR1-{month:02d}", "start": start.isoformat(), "end": end.isoformat(),
+             "price": 96.0}
+        )
+    return {
+        "as_of": as_of.isoformat(),
+        "curve": {
+            "stub": {"end": "2026-02-01", "accrual_factor": 1.0 + 0.04 * 17 / 360.0},
+            "futures": futures,
+        },
+        "swap": {
+            "effective": "2026-03-02",
+            "maturity": "2026-12-01",
+            "fixed_rate": 0.04,
+            "notional": 100_000_000.0,
+            "side": "payer",
+        },
+        "hedge": {"shocks_bp": [-10, 10]},
+    }

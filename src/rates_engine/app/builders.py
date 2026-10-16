@@ -64,8 +64,9 @@ def calibration_nodes(config: dict[str, Any], as_of: date) -> tuple[Any, ...]:
     sigma = float(convexity.get("sigma", 0.0))
     kappa = convexity.get("kappa")
 
-    for entry in curve.get("futures", ()):
+    for number, entry in enumerate(curve.get("futures", ())):
         start, end = as_date(entry["start"]), as_date(entry["end"])
+        contract = _futures_contract(entry, number)
         adjustment = convexity_adjustment(
             year_fraction(as_of, start, CURVE_TIME_BASIS),
             year_fraction(as_of, end, CURVE_TIME_BASIS),
@@ -85,12 +86,36 @@ def calibration_nodes(config: dict[str, Any], as_of: date) -> tuple[Any, ...]:
                     "kappa": kappa,
                     "adjustment_bp": adjustment.adjustment_bp,
                 },
+                contract=contract,
             )
         )
 
     for number, entry in enumerate(curve.get("par_swaps", ())):
         instruments.append(_par_swap_quote(entry, number))
     return tuple(instruments)
+
+
+_FUTURES_CONTRACTS = ("SR1", "SR3")
+
+
+def _futures_contract(entry: dict[str, Any], number: int) -> str | None:
+    """The optional ``contract`` of a ``curve.futures`` entry, checked by name.
+
+    ``"SR1"`` or ``"SR3"``, exactly; left out, the hedge reads the contract
+    off the period. It is what sizes the hedge -- an SR1 is worth USD 41.67
+    a basis point and an SR3 USD 25.00 -- so a misspelling is refused with
+    the entry's path rather than sized as whichever contract it falls back to.
+    """
+    value = entry.get("contract")
+    if value is None:
+        return None
+    if value not in _FUTURES_CONTRACTS:
+        raise ConfigurationError(
+            f"curve.futures[{number}].contract is {value!r}; it must be one of "
+            f"{list(_FUTURES_CONTRACTS)}, or left out to read the contract from the period "
+            "(a calendar month is SR1, an IMM quarter SR3)"
+        )
+    return str(value)
 
 
 _LEGACY_PAR_SWAP_KEYS = ("start", "payment_dates", "year_fractions")

@@ -24,7 +24,7 @@ from rates_engine.core.results import SCHEMA_VERSION
 from rates_engine.curves.bootstrap import bootstrap_discount_curve
 from rates_engine.curves.discount import CurveSet
 from rates_engine.curves.views import all_views
-from rates_engine.hedging.futures_strip import DEFAULT_SHOCKS_BP, SR3_DV01, shock_table, strip_hedge
+from rates_engine.hedging.futures_strip import DEFAULT_SHOCKS_BP, shock_table, strip_hedge
 from rates_engine.hedging.fx_structures import (
     Exposure,
     ExposureDirection,
@@ -278,6 +278,10 @@ def hedge(config: dict[str, Any] | None) -> dict[str, Any]:
 
     Args:
         config: The whole configuration mapping. ``None`` is refused by name.
+            The optional ``hedge`` block takes ``shocks_bp`` (basis points)
+            and ``contract_dv01`` (USD per basis point, for every contract;
+            left out, each futures entry is sized at its own contract's
+            tick, SR1 USD 41.67 or SR3 USD 25.00).
 
     Returns:
         The ``HedgeResult`` payload with a ``shock_table`` block.
@@ -287,12 +291,16 @@ def hedge(config: dict[str, Any] | None) -> dict[str, Any]:
     instruments = calibration_nodes(config, as_of)
     swap = ois_swap(config)
     settings = config.get("hedge") or {}
+    # No default tick here. Passing SR3's 25.00 whenever the block left it
+    # out sized every SR1 entry 1.67 times over; None lets each contract be
+    # sized at its own.
+    contract_dv01 = settings.get("contract_dv01")
     result = strip_hedge(
         swap,
         instruments,
         as_of=as_of,
         long_end_source=(config.get("curve") or {}).get("long_end_source"),
-        contract_dv01=float(settings.get("contract_dv01", SR3_DV01)),
+        contract_dv01=float(contract_dv01) if contract_dv01 is not None else None,
     )
     shocks = tuple(float(s) for s in settings.get("shocks_bp", DEFAULT_SHOCKS_BP))
     table = shock_table(result, shocks)
