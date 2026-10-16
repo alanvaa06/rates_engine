@@ -167,9 +167,10 @@ wherever a wrong number used to come back with exit code 0.
   so they moved with `grid_width`.
 - **FX inputs no market produces are refused.** `StructureQuote` refuses a
   volatility outside the lognormal band (`VolUnitsError`), a negative or
-  non-finite one, a non-positive expiry, a correlation outside `[-1, 1]`
-  (`ValueError`), and rates beyond ±100% (`ImplausibleInputError`);
-  Garman-Kohlhagen raises on a negative or non-finite expiry or volatility;
+  non-finite one and a non-positive expiry (`ValueError`), and rates beyond
+  ±100% (`ImplausibleInputError`); `compare_structures` refuses a
+  correlation outside `[-1, 1]`; Garman-Kohlhagen raises on a negative or
+  non-finite expiry or volatility;
   `SmileQuotes.wings()` refuses a broker butterfly; half a ten-delta pair is
   a `CalibrationError`.
 - **A futures strip is sized at each contract's own tick.** An SR1 is worth
