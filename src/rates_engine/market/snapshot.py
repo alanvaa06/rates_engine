@@ -5,6 +5,11 @@ came from. The compounding helpers live here rather than on the instruments
 because repeating the last published rate over a non-publication day is a data
 convention, not a product feature: SR1, SR3 and an OIS floating leg all inherit
 it, and they should inherit one implementation.
+
+The repeated rate is weighted, not repeated: a Friday's SOFR accrues over the
+weekend as one simple-interest period of three days, which is how CME settles
+SR3 and how the New York Fed compounds its averages. For SR1's arithmetic
+average the two readings coincide; for anything compounded they do not.
 """
 
 from __future__ import annotations
@@ -185,20 +190,39 @@ class MarketSnapshot:
         *,
         calendar: HolidayCalendar = SIFMA_US,
     ) -> CompoundedRate:
-        """Daily-compound an overnight series over ``[start, end)`` on ACT/360.
+        """Compound an overnight series over ``[start, end)``, ACT/360, the way SR3 settles.
 
-        The compounding telescopes: the product of ``1 + r_d/360`` over the
-        period is what a collateralised overnight leg actually earns, and it is
-        also exactly the ratio of discount factors a deterministic curve
-        implies, which is what makes the futures bootstrap in
-        :mod:`rates_engine.curves.bootstrap` exact rather than approximate.
+        The factor is ``prod_i (1 + r_i * d_i / 360)``, the product running
+        over the publication days ``i`` in the period, ``r_i`` the rate
+        published for day ``i`` and ``d_i`` the calendar days it applies to.
+        That is CME's SR3 final-settlement formula and the New York Fed's for
+        its SOFR averages, and it is what QuantLib's
+        ``OvernightIndexedCoupon`` computes. A Friday's rate covers Friday,
+        Saturday and Sunday as *one* simple-interest period, ``1 + 3r/360``.
+        Compounding the three days separately, ``(1 + r/360)**3``, is what
+        this method did before, and at 4-5% it put SR3 0.02-0.04 bp too high,
+        USD 0.6-1.1 a contract.
+
+        Adjacent periods multiply to the whole only when the boundary between
+        them is a publication day, so that every published rate and the days
+        it covers sit in one period. When the boundary is a weekend, each side
+        accrues its own share of the carried rate's days, which is the
+        convention -- a period's factor is a function of that period -- and
+        the product of the two exceeds the whole by a second-order term, about
+        ``2.5e-8`` at 4% across a weekend. None of this touches the
+        bootstrap's exactness in :mod:`rates_engine.curves.bootstrap`: a
+        ``RealizedStubNode`` takes the period factor as its
+        ``accrual_factor`` and a ``FuturesNode`` takes ``1 + F * tau``, each
+        pins ``P(start) / P(end)`` to that number, and the curve reprices it
+        whichever daily rule produced it.
 
         Args:
             series_id: Overnight series to compound, e.g. ``"SOFR"``.
             start: First accrual day, inclusive.
             end: Last accrual day, exclusive.
-            calendar: Publication calendar. A non-business day reuses the
-                previous published rate, per the CME and New York Fed rule.
+            calendar: Publication calendar. A non-business day takes the rate
+                published for the business day before it, per the CME and New
+                York Fed rule, and accrues at it as part of that day's period.
 
         Returns:
             The :class:`CompoundedRate`, with the count of repeated days.
@@ -286,11 +310,28 @@ class MarketSnapshot:
     def _accrue(
         self, series_id: str, start: date, end: date, calendar: HolidayCalendar
     ) -> tuple[float, int, int, date | None, date | None]:
-        """Compounded factor and the bookkeeping the evidence needs."""
+        """Compounded factor and the bookkeeping the evidence needs.
+
+        One simple-interest factor per run of calendar days that share a
+        published rate, not one per calendar day: each publication day opens
+        a run, the non-publication days after it extend it, and a period
+        that opens on a non-publication day starts with a run at the rate it
+        carries in. Runs are cut by publication days, never by equal rates:
+        two business days that happen to publish the same number are two
+        factors.
+        """
         daily = self._daily(series_id, start, end, calendar)
+        run_rates: list[float] = []
+        run_days: list[int] = []
+        for _, rate, repeated in daily:
+            if repeated and run_rates:
+                run_days[-1] += 1
+            else:
+                run_rates.append(rate)
+                run_days.append(1)
         factor = 1.0
-        for _, rate, _ in daily:
-            factor *= 1.0 + rate / 360.0
+        for rate, days in zip(run_rates, run_days, strict=True):
+            factor *= 1.0 + rate * days / 360.0
         published = [d for d, _, repeated in daily if not repeated]
         return (
             factor,

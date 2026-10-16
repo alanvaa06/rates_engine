@@ -117,8 +117,20 @@ class TestNonPublicationDays:
     def test_the_repeated_rate_is_friday_s(self, snapshot):
         friday = snapshot.fixing("SOFR", date(2026, 1, 9))
         short = snapshot.compounded("SOFR", date(2026, 1, 9), date(2026, 1, 12))
-        # Three calendar days, all at Friday's rate.
-        assert short.accrual_factor == pytest.approx((1 + friday / 360) ** 3, rel=1e-15)
+        # Three calendar days at Friday's rate, as one simple-interest period:
+        # CME's SR3 rule and the New York Fed's compounded averages weight
+        # each published rate by the days it applies to, 1 + r * 3/360. The
+        # cube is what compounding the weekend as three separate days gives,
+        # and it is not the convention.
+        assert short.accrual_factor == pytest.approx(1 + friday * 3 / 360, rel=1e-15)
+        assert short.accrual_factor != pytest.approx((1 + friday / 360) ** 3, rel=1e-12)
+
+    def test_a_period_ending_on_a_weekend_takes_only_its_own_days(self, snapshot):
+        # Friday to Sunday: two of the three days Friday's rate covers fall in
+        # the period, and only those two accrue in it.
+        friday = snapshot.fixing("SOFR", date(2026, 1, 9))
+        short = snapshot.compounded("SOFR", date(2026, 1, 9), date(2026, 1, 11))
+        assert short.accrual_factor == pytest.approx(1 + friday * 2 / 360, rel=1e-15)
 
     def test_holiday_repeats_too(self, snapshot):
         # 19 January 2026 is Martin Luther King Jr Day.
@@ -127,14 +139,30 @@ class TestNonPublicationDays:
         assert result.repeated_days == 3
         assert result.business_days == 1
 
-    def test_compounding_telescopes_the_way_the_curve_assumes(self, snapshot):
-        # The property the futures bootstrap relies on: the product of daily
-        # growth over two adjacent periods equals the growth over the whole.
+    def test_compounding_telescopes_across_a_publication_day(self, snapshot):
+        # Two adjacent periods multiply to the whole when the boundary is a
+        # publication day (Monday 12 January), because every published rate
+        # and the days it covers then sit inside one of the two periods.
         first = snapshot.compounded("SOFR", date(2026, 1, 5), date(2026, 1, 12))
         second = snapshot.compounded("SOFR", date(2026, 1, 12), date(2026, 1, 20))
         whole = snapshot.compounded("SOFR", date(2026, 1, 5), date(2026, 1, 20))
         assert first.accrual_factor * second.accrual_factor == pytest.approx(
             whole.accrual_factor, rel=1e-14
+        )
+
+    def test_a_boundary_on_a_weekend_splits_the_carried_rate(self, snapshot):
+        # Saturday 10 January as the boundary: Friday's rate covers one day
+        # of the first period and two of the second, and each period accrues
+        # its own share as simple interest. The product differs from the
+        # whole by Friday's rate squared times 1 * 2 / 360**2 -- the second
+        # order term, exactly.
+        friday = snapshot.fixing("SOFR", date(2026, 1, 9))
+        first = snapshot.compounded("SOFR", date(2026, 1, 5), date(2026, 1, 10))
+        second = snapshot.compounded("SOFR", date(2026, 1, 10), date(2026, 1, 13))
+        whole = snapshot.compounded("SOFR", date(2026, 1, 5), date(2026, 1, 13))
+        split = first.accrual_factor * second.accrual_factor
+        assert split - whole.accrual_factor == pytest.approx(
+            whole.accrual_factor / (1 + friday * 3 / 360) * (friday**2 * 2 / 360**2), rel=1e-6
         )
 
     def test_average_and_compounded_differ(self, snapshot):
