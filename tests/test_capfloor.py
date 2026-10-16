@@ -441,6 +441,18 @@ class TestASeasonedCapOrFloor:
         with pytest.raises(ValueError, match="nothing left"):
             cap_floor_pv(old, option_curve_set, VOL)
 
+    def test_a_period_that_began_before_the_curve_has_no_forward(self, option_curve_set):
+        # The curve's discount factor is one on and before its date, so the
+        # "forward" of the period from 2025-12-15 came out 2.61% on a 4%
+        # curve: the rate from 2026-01-15 to the end, spread over the whole
+        # accrual. Its rate is a fixing, and asking for a forward says so.
+        running = CapFloor(
+            effective=date(2025, 12, 15), maturity=date(2026, 12, 15), strike=0.03,
+            notional=10_000_000.0,
+        ).caplets[0]
+        with pytest.raises(MissingFixingError, match="fixing"):
+            caplet_forward_rate(running, option_curve_set)
+
     def test_one_caplet_follows_the_same_rule(self, option_curve_set):
         caplets = _seasoned("floor").caplets
         assert caplet_pv(caplets[0], option_curve_set, VOL) == 0.0  # paid in January 2025

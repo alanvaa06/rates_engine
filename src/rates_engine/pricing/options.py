@@ -117,11 +117,24 @@ def caplet_forward_rate(caplet: Caplet, curve_set: CurveSet) -> float:
     Raises:
         MissingForwardError: The period ends past the projection curve's last
             node, where a forward would be extrapolated rather than implied.
+        MissingFixingError: The period began before the projection curve's
+            date. The curve's discount factor is one on and before that
+            date, so the ratio would be the rate from the curve's date to
+            the end spread over the whole accrual -- 2.61% on a 4% curve for
+            a quarter one month in -- and the period's rate is a fixing.
     """
     require_same_currency(
         caplet.currency, curve_set.currency, operation="projecting a caplet's forward"
     )
     projection = curve_set.projection
+    if caplet.accrual_start < projection.as_of:
+        raise MissingFixingError(
+            f"the period from {caplet.accrual_start} to {caplet.accrual_end} began before "
+            f"the projection curve's date {projection.as_of}, so it has no forward: its "
+            f"rate is the {caplet.index.label} fixing of {caplet.fixing_date}. Price it "
+            "with cap_floor_pv or caplet_pv and pass fixings=, which value it on that "
+            "fixing."
+        )
     if caplet.accrual_end > projection.nodes[-1]:
         raise MissingForwardError(
             f"the caplet over {caplet.accrual_start} to {caplet.accrual_end} ends past the "
