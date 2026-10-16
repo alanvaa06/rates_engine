@@ -188,8 +188,12 @@ def delta_spot(
             than a guard.
         r_domestic: Quote currency rate.
         r_foreign: Base currency rate.
-        volatility: Lognormal volatility as a decimal. Zero behaves as a
-            zero expiry does, for the same reason.
+        volatility: Lognormal volatility as a decimal. Zero gives the
+            deterministic limit, which is not the zero-expiry one: the
+            option finishes in the money exactly when the *forward* is, and
+            its delta is then the discounted forward's, ``e^{-r_f T}`` —
+            half that when forward and strike coincide, where ``N(d1)``
+            tends to one half.
         kind: Call or put on the base currency.
 
     Returns:
@@ -202,9 +206,21 @@ def delta_spot(
         ValueError: ``expiry`` or ``volatility`` is negative or not finite.
     """
     _require_domain(expiry, volatility)
-    if expiry <= 0.0 or volatility <= 0.0:
+    if expiry <= 0.0:
         intrinsic = 1.0 if kind.sign * (spot - strike) > 0.0 else 0.0
         return kind.sign * intrinsic
+    if volatility <= 0.0:
+        # Zero volatility used to share the zero-expiry branch: spot against
+        # strike at magnitude one. But with time left the price is
+        # e^{-r_d T} (F - K)+ (see price), whose slope in the spot is
+        # e^{-r_d T} F / S = e^{-r_f T}, and the moneyness that matters is
+        # the forward's. QuantLib's BlackCalculator at zero deviation agrees.
+        outright = forward(spot, expiry, r_domestic, r_foreign)
+        if outright == strike:
+            probability = 0.5
+        else:
+            probability = 1.0 if kind.sign * (outright - strike) > 0.0 else 0.0
+        return kind.sign * math.exp(-r_foreign * expiry) * probability
     first, _ = d1_d2(spot, strike, expiry, r_domestic, r_foreign, volatility)
     return kind.sign * math.exp(-r_foreign * expiry) * standard_normal_cdf(kind.sign * first)
 
