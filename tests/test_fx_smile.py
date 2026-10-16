@@ -584,3 +584,106 @@ class TestTheTenDeltaQuotesAreUsed:
         assert len(stored["wing_pillars"]) == 2
         fields = smile.volatility_at(19.0).evidence.fields
         assert len(fields["wing_pillars"]) == 2
+
+
+class TestTheButterflyConvention:
+    """Which butterfly `SmileQuotes` expects, and the one USD/MXN brokers quote.
+
+    The docstring said the market quotes a smile fly, `(s(25C) + s(25P))/2 -
+    s(ATM)` at the smile's own strikes. USD/MXN brokers quote the *broker*
+    (market) fly instead: the volatility `s(ATM) + BF` that prices a
+    strangle struck where that single volatility makes each leg 25 delta
+    (Clark 2011; Reiswich and Wystup 2010). The default stays the smile fly;
+    `ButterflyConvention.BROKER` takes the broker one and solves for the
+    smile fly that reprices the market strangle.
+
+    The market strangles below are QuantLib 1.44's, not this package's:
+    `ql.BlackDeltaCalculator(kind, ql.DeltaVolQuote.PaSpot, S, e^{-r_d T},
+    e^{-r_f T}, (ATM + BF) sqrt(T)).strikeFromDelta(+-delta)` for the strikes
+    and `ql.AnalyticEuropeanEngine` on a `GarmanKohlagenProcess` at
+    `ATM + BF` for the premium, at S 18.50, T 1, 9.5%/4.2%, ATM 13%.
+    """
+
+    MARKET = (18.50, 1.0, 0.095, 0.042)
+    PREMIUM_ADJUSTED = DeltaConvention(DeltaBasis.SPOT, PremiumAdjustment.PREMIUM_ADJUSTED)
+    #: delta -> (call strike, put strike, strangle premium per USD), broker flies 0.6% and 2.0%
+    QUANTLIB_STRANGLES = {
+        0.25: (21.285947050025282, 17.88583582637118, 0.762141155173002),
+        0.10: (23.67602663723003, 16.23534023518896, 0.2650996102594686),
+    }
+
+    def _smile(self, convention, *, ten_delta=True):
+        from rates_engine.volatility.fx_smile import ButterflyConvention
+
+        quotes = SmileQuotes(
+            0.13, 0.030, 0.006,
+            0.060 if ten_delta else None, 0.020 if ten_delta else None,
+            butterfly_convention=ButterflyConvention(convention),
+        )
+        return VannaVolgaSmile(
+            *self.MARKET, quotes, self.PREMIUM_ADJUSTED, ATMConvention.DELTA_NEUTRAL_STRADDLE
+        )
+
+    def _strangle_on(self, smile, delta):
+        spot, expiry, r_d, r_f = self.MARKET
+        call_strike, put_strike, _ = self.QUANTLIB_STRANGLES[delta]
+        return gk.price(
+            spot, call_strike, expiry, r_d, r_f,
+            smile.volatility_at(call_strike).volatility, OptionKind.CALL,
+        ) + gk.price(
+            spot, put_strike, expiry, r_d, r_f,
+            smile.volatility_at(put_strike).volatility, OptionKind.PUT,
+        )
+
+    def test_the_default_is_the_smile_butterfly(self):
+        from rates_engine.volatility.fx_smile import ButterflyConvention
+
+        assert QUOTES.butterfly_convention is ButterflyConvention.SMILE
+        assert QUOTES.to_dict()["butterfly_convention"] == "smile"
+
+    @pytest.mark.parametrize("delta", [0.25, 0.10])
+    def test_a_broker_smile_reprices_the_market_strangles(self, delta):
+        smile = self._smile("broker")
+        assert self._strangle_on(smile, delta) == pytest.approx(
+            self.QUANTLIB_STRANGLES[delta][2], abs=1e-8
+        )
+
+    def test_it_reprices_the_25_delta_strangle_with_no_ten_delta_quotes(self):
+        smile = self._smile("broker", ten_delta=False)
+        assert self._strangle_on(smile, 0.25) == pytest.approx(
+            self.QUANTLIB_STRANGLES[0.25][2], abs=1e-8
+        )
+
+    def test_reading_a_broker_fly_as_a_smile_fly_misprices_the_strangle(self):
+        """The difference the convention makes, so the test above has teeth."""
+        smile = self._smile("smile")
+        assert abs(self._strangle_on(smile, 0.25) - self.QUANTLIB_STRANGLES[0.25][2]) > 1e-3
+
+    def test_the_converted_flies_are_reported(self):
+        stored = self._smile("broker").to_dict()
+        assert stored["quotes"]["butterfly_convention"] == "broker"
+        assert stored["quotes"]["butterfly_25"] == 0.006
+        assert stored["smile_butterfly_25"] != pytest.approx(0.006, abs=1e-5)
+        assert stored["smile_butterfly_10"] is not None
+
+    def test_a_smile_fly_is_its_own_smile_fly(self):
+        stored = self._smile("smile").to_dict()
+        assert stored["smile_butterfly_25"] == 0.006
+        assert stored["smile_butterfly_10"] == 0.020
+
+    @pytest.mark.parametrize("kind", list(OptionKind))
+    def test_the_broker_smile_still_reproduces_its_pillars(self, kind):
+        smile = self._smile("broker")
+        spot, expiry, r_d, r_f = self.MARKET
+        for strike, vol in smile.all_pillars():
+            market = gk.price(spot, strike, expiry, r_d, r_f, vol, kind)
+            assert smile.price(strike, kind) == pytest.approx(market, abs=1e-12)
+
+    def test_the_wing_arithmetic_refuses_a_broker_fly(self):
+        """`atm + bf +- rr/2` is the smile's 25-delta volatility only for a
+        smile fly; for a broker one the smile has to be built to find it."""
+        from rates_engine.volatility.fx_smile import ButterflyConvention
+
+        broker = SmileQuotes(0.13, 0.030, 0.006, butterfly_convention=ButterflyConvention.BROKER)
+        with pytest.raises(CalibrationError, match="broker"):
+            broker.wings(0.25)

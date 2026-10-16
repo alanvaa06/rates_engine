@@ -27,6 +27,17 @@ the price of keeping the central smile identical to the three-quote one.
 Until the 2026-10-15 review the ten-delta numbers were accepted and
 ignored, and the smile read 15.10% at a ten-delta call quoted at 18.00%.
 
+**Which butterfly.** ``SmileQuotes`` takes the *smile* butterfly by
+default — ``(sigma(25C) + sigma(25P)) / 2 - sigma(ATM)`` at the smile's own
+25-delta strikes — which is what the arithmetic of its wings assumes. A
+USD/MXN broker quotes the *market* (broker) butterfly instead: the single
+volatility ``sigma(ATM) + BF`` that prices a strangle struck where that
+volatility makes each leg 25 delta (Clark 2011; Reiswich and Wystup 2010).
+The two differ whenever there is a risk reversal, so reading one as the
+other misprices every wing. ``ButterflyConvention.BROKER`` takes the broker
+fly and solves for the smile fly that makes this smile reprice the market
+strangle, at 25 and, when quoted, at ten delta; the default is unchanged.
+
 **Two conventions, both refused rather than assumed.** A delta does not
 name a strike until the convention is stated — that is
 :mod:`rates_engine.models.fx_delta`'s problem. "At the money" does not name one
@@ -45,7 +56,7 @@ still applies.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any
 
@@ -60,6 +71,7 @@ from rates_engine.models.fx_delta import DeltaConvention, strike_from_delta
 
 __all__ = [
     "ATMConvention",
+    "ButterflyConvention",
     "VannaVolgaSmile",
     "SmileQuotes",
     "SmileReading",
@@ -73,6 +85,13 @@ NOT_ARBITRAGE_FREE = (
     "outside the quoted delta range are flagged, and past the outer pillars the "
     "volatility is held flat rather than extrapolated."
 )
+
+
+_BROKER_ROUNDS = 50
+"""Rounds of solving the 25- and ten-delta smile flies in turn before giving up."""
+
+_BROKER_TOLERANCE = 1e-12
+"""Two rounds whose smile flies agree to this, as decimals, have settled."""
 
 
 class ATMConvention(StrEnum):
@@ -98,6 +117,25 @@ class ATMConvention(StrEnum):
     SPOT = "spot"
 
 
+class ButterflyConvention(StrEnum):
+    """Which butterfly a quote set holds.
+
+    ``SMILE``
+        The smile butterfly, ``(sigma(25C) + sigma(25P)) / 2 - sigma(ATM)``
+        with each volatility the smile's own at its own 25-delta strike. The
+        wing volatilities follow from it by arithmetic. The default.
+    ``BROKER``
+        The market, or broker, butterfly that USD/MXN brokers quote:
+        ``sigma(ATM) + BF`` is the one volatility that prices a strangle
+        whose legs are each 25 delta at that volatility. The smile fly is
+        solved for (see :class:`VannaVolgaSmile`), and the wing arithmetic
+        is refused because it does not apply.
+    """
+
+    SMILE = "smile"
+    BROKER = "broker"
+
+
 @dataclass(frozen=True)
 class SmileQuotes:
     """The three or five numbers a market makes a smile from.
@@ -109,9 +147,16 @@ class SmileQuotes:
             and the market pays up for dollar calls. Negative would mean it
             pays up for base-currency downside, which is the usual sign for
             a pair whose base is the risk currency — not this one.
-        butterfly_25: ``(sigma(25 call) + sigma(25 put)) / 2 - sigma(atm)``.
+        butterfly_25: The 25-delta butterfly as a decimal, in the convention
+            :attr:`butterfly_convention` names. By default the **smile**
+            butterfly, ``(sigma(25 call) + sigma(25 put)) / 2 - sigma(atm)``
+            at the smile's own 25-delta strikes; a broker's screen shows the
+            **market** butterfly, which needs ``ButterflyConvention.BROKER``.
         risk_reversal_10: The ten-delta risk reversal, or ``None``.
-        butterfly_10: The ten-delta butterfly, or ``None``.
+        butterfly_10: The ten-delta butterfly, or ``None``, in the same
+            convention as ``butterfly_25``.
+        butterfly_convention: Whether the two butterflies are smile flies
+            (the default) or broker flies.
     """
 
     atm: float
@@ -119,9 +164,10 @@ class SmileQuotes:
     butterfly_25: float
     risk_reversal_10: float | None = None
     butterfly_10: float | None = None
+    butterfly_convention: ButterflyConvention = ButterflyConvention.SMILE
 
     def wings(self, delta: float) -> tuple[float, float]:
-        """Put and call volatilities at a delta.
+        """Put and call volatilities at a delta, ``atm + fly -+ reversal / 2``.
 
         Args:
             delta: ``0.25`` or ``0.10``.
@@ -130,9 +176,22 @@ class SmileQuotes:
             ``(put_volatility, call_volatility)``.
 
         Raises:
-            CalibrationError: The ten-delta pair was asked for and is absent.
+            CalibrationError: The ten-delta pair was asked for and is absent,
+                or the butterflies are broker flies, for which this
+                arithmetic does not give the smile's volatilities; build the
+                smile and read :meth:`VannaVolgaSmile.smile_quotes`.
             ValueError: A delta other than 0.25 or 0.10.
         """
+        if self.butterfly_convention is ButterflyConvention.BROKER:
+            raise CalibrationError(
+                "a broker butterfly does not give the wing volatilities by arithmetic: "
+                "atm + fly +- reversal / 2 is the smile's 25-delta volatility only for a "
+                "smile fly. Build the VannaVolgaSmile, which solves for the smile fly, "
+                "and read its smile_quotes() or pillars()."
+            )
+        return self._wing_arithmetic(delta)
+
+    def _wing_arithmetic(self, delta: float) -> tuple[float, float]:
         if delta == 0.25:
             reversal, fly = self.risk_reversal_25, self.butterfly_25
         elif delta == 0.10:
@@ -155,7 +214,15 @@ class SmileQuotes:
             "butterfly_25": self.butterfly_25,
             "risk_reversal_10": self.risk_reversal_10,
             "butterfly_10": self.butterfly_10,
+            "butterfly_convention": self.butterfly_convention.value,
         }
+
+
+def _with_fly(quotes: SmileQuotes, name: str, fly: float) -> SmileQuotes:
+    """``quotes`` with the butterfly called ``name`` replaced by ``fly``."""
+    if name == "butterfly_25":
+        return replace(quotes, butterfly_25=fly)
+    return replace(quotes, butterfly_10=fly)
 
 
 @dataclass(frozen=True)
@@ -225,18 +292,26 @@ class VannaVolgaSmile:
             raise ValueError(f"a smile needs a positive expiry, got {self.expiry!r}")
         if self.quotes.atm <= 0.0:
             raise ValueError(f"the at-the-money volatility must be positive, got {self.quotes.atm!r}")
+        if (self.quotes.risk_reversal_10 is None) != (self.quotes.butterfly_10 is None):
+            raise CalibrationError(
+                "the ten-delta wing needs both its risk reversal and its butterfly; this "
+                "quote set has one of the two. Supply both, or neither for a smile on "
+                "the 25-delta quotes alone."
+            )
+        if self.quotes.butterfly_convention is ButterflyConvention.BROKER:
+            for label, fly in (("25", self.quotes.butterfly_25), ("10", self.quotes.butterfly_10)):
+                if fly is not None and self.quotes.atm + fly <= 0.0:
+                    raise CalibrationError(
+                        f"a {label}-delta broker butterfly of {fly} puts the market strangle "
+                        "at a non-positive volatility."
+                    )
+            return
         put_vol, call_vol = self.quotes.wings(0.25)
         if put_vol <= 0.0 or call_vol <= 0.0:
             raise CalibrationError(
                 f"the quoted risk reversal and butterfly imply a non-positive wing "
                 f"volatility: 25d put {put_vol:.6f}, 25d call {call_vol:.6f}. A butterfly "
                 "more negative than half the risk reversal does that, and no smile has it."
-            )
-        if (self.quotes.risk_reversal_10 is None) != (self.quotes.butterfly_10 is None):
-            raise CalibrationError(
-                "the ten-delta wing needs both its risk reversal and its butterfly; this "
-                "quote set has one of the two. Supply both, or neither for a smile on "
-                "the 25-delta quotes alone."
             )
         if self.quotes.risk_reversal_10 is not None:
             put_10, call_10 = self.quotes.wings(0.10)
@@ -265,6 +340,104 @@ class VannaVolgaSmile:
         sign = -1.0 if self.delta_convention.is_premium_adjusted else 1.0
         return self.forward * math.exp(sign * drift)
 
+    def smile_quotes(self) -> SmileQuotes:
+        """The quotes in the smile-butterfly convention the construction uses.
+
+        The input itself when its butterflies are already smile flies. For
+        broker flies, the same quotes with each butterfly replaced by the
+        smile fly that makes this smile reprice the market strangle at that
+        delta: the strangle struck where ``atm + broker fly`` makes each leg
+        that delta, priced at that one volatility, against the same strangle
+        priced at the smile's own readings at those strikes. With ten-delta
+        quotes the two solves depend on each other — the 25-delta strangle's
+        put usually sits in the ten-delta segment — so they are repeated in
+        turn until neither fly moves.
+
+        Returns:
+            A :class:`SmileQuotes` with ``butterfly_convention`` ``SMILE``.
+
+        Raises:
+            CalibrationError: No smile fly within five volatility points of
+                the broker one reprices the market strangle, or the two
+                solves do not settle.
+        """
+        cached = self._cache.get("smile_quotes")
+        if cached is not None:
+            return cached
+        result = self.quotes
+        if self.quotes.butterfly_convention is ButterflyConvention.BROKER:
+            result = self._solve_broker()
+        self._cache["smile_quotes"] = result
+        return result
+
+    def _solve_broker(self) -> SmileQuotes:
+        quotes = self.quotes
+        solved = replace(quotes, butterfly_convention=ButterflyConvention.SMILE)
+        targets: list[tuple[float, str, float, float]] = [
+            (0.25, "butterfly_25", quotes.butterfly_25, quotes.risk_reversal_25)
+        ]
+        if quotes.butterfly_10 is not None and quotes.risk_reversal_10 is not None:
+            targets.append((0.10, "butterfly_10", quotes.butterfly_10, quotes.risk_reversal_10))
+        for _ in range(_BROKER_ROUNDS):
+            previous = solved
+            for delta, name, broker, reversal in targets:
+                fly = self._smile_fly(delta, name, broker, reversal, solved)
+                solved = _with_fly(solved, name, fly)
+            if len(targets) == 1 or all(
+                abs(getattr(solved, name) - getattr(previous, name)) <= _BROKER_TOLERANCE
+                for _, name, _, _ in targets
+            ):
+                return solved
+        raise CalibrationError(
+            f"the 25- and ten-delta smile butterflies did not settle in {_BROKER_ROUNDS} "
+            "rounds of solving each against its market strangle; the broker quotes may "
+            "not be consistent with one vanna-volga smile."
+        )
+
+    def _smile_fly(
+        self, delta: float, name: str, broker: float, reversal: float, base: SmileQuotes
+    ) -> float:
+        """The smile fly at ``delta`` that reprices the market strangle there."""
+        from scipy.optimize import brentq
+
+        market_vol = self.quotes.atm + broker
+        args = (self.expiry, self.r_domestic, self.r_foreign)
+        call_strike = strike_from_delta(
+            self.spot, delta, *args, market_vol, OptionKind.CALL, self.delta_convention
+        )
+        put_strike = strike_from_delta(
+            self.spot, delta, *args, market_vol, OptionKind.PUT, self.delta_convention
+        )
+        target = gk.price(self.spot, call_strike, *args, market_vol, OptionKind.CALL) + gk.price(
+            self.spot, put_strike, *args, market_vol, OptionKind.PUT
+        )
+
+        def gap(fly: float) -> float:
+            trial = VannaVolgaSmile(
+                self.spot, self.expiry, self.r_domestic, self.r_foreign,
+                _with_fly(base, name, fly), self.delta_convention, self.atm_convention,
+            )
+            call_vol = trial.volatility_at(call_strike).volatility
+            put_vol = trial.volatility_at(put_strike).volatility
+            return (
+                gk.price(self.spot, call_strike, *args, call_vol, OptionKind.CALL)
+                + gk.price(self.spot, put_strike, *args, put_vol, OptionKind.PUT)
+                - target
+            )
+
+        # Keep both trial wings positive: atm + fly - |reversal| / 2 > 0.
+        floor = 0.5 * abs(reversal) - self.quotes.atm + 1e-6
+        for width in (0.02, 0.05):
+            low, high = max(broker - width, floor), broker + width
+            if gap(low) * gap(high) <= 0.0:
+                return float(brentq(gap, low, high, xtol=1e-15, maxiter=200))
+        raise CalibrationError(
+            f"no smile butterfly within five volatility points of the {delta:g}-delta broker "
+            f"fly {broker} makes this smile reprice the market strangle at strikes "
+            f"{put_strike:.6f} and {call_strike:.6f}; check the quotes and the delta "
+            "convention."
+        )
+
     def pillars(self) -> tuple[tuple[float, float], ...]:
         """The three 25-delta and at-the-money points as ``(strike, volatility)``.
 
@@ -275,7 +448,7 @@ class VannaVolgaSmile:
         cached = self._cache.get("pillars")
         if cached is not None:
             return cached
-        put_vol, call_vol = self.quotes.wings(0.25)
+        put_vol, call_vol = self.smile_quotes().wings(0.25)
         put_strike = strike_from_delta(
             self.spot, 0.25, self.expiry, self.r_domestic, self.r_foreign,
             put_vol, OptionKind.PUT, self.delta_convention,
@@ -307,8 +480,9 @@ class VannaVolgaSmile:
         if cached is not None:
             return cached
         result: tuple[tuple[float, float], ...] = ()
-        if self.quotes.risk_reversal_10 is not None and self.quotes.butterfly_10 is not None:
-            put_vol, call_vol = self.quotes.wings(0.10)
+        quotes = self.smile_quotes()
+        if quotes.risk_reversal_10 is not None and quotes.butterfly_10 is not None:
+            put_vol, call_vol = quotes.wings(0.10)
             put_strike = strike_from_delta(
                 self.spot, 0.10, self.expiry, self.r_domestic, self.r_foreign,
                 put_vol, OptionKind.PUT, self.delta_convention,
@@ -520,6 +694,8 @@ class VannaVolgaSmile:
                         {"strike": k, "volatility": v} for k, v in self.wing_pillars()
                     ],
                     "quotes": self.quotes.to_dict(),
+                    "smile_butterfly_25": self.smile_quotes().butterfly_25,
+                    "smile_butterfly_10": self.smile_quotes().butterfly_10,
                     **self.delta_convention.to_dict(),
                     "atm_convention": self.atm_convention.value,
                     "caveat": NOT_ARBITRAGE_FREE,
@@ -542,6 +718,8 @@ class VannaVolgaSmile:
             "r_foreign": self.r_foreign,
             "atm_strike": self.atm_strike,
             "quotes": self.quotes.to_dict(),
+            "smile_butterfly_25": self.smile_quotes().butterfly_25,
+            "smile_butterfly_10": self.smile_quotes().butterfly_10,
             "pillars": [{"strike": k, "volatility": v} for k, v in self.pillars()],
             "wing_pillars": [{"strike": k, "volatility": v} for k, v in self.wing_pillars()],
             **self.delta_convention.to_dict(),
