@@ -319,7 +319,7 @@ def caplet_pv(
     from rates_engine.conventions.daycount import CURVE_TIME_BASIS, year_fraction
 
     valuation = as_of or curve_set.as_of
-    expiry = max(year_fraction(valuation, caplet.accrual_start, CURVE_TIME_BASIS), 0.0)
+    expiry = max(year_fraction(valuation, caplet.fixing_date, CURVE_TIME_BASIS), 0.0)
     return _price(
         volatility,
         caplet_forward_rate(caplet, curve_set),
@@ -370,7 +370,7 @@ def cap_floor_pv(
     from rates_engine.conventions.daycount import CURVE_TIME_BASIS, year_fraction
 
     expiries = [
-        max(year_fraction(valuation, c.accrual_start, CURVE_TIME_BASIS), 0.0) for c in caplets
+        max(year_fraction(valuation, c.fixing_date, CURVE_TIME_BASIS), 0.0) for c in caplets
     ]
     return OptionPriceResult(
         evidence=_evidence(
@@ -381,6 +381,12 @@ def cap_floor_pv(
             {
                 "periods": len(caplets),
                 "flat_volatility": True,
+                "fixing_lag_days": cap.fixing_lag_days,
+                "expiry_note": (
+                    "Each caplet expires at its fixing, fixing_lag_days business days "
+                    "of the index's calendar before its period starts -- two for Term "
+                    "SOFR, the ARRC convention -- not at the start of its accrual."
+                ),
                 "per_period": [
                     {
                         **c.describe(),
