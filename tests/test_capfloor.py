@@ -408,12 +408,33 @@ class TestASeasonedCapOrFloor:
                 _seasoned("floor"), option_curve_set, VOL, fixings=_fixings(date(2025, 10, 16))
             )
 
-    def test_a_fixing_that_is_not_a_number_refuses(self, option_curve_set):
-        with pytest.raises(MissingFixingError, match="not a finite number"):
+    @pytest.mark.parametrize("rate", [float("nan"), float("inf")])
+    def test_a_fixing_that_is_not_a_number_is_never_valued(self, option_curve_set, rate):
+        # What matters is that it never reaches a price, not which layer
+        # stops it: market.snapshot may refuse it when the series is built
+        # (ValueError), and the pricer refuses it when it reads it
+        # (MissingFixingError). Both messages print the value.
+        with pytest.raises((ValueError, MissingFixingError), match=r"\b(nan|inf)\b"):
             cap_floor_pv(
                 _seasoned("floor"), option_curve_set, VOL,
-                fixings=_fixings(*SEASONED_FIXINGS, rate=float("nan")),
+                fixings=_fixings(*SEASONED_FIXINGS, rate=rate),
             )
+
+    def test_the_pricer_refuses_a_nan_that_got_past_the_series(self, option_curve_set):
+        # The pricer's own guard, whatever Series validates: a NaN put into a
+        # series without its constructor -- as a subclass or a later edit of
+        # market.snapshot could -- is still not priced.
+        unvalidated = object.__new__(Series)
+        for name, value in (
+            ("series_id", "TERM_SOFR_3M"),
+            ("dates", SEASONED_FIXINGS),
+            ("values", (float("nan"), float("nan"))),
+            ("provenance", Provenance(source="test", series_id="TERM_SOFR_3M")),
+        ):
+            object.__setattr__(unvalidated, name, value)
+        snapshot = MarketSnapshot(AS_OF, {"TERM_SOFR_3M": unvalidated})
+        with pytest.raises(MissingFixingError, match="not a finite number"):
+            cap_floor_pv(_seasoned("floor"), option_curve_set, VOL, fixings=snapshot)
 
     def test_the_fixings_reach_the_evidence(self, option_curve_set):
         snapshot = _fixings(*SEASONED_FIXINGS)
