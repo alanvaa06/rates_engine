@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from rates_engine.core.errors import ConfigurationError, MissingDependencyError
-from rates_engine.hedging.futures_strip import DEFAULT_SHOCKS_BP, SR3_DV01
+from rates_engine.hedging.futures_strip import DEFAULT_SHOCKS_BP
 
 __all__ = [
     "load_config",
@@ -87,19 +87,22 @@ CONFIG_SCHEMA: dict[str, Any] = {
             },
             "futures": {
                 "description": (
-                    "SR3 futures, one entry per reference quarter; each pins the curve "
-                    "at its end date."
+                    "SR1 or SR3 futures, one entry per reference period; each pins the "
+                    "curve at its end date."
                 ),
                 "items": {
                     "start": {
                         "required": True,
-                        "description": "Reference period start, an IMM date (YYYY-MM-DD).",
+                        "description": (
+                            "Reference period start (YYYY-MM-DD): an IMM date for SR3, the "
+                            "first of the month for SR1."
+                        ),
                     },
                     "end": {
                         "required": True,
                         "description": (
-                            "Reference period end, the next IMM date: the curve node the "
-                            "contract pins."
+                            "Reference period end, the curve node the contract pins: the "
+                            "next IMM date for SR3, the first of the next month for SR1."
                         ),
                     },
                     "price": {
@@ -115,6 +118,15 @@ CONFIG_SCHEMA: dict[str, Any] = {
                         "description": (
                             "Name in the residuals, the evidence and the hedge's contract "
                             "table."
+                        ),
+                    },
+                    "contract": {
+                        "default": None,
+                        "description": (
+                            'Which future the entry is, "SR1" or "SR3". It sizes the hedge: '
+                            "an SR1 is worth 41.67 USD per basis point and an SR3 25.00. "
+                            "Left out, the period decides: a calendar month is SR1, anything "
+                            "else is sized as SR3."
                         ),
                     },
                 },
@@ -267,8 +279,20 @@ CONFIG_SCHEMA: dict[str, Any] = {
         "description": "Settings for the futures-strip hedge and its shock table.",
         "keys": {
             "contract_dv01": {
-                "default": SR3_DV01,
-                "description": "USD per basis point for one contract: 25.0 for SR3.",
+                "default": None,
+                "description": (
+                    "USD per basis point for one contract, applied to every contract. Left "
+                    "out, each futures entry is sized at its own tick: 41.67 for SR1, 25.00 "
+                    "for SR3. Refused if it contradicts an entry's declared contract."
+                ),
+            },
+            "require_full_coverage": {
+                "default": True,
+                "description": (
+                    "When true, a strip that leaves part of the swap's span uncovered is "
+                    "refused (IncompleteStripError); false sizes the partial hedge. A JSON "
+                    "boolean, not a string."
+                ),
             },
             "shocks_bp": {
                 "default": list(DEFAULT_SHOCKS_BP),

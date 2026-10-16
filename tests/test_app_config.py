@@ -60,6 +60,9 @@ def _full_config(as_of) -> dict:
             }
         )
         period = following
+    # Declared on one IMM entry only: "SR1" on an IMM quarter is refused by
+    # the futures-strip hedge, and the others exercise the period default.
+    futures[0]["contract"] = "SR3"
     return {
         "as_of": as_of.isoformat(),
         "curve": {
@@ -96,7 +99,11 @@ def _full_config(as_of) -> dict:
             "index": "SOFR",
         },
         "risk": {"key_tenors": [0.5, 1.0, 2.0]},
-        "hedge": {"contract_dv01": 25.0, "shocks_bp": [-100, -10, 10, 100]},
+        "hedge": {
+            "contract_dv01": 25.0,
+            "require_full_coverage": True,
+            "shocks_bp": [-100, -10, 10, 100],
+        },
         "fx": {
             "spot": 18.50,
             "delivery": "2026-12-15",
