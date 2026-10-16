@@ -62,9 +62,6 @@ Issues = "https://github.com/alanvaa06/rates_engine/issues"
 Changelog = "https://github.com/alanvaa06/rates_engine/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
-# Parquet snapshots. The file provider reads and writes CSV without it;
-# only a .parquet path reaches pyarrow.
-data = ["pyarrow>=14.0"]
 # YAML configs for the CLI. JSON is the native format precisely so that
 # the core install can run every command; --config c.yaml needs this.
 config = ["pyyaml>=6.0"]
