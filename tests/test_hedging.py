@@ -546,6 +546,24 @@ class TestConvexityReconciliation:
         ).value * (10.0 * 1e-4) ** 2
         assert predicted == pytest.approx(row.swap_pnl, rel=1e-5)
 
+    @pytest.mark.parametrize("side", ["payer", "receiver"])
+    def test_the_hedged_residual_has_the_sign_of_the_swaps_convexity(
+        self, par_swap, strip, curve_set, as_of, side
+    ):
+        # The guard test_golden_cme.py's -100 bp golden points to. A linear
+        # strip leaves 0.5 x C x dy^2, so a payer (short convexity) nets
+        # negative on both sides of the grid and a receiver positive. The
+        # convexity comes from risk.sensitivities, a separate route from the
+        # shock table's full reprice.
+        from rates_engine.conventions.side import Side
+
+        swap = replace(par_swap, side=Side(side))
+        convexity = money_convexity(swap, curve_set).value
+        rows = shock_table(strip_hedge(swap, strip, as_of=as_of), (-100.0, 100.0)).table
+        assert (convexity < 0) == (side == "payer")
+        for net in rows.net_pnl:
+            assert (net < 0) == (convexity < 0)
+
 
 def _hedge_config(as_of, *, label=None) -> dict:
     """A ``hedge`` command config over the suite's two years of IMM quarters at 96.00."""
