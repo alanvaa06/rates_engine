@@ -318,7 +318,9 @@ class MonotoneConvex:
         """The instantaneous forward at a time, for inspecting smoothness.
 
         Args:
-            time: Time in years, non-negative.
+            time: Time in years. Before zero the forward is held at its value
+                at zero, the counterpart of :meth:`log_df` returning zero
+                there and of log-linear holding its first interval's forward.
 
         Returns:
             The instantaneous forward rate as a decimal.
@@ -326,11 +328,15 @@ class MonotoneConvex:
         discrete, node = self.discrete, self.nodes
         if time >= self.times[-1]:
             return node[-1]
+        # A negative time used to fall through the interval search -- it
+        # finds no interval ending after it -- into a branch marked
+        # unreachable that returned the *long-end* forward: 7.79% ten days
+        # before the valuation date on a curve reading 1.80% at it. Clamping
+        # to zero reads the first interval, at its left end.
+        time = max(time, 0.0)
         grid = self._grid
         index = bisect_right(grid, time)
-        if index > 0:
-            left, right = grid[index - 1], grid[index]
-            f_d = discrete[index - 1]
-            g0, g1 = node[index - 1] - f_d, node[index] - f_d
-            return f_d + _g_value(g0, g1, (time - left) / (right - left))
-        return node[-1]  # pragma: no cover - covered by the tail branch above
+        left, right = grid[index - 1], grid[index]
+        f_d = discrete[index - 1]
+        g0, g1 = node[index - 1] - f_d, node[index] - f_d
+        return f_d + _g_value(g0, g1, (time - left) / (right - left))

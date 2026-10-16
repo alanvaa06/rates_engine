@@ -236,6 +236,44 @@ class TestNonPositiveForwards:
             assert integral / (right - left) == pytest.approx(expected, abs=1e-14)
 
 
+class TestBeforeTheValuationDate:
+    """A time before zero reads the forward at zero, as log-linear does.
+
+    It used to fall through the interval search to the long end: on a curve
+    rising from 2% to 6%, ten days before ``as_of`` read 7.79% while ``as_of``
+    itself read 1.80%.
+    """
+
+    def test_a_negative_time_reads_the_forward_at_zero(self):
+        times = (1.0, 10.0)
+        forwards = (0.02, 0.06)
+        interpolant = MonotoneConvex(times, _log_dfs(times, forwards))
+        # Hagan-West step 1 written out: the interior node blends its two
+        # discrete forwards by the *other* interval's length, and the forward
+        # at zero extrapolates half the gap back from the first interval.
+        interior = (1.0 / 10.0) * 0.06 + (9.0 / 10.0) * 0.02
+        at_zero = 0.02 - 0.5 * (interior - 0.02)
+        assert interpolant.instantaneous_forward(0.0) == pytest.approx(at_zero, abs=1e-15)
+        assert interpolant.instantaneous_forward(-0.1) == pytest.approx(at_zero, abs=1e-15)
+        assert interpolant.instantaneous_forward(-50.0) == pytest.approx(at_zero, abs=1e-15)
+
+    def test_the_curve_object_agrees_before_and_at_as_of(self):
+        nodes = (date(2027, 1, 15), date(2036, 1, 15))
+        dfs = (math.exp(-0.02), math.exp(-0.02 - 0.06 * 9))
+        as_of = date(2026, 1, 15)
+        curve = DiscountCurve(as_of, nodes, dfs, "monotone_convex")
+        before = curve.instantaneous_forward(as_of - timedelta(days=10))
+        assert before == curve.instantaneous_forward(as_of)
+        assert before < 0.02, "the long-end forward leaked to the front"
+
+    def test_log_linear_already_did_this(self):
+        nodes = (date(2027, 1, 15), date(2036, 1, 15))
+        dfs = (math.exp(-0.02), math.exp(-0.02 - 0.06 * 9))
+        as_of = date(2026, 1, 15)
+        curve = DiscountCurve(as_of, nodes, dfs, "log_linear_df")
+        assert curve.instantaneous_forward(as_of - timedelta(days=10)) == pytest.approx(0.02)
+
+
 class TestNodeReproduction:
     """The interpolant passes through the data it was given."""
 
