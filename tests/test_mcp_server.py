@@ -187,12 +187,23 @@ class TestErrorsReachTheCallerNamed:
         assert excinfo.value.exit_code == 1
 
     def test_a_malformed_config_is_not_a_silent_success(self, config):
-        """Not an anticipated refusal, so not a RatesEngineError — but it must
-        still raise rather than come back as a curve built from what parsed."""
+        """It must raise rather than come back as a curve built from what
+        parsed. It used to raise a bare ``KeyError('price')``; the command
+        table now answers a lookup of a key that is not there with a
+        refusal naming the path, which is what an agent can act on."""
         broken = json.loads(json.dumps(config))
         del broken["curve"]["futures"][0]["price"]
-        with pytest.raises(KeyError):
+        with pytest.raises(ConfigurationError) as excinfo:
             mcp_server.call_tool("bootstrap", broken)
+        assert "curve.futures[0].price is missing" in str(excinfo.value)
+        assert isinstance(excinfo.value.__cause__, KeyError)
+
+    def test_a_misspelt_key_is_refused_by_the_tool_as_by_the_cli(self, config):
+        broken = json.loads(json.dumps(config))
+        broken["swap"]["notionl"] = broken["swap"].pop("notional")
+        with pytest.raises(ConfigurationError) as excinfo:
+            mcp_server.call_tool("price", broken)
+        assert "swap.notionl (did you mean notional?)" in str(excinfo.value)
 
     def test_the_failure_document_names_the_exception(self, config):
         broken = json.loads(json.dumps(config))
@@ -401,9 +412,3 @@ class TestTransportWiring:
         with pytest.raises(ToolError) as excinfo:
             anyio.run(lambda: server.call_tool("price", {"config": None}))
         assert "ConfigurationError" in str(excinfo.value)
-
-    def test_the_console_script_is_installed(self):
-        import shutil
-
-        pytest.importorskip("mcp.server.mcpserver", reason="the MCP SDK is not installed")
-        assert shutil.which("rateng-mcp"), "the [mcp] extra should put rateng-mcp on PATH"

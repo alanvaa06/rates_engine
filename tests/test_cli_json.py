@@ -199,6 +199,37 @@ class TestFailures:
         assert done.returncode == 2
 
 
+class TestTyposThroughTheCLI:
+    """The review's four typos (``r11_config_typos.py``), each exit 0 on main."""
+
+    @pytest.mark.parametrize(
+        ("command", "block", "typo", "meant"),
+        [
+            ("price", "swap", "notionl", "notional"),
+            ("price", "curve", "convexty", "convexity"),
+            ("price", "risk", "key_tenor", "key_tenors"),
+            ("hedge", "hedge", "shock_bps", "shocks_bp"),
+        ],
+    )
+    def test_the_typo_is_exit_one_and_names_the_key(
+        self, command, block, typo, meant, config_path, tmp_path, capsys
+    ):
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        config[block][typo] = config[block].pop(meant)
+        path = tmp_path / "typo.json"
+        path.write_text(json.dumps(config), encoding="utf-8")
+        assert main([command, "--config", str(path), "--json"]) == 1
+        error = json.loads(capsys.readouterr().out)["error"]
+        assert error["type"] == "ConfigurationError"
+        assert f"{block}.{typo} (did you mean {meant}?)" in error["message"]
+
+    @pytest.mark.parametrize("command", ["bootstrap", "price", "hedge"])
+    def test_the_shared_config_still_runs_every_command(self, command, config_path):
+        # One file carries swap, risk and hedge; bootstrap reads none of them,
+        # and that is not a typo.
+        assert main([command, "--config", str(config_path), "--json"]) == 0
+
+
 class TestConfigFormats:
     """JSON is native so the core install runs everything; YAML needs its extra."""
 
