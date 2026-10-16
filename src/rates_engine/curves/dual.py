@@ -12,10 +12,19 @@ substituting something plausible, and every result declares
 
 **Sequential against simultaneous.** Sequential solves the OIS curve first and
 then the tenor curve with the OIS curve held fixed; simultaneous solves both
-at once. They agree exactly when the basis is zero, because then the tenor
-curve is the OIS curve and there is nothing to feed back. With a wide basis
-they can differ by a few basis points in the long end, and the difference per
-tenor is reported rather than argued about.
+at once. They agree whatever the basis, to solver precision, and that is a
+property of the system rather than of the inputs: the OIS residuals depend on
+the OIS nodes alone, one quote per node, so the system is block triangular.
+Its OIS block has one root, which both modes find, and given that curve the
+tenor block has one root too. (An earlier version of this paragraph said a
+wide basis could separate them by a few basis points; at 150 bp of basis the
+difference is 0.00 bp.) The per-tenor difference is still computed and
+reported, as a check on the solver rather than a model choice: a non-zero
+value means one of the two solves did not converge.
+
+**Nothing comes back unchecked.** Every instrument, OIS and dual, must
+reprice within ``tolerance_bp`` on the curves returned, and a least-squares
+solve that reports it did not converge is refused rather than read.
 """
 
 from __future__ import annotations
@@ -29,7 +38,11 @@ import numpy as np
 from scipy.optimize import least_squares
 
 from rates_engine.conventions.daycount import DayCount, year_fraction
-from rates_engine.core.errors import NoTenorQuoteSourceError, UnderdeterminedCurveError
+from rates_engine.core.errors import (
+    BootstrapResidualError,
+    NoTenorQuoteSourceError,
+    UnderdeterminedCurveError,
+)
 from rates_engine.core.evidence import DataQuality, Evidence, Provenance
 from rates_engine.core.money import Currency
 from rates_engine.core.results import EngineResult
@@ -262,7 +275,8 @@ def solve_dual_curve(
             curve, they are two curves.
         compare_modes: Also run the other mode and report the per-node
             difference in the tenor curve's zero rates.
-        tolerance_bp: Residual tolerance used for the report, in basis points.
+        tolerance_bp: Residual every instrument, OIS and dual, must reprice
+            within on the returned curves, in basis points.
 
     Returns:
         The :class:`DualCurveResult`.
@@ -272,6 +286,8 @@ def solve_dual_curve(
             ``"synthetic"``.
         UnderdeterminedCurveError: There are more tenor-curve nodes than
             instruments to pin them, naming the nodes left without a quote.
+        BootstrapResidualError: A least-squares solve reported it did not
+            converge, or an instrument misses ``tolerance_bp``.
         ValueError: ``mode`` is not one of the two.
     """
     if inputs_origin != SYNTHETIC:
@@ -329,6 +345,21 @@ def solve_dual_curve(
         }
 
     residuals = {i.label: i.residual_bp(ois_curve_final, tenor_curve) for i in dual}
+    # The simultaneous solve moves the OIS nodes too, so the OIS quotes are
+    # checked again on the curve actually returned, not on the bootstrap's.
+    ois_residuals = {i.label: i.residual_bp(ois_curve_final) for i in ois_instruments}
+    missed = {
+        label: value
+        for label, value in {**ois_residuals, **residuals}.items()
+        if not abs(value) <= tolerance_bp
+    }
+    if missed:
+        raise BootstrapResidualError(
+            f"the {mode} dual-curve solve leaves these instruments outside the "
+            f"{tolerance_bp} bp tolerance: "
+            f"{ {label: round(value, 6) for label, value in missed.items()} }. The quotes "
+            "may not be consistent with one OIS and one tenor curve."
+        )
     forward_basis = {
         f"{begin.isoformat()}:{end.isoformat()}": (
             tenor_curve.forward(begin, end) - ois_curve_final.forward(begin, end)
@@ -354,6 +385,9 @@ def solve_dual_curve(
             ],
             "fit_residuals_bp": dict(residuals),
             "max_abs_residual_bp": max((abs(r) for r in residuals.values()), default=0.0),
+            "ois_max_abs_residual_bp": max(
+                (abs(r) for r in ois_residuals.values()), default=0.0
+            ),
             "tenor_nodes": [n.isoformat() for n in tenor_curve.nodes],
             "forward_basis_bp": dict(forward_basis),
             "sequential_vs_simultaneous_bp": comparison,
@@ -370,6 +404,21 @@ def solve_dual_curve(
         sequential_vs_simultaneous_bp=comparison,
         inputs_origin=inputs_origin,
     )
+
+
+def _require_converged(solution: Any, what: str) -> None:
+    """Refuse a least-squares solution that says it did not converge.
+
+    ``least_squares`` returns its last iterate either way and reports the
+    difference in ``success`` and ``status``; status 0 is "ran out of
+    evaluations", negative is "improper input". Neither was ever read here,
+    so a solve that stopped early came back as a curve.
+    """
+    if not solution.success:
+        raise BootstrapResidualError(
+            f"the dual-curve solve of {what} did not converge (least_squares status "
+            f"{solution.status}: {solution.message}); its last iterate is not a curve"
+        )
 
 
 def _initial_tenor(as_of: date, ois: DiscountCurve, node_dates: list[date]) -> DiscountCurve:
@@ -401,6 +450,7 @@ def _solve_tenor(
         return np.array([i.residual_bp(ois, curve) for i in ordered])
 
     solution = least_squares(residuals, guess, xtol=1e-15, ftol=1e-15, gtol=1e-15)
+    _require_converged(solution, "the tenor curve, OIS held fixed")
     return DiscountCurve(
         as_of,
         tuple(node_dates),
@@ -443,6 +493,7 @@ def _solve_simultaneous(
         )
 
     solution = least_squares(residuals, guess, xtol=1e-15, ftol=1e-15, gtol=1e-15)
+    _require_converged(solution, "the OIS and tenor curves together")
     return (
         DiscountCurve(
             as_of,
