@@ -564,7 +564,14 @@ def _reprice_with_quote_bump(
     long_end_source: str | None,
 ) -> float:
     """Reprice the swap with one futures quote moved and the curve rebuilt."""
-    bumped = tuple(_with_quote_shift(i, shift) if i is target else i for i in instruments)
+    # Identity, as in _quote_parallel_dv01: two distinct contracts can compare
+    # equal. Spelt as id() rather than ``is`` because the protocol-typed
+    # instruments and the FuturesNode target look disjoint to mypy --strict,
+    # which reports the ``is`` as a non-overlapping identity check.
+    target_id = id(target)
+    bumped = tuple(
+        _with_quote_shift(i, shift) if id(i) == target_id else i for i in instruments
+    )
     curve = bootstrap_discount_curve(as_of, bumped, long_end_source=long_end_source).curve
     return discounted_value(swap, CurveSet(curve))
 
