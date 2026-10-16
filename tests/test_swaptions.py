@@ -552,6 +552,67 @@ class TestGreeks:
         under_bachelier = option_greeks(atm_swaption, option_curve_set, normal).vega
         assert under_black == pytest.approx(under_bachelier, rel=0.05)
 
+    @pytest.mark.parametrize("years,lognormal", [(1, 0.30), (5, 0.30), (10, 0.30), (10, 0.45)])
+    def test_a_lognormal_quote_has_the_vega_of_the_normal_quote_at_the_same_price(
+        self, years, lognormal
+    ):
+        # The bump used to be converted with sigma_LN * F, the leading term:
+        # on a 10y10y at the money that gave 0.893 of the Bachelier vega at
+        # 30% and 0.775 at 45%. Converted exactly -- the normal vol that
+        # reproduces the price, bumped, and inverted back -- the two quotes
+        # of one price have one vega. At the money Bachelier is linear in
+        # sigma, so A sqrt(T) n(0) per unit of vol is the exact reference.
+        from datetime import date, timedelta
+
+        from rates_engine.curves.discount import CurveSet, DiscountCurve
+        from rates_engine.instruments.swaps import IRSwap
+
+        as_of = date(2026, 1, 15)
+        nodes = tuple(as_of + timedelta(days=365 * k) for k in range(1, 26))
+        curves = CurveSet(
+            DiscountCurve(as_of, nodes, tuple(math.exp(-0.04 * k) for k in range(1, 26)))
+        )
+        effective = date(2026 + years, 1, 15)
+        swap = IRSwap(effective, date(2036 + years, 1, 15), 0.04, 1e7)
+        forward = forward_swap_rate(Swaption(effective, swap, 0.04, Side.PAYER, 1e7), curves)
+        swaption = Swaption(effective, swap, forward, Side.PAYER, 1e7)
+        annuity = swaption_annuity(swaption, curves)
+        expiry = swaption.time_to_expiry(as_of)
+
+        quoted = Volatility(lognormal, VolUnits.LOGNORMAL_DECIMAL)
+        price = swaption_pv(swaption, curves, quoted).value
+        normal = bachelier.implied_normal_vol(price, forward, forward, expiry, annuity=annuity)
+        under_black = option_greeks(swaption, curves, quoted).vega
+        under_bachelier = option_greeks(swaption, curves, Volatility.normal_bp(normal * 1e4)).vega
+
+        closed_form = annuity * math.sqrt(expiry) / math.sqrt(2.0 * math.pi) * 1e-4
+        assert under_black == pytest.approx(closed_form, rel=1e-8, abs=0.0)
+        assert under_black == pytest.approx(under_bachelier, rel=1e-8, abs=0.0)
+
+    @pytest.mark.parametrize("offset", [-0.01, 0.015])
+    def test_the_match_holds_away_from_the_money(
+        self, underlying_swap, option_curve_set, forward_swap_rate, offset
+    ):
+        from datetime import timedelta
+
+        from conftest import AS_OF
+
+        swaption = Swaption(
+            expiry=AS_OF + timedelta(days=365 * 5), underlying=underlying_swap,
+            strike=forward_swap_rate + offset, side=Side.PAYER, notional=1e8,
+        )
+        quoted = Volatility.lognormal_percent(30.0)
+        price = swaption_pv(swaption, option_curve_set, quoted).value
+        normal = bachelier.implied_normal_vol(
+            price, forward_swap_rate, swaption.strike, swaption.time_to_expiry(AS_OF),
+            annuity=swaption_annuity(swaption, option_curve_set),
+        )
+        under_black = option_greeks(swaption, option_curve_set, quoted).vega
+        under_bachelier = option_greeks(
+            swaption, option_curve_set, Volatility.normal_bp(normal * 1e4)
+        ).vega
+        assert under_black == pytest.approx(under_bachelier, rel=1e-8, abs=0.0)
+
     def test_a_non_positive_bump_refuses(self, atm_swaption, option_curve_set):
         with pytest.raises(ValueError, match="bumps must be positive"):
             option_greeks(

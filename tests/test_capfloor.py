@@ -13,9 +13,11 @@ from rates_engine.conventions.option_kind import OptionKind
 from rates_engine.conventions.side import Side
 from rates_engine.core.errors import MissingFixingError, MissingForwardError
 from rates_engine.core.evidence import Provenance
+from rates_engine.curves.discount import CurveSet, DiscountCurve
 from rates_engine.instruments.capfloor import TERM_RATE_FIXING_LAG_DAYS, CapFloor
 from rates_engine.instruments.swaps import IRSwap
 from rates_engine.market.snapshot import MarketSnapshot, Series
+from rates_engine.models import bachelier, black
 from rates_engine.pricing.linear import pv
 from rates_engine.pricing.options import (
     PeriodStatus,
@@ -26,7 +28,7 @@ from rates_engine.pricing.options import (
     caplet_pv,
 )
 from rates_engine.risk.greeks import option_greeks
-from rates_engine.volatility.units import Volatility
+from rates_engine.volatility.units import Volatility, VolUnits
 
 STRIKE = 0.042
 VOL = Volatility.normal_bp(80.0)
@@ -479,3 +481,73 @@ class TestASeasonedCapOrFloor:
         assert cap.caplets[0].fixing_date == date(2026, 1, 16)
         greeks = option_greeks(cap, option_curve_set, VOL)
         assert greeks.theta < 0.0
+
+
+class TestALognormalCapHasTheVegaOfItsCaplets:
+    """Vega per basis point of normal vol, converted caplet by caplet.
+
+    A flat lognormal quote is a different normal volatility on every caplet,
+    because each has its own forward. The bump used to convert through the
+    last caplet's forward for the whole strip, and with the at-the-money
+    leading term: 3,820.56 per bp on the cap below, against 5,959.07 summed
+    caplet by caplet with the exact conversion (on the same expiries).
+    """
+
+    @staticmethod
+    def _sloping_curve() -> CurveSet:
+        # Zero rates from 2% at one year to 5% at fifteen, continuous.
+        tenors = range(1, 16)
+        zeros = {k: 0.02 + 0.03 * (k - 1) / 14 for k in tenors}
+        nodes = tuple(AS_OF + timedelta(days=365 * k) for k in tenors)
+        return CurveSet(
+            DiscountCurve(AS_OF, nodes, tuple(math.exp(-zeros[k] * k) for k in tenors))
+        )
+
+    def test_it_is_the_vega_of_each_caplet_at_its_own_normal_vol(self):
+        curves = self._sloping_curve()
+        cap = CapFloor(date(2026, 4, 15), date(2036, 4, 15), 0.04, 10_000_000.0, "cap", 3)
+        quoted = Volatility(0.25, VolUnits.LOGNORMAL_DECIMAL)
+        # The reference: the same strip, each caplet quoted at the normal
+        # volatility that reproduces its own Black price, bumped one basis
+        # point in Bachelier -- the definition of a normal vega, written out.
+        reference = 0.0
+        closed_form = 0.0
+        for caplet in cap.caplets:
+            forward = caplet_forward_rate(caplet, curves)
+            expiry = caplet.time_to_expiry(AS_OF)
+            annuity = caplet_numeraire(caplet, curves)
+            unit = black.price(forward, caplet.strike, expiry, 0.25)
+            normal = bachelier.implied_normal_vol(unit, forward, caplet.strike, expiry)
+            reference += annuity * (
+                bachelier.price(forward, caplet.strike, expiry, normal + 1e-4) - unit
+            )
+            closed_form += bachelier.vega(
+                forward, caplet.strike, expiry, normal, annuity=annuity
+            ) * 1e-4
+        vega = option_greeks(cap, curves, quoted).vega
+        assert vega == pytest.approx(reference, rel=1e-8, abs=0.0)
+        # A forward difference of one basis point against the derivative:
+        # close, not equal, and nowhere near the 30% the last-forward
+        # conversion was off by.
+        assert vega == pytest.approx(closed_form, rel=0.01)
+
+    def test_a_normal_quote_is_bumped_as_it_was(self, option_curve_set):
+        cap, _ = _pair()
+        bumped = cap_floor_pv(cap, option_curve_set, Volatility.normal_bp(81.0)).value
+        base = cap_floor_pv(cap, option_curve_set, VOL).value
+        assert option_greeks(cap, option_curve_set, VOL).vega == bumped - base
+
+    def test_a_fixed_caplet_has_no_vega(self, option_curve_set):
+        cap = CapFloor(
+            effective=date(2025, 12, 15), maturity=date(2026, 6, 15), strike=0.03,
+            notional=10_000_000.0, product="cap", frequency_months=3,
+        )
+        snapshot = _fixings(date(2025, 12, 11))
+        whole = option_greeks(
+            cap, option_curve_set, Volatility.lognormal_percent(25.0), fixings=snapshot
+        ).vega
+        live_only = option_greeks(
+            replace(cap, include_first_period=False), option_curve_set,
+            Volatility.lognormal_percent(25.0),
+        ).vega
+        assert whole == pytest.approx(live_only, rel=1e-12, abs=0.0)

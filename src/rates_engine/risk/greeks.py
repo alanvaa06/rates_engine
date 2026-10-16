@@ -5,14 +5,27 @@ bump two things -- the curve and the volatility -- and read the price from
 :mod:`rates_engine.pricing.options` rather than from a cashflow sum. The rate
 bump is the same zero-curve shift every other measure uses.
 
+**Vega is per basis point of normal volatility, exactly.** A lognormal quote
+is bumped through the normal volatility that reproduces its price: the price
+is inverted for its Bachelier volatility, that is raised by the bump, and the
+bumped price is inverted back to the lognormal volatility that is repriced.
+For a cap this is done caplet by caplet, because one flat lognormal quote is
+a different normal volatility on every forward. The shortcut it replaces,
+``sigma_N = sigma_LN * F``, is the at-the-money leading term: it gave a
+10y10y at 30% lognormal 0.893 of the vega of the same price quoted normal
+(0.775 at 45%); and taken through the last caplet's forward for the whole
+strip, it gave a ten-year cap at 25% 3,820.56 per bp where its caplets,
+each converted exactly, add up to 5,959.07. Even caplet by caplet the
+leading term is 8% short there (5,490.35).
+
 **Theta is the decay of optionality and nothing else.** Every option's time
 to expiry is one calendar day shorter; the curves are *not* rolled, so the
-carry of the numeraire -- roughly ``r * V`` a day, which on a ten-year
-swaption at 4% is larger than the decay itself -- is not in it, and no period
-is re-classified, so a fixing, a payment or an expiry that falls tomorrow
-neither drops out of the price nor asks for a fixing that does not exist yet.
-That is a choice, stated because the other one is as common: a desk theta
-that rolls the curve forward a day answers a different question.
+carry of the numeraire -- roughly ``r * V`` a day, 76 against a decay of 95
+on a 10y10y at 100 bp normal on a flat 4% curve -- is not in it, and no
+period is re-classified, so a fixing, a payment or an expiry that falls
+tomorrow neither drops out of the price nor asks for a fixing that does not
+exist yet. That is a choice, stated because the other one is as common: a
+desk theta that rolls the curve forward a day answers a different question.
 """
 
 from __future__ import annotations
@@ -21,18 +34,19 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Any
 
+from rates_engine.conventions.option_kind import OptionKind
 from rates_engine.core.evidence import Evidence
 from rates_engine.core.results import EngineResult
 from rates_engine.curves.discount import CurveSet
 from rates_engine.instruments.capfloor import CapFloor
 from rates_engine.instruments.swaption import Swaption
 from rates_engine.market.snapshot import MarketSnapshot
+from rates_engine.models import bachelier, black
 from rates_engine.pricing.collateral import valuation_warnings
 from rates_engine.pricing.options import (
     PeriodStatus,
     cap_floor_periods,
     cap_floor_pv,
-    caplet_forward_rate,
     forward_swap_rate,
     model_for,
     option_value,
@@ -43,6 +57,40 @@ from rates_engine.risk.bumps import BUMP_BP, shifted
 from rates_engine.volatility.units import Volatility, VolUnits
 
 __all__ = ["GreeksResult", "option_greeks"]
+
+
+def _lognormal_after_normal_bump(
+    sigma: float,
+    forward: float,
+    strike: float,
+    expiry: float,
+    kind: OptionKind,
+    bump_bp: float,
+) -> float:
+    """The lognormal volatility whose price is this one's after a normal-vol bump.
+
+    Exact rather than the at-the-money shortcut: the Black price is inverted
+    for the Bachelier volatility that reproduces it, that volatility is raised
+    by ``bump_bp`` basis points, and the bumped Bachelier price is inverted
+    back to a Black volatility. Repricing with the answer is therefore the
+    price at the normal volatility plus one bump, to the inversions'
+    tolerance, which is what "vega per basis point of normal vol" means.
+    """
+    if strike == 0.0:
+        # The price is the forward, or nothing, whatever the volatility.
+        return sigma
+    unit = black.price(forward, strike, expiry, sigma, kind=kind)
+    normal = bachelier.implied_normal_vol(unit, forward, strike, expiry, kind=kind)
+    target = bachelier.price(forward, strike, expiry, normal + bump_bp * 1e-4, kind=kind)
+    ceiling = forward if kind is OptionKind.CALL else strike
+    if target >= ceiling:
+        raise ValueError(
+            f"a {bump_bp} bp rise in the normal volatility takes this option to "
+            f"{target:.6g} per unit of numeraire, which no lognormal volatility reaches: "
+            f"Black's prices stop short of {ceiling:.6g}. The quote is too extreme for a "
+            "normal-vol vega; bump less, or quote the option in normal volatility."
+        )
+    return black.implied_lognormal_vol(target, forward, strike, expiry, kind=kind)
 
 
 def _decayed_one_day(
@@ -91,6 +139,40 @@ def _decayed_one_day(
     return sum(values)
 
 
+def _caplet_by_caplet(
+    cap: CapFloor,
+    curve_set: CurveSet,
+    volatility: Volatility,
+    valuation: date,
+    fixings: MarketSnapshot | None,
+    bump_bp: float,
+) -> float:
+    """A lognormal-quoted strip repriced with each live caplet's normal vol bumped."""
+    sigma = volatility.as_lognormal_decimal()
+    values = []
+    for period in cap_floor_periods(
+        cap, curve_set, volatility, as_of=valuation, fixings=fixings
+    ):
+        if period.status is not PeriodStatus.LIVE or period.forward is None:
+            values.append(period.value)
+            continue
+        caplet = period.caplet
+        bumped = _lognormal_after_normal_bump(
+            sigma, period.forward, caplet.strike, period.expiry, caplet.kind, bump_bp
+        )
+        values.append(
+            option_value(
+                Volatility.unchecked(bumped, VolUnits.LOGNORMAL_DECIMAL),
+                period.forward,
+                caplet.strike,
+                period.expiry,
+                caplet.kind,
+                period.numeraire,
+            )
+        )
+    return sum(values)
+
+
 @dataclass(frozen=True)
 class GreeksResult(EngineResult):
     """An option's sensitivities, every one of them a bumped reprice.
@@ -100,9 +182,12 @@ class GreeksResult(EngineResult):
             basis point — the option's DV01, on the same sign convention as
             :func:`~rates_engine.risk.sensitivities.dv01`.
         gamma: Change in :attr:`delta` per basis point squared.
-        vega: Change in value per basis point of *normal* volatility. Reported on the normal basis whatever model
-            priced the option, because that is what the market quotes and
-            what two desks can compare.
+        vega: Change in value per basis point of *normal* volatility,
+            reported on that basis whatever model priced the option, because
+            that is what the market quotes and what two desks can compare. A
+            lognormal quote is converted exactly -- through the normal
+            volatility that reproduces its price, caplet by caplet for a cap
+            -- so the same price quoted either way has the same vega.
         theta: Change in value when every option's time to expiry is one
             calendar day shorter, per day. Only the decay of volatility time
             value: the curves are not rolled, so the numeraire's carry is
@@ -164,9 +249,10 @@ def option_greeks(
     cannot drift from it.
 
     Vega is always reported per basis point of *normal* volatility. When a
-    lognormal quote priced the option, the bump is applied to its at-the-money
-    normal equivalent and converted back, so two desks quoting different
-    conventions still compare vegas.
+    lognormal quote priced the option, the bump is applied to the normal
+    volatility that reproduces its price -- for a cap, each caplet's own --
+    and converted back exactly, so the same price quoted in either
+    convention has the same vega. A fixed caplet has no vega.
 
     Theta shortens every expiry by one calendar day and changes nothing else:
     it is the decay of volatility time value only, with the curves not rolled
@@ -225,17 +311,20 @@ def option_greeks(
         bumped_vol = Volatility.unchecked(
             volatility.as_normal_bp() + vol_bump_bp, VolUnits.NORMAL_BP
         )
+        bumped = at(curve_set, bumped_vol)
+    elif isinstance(option, Swaption):
+        sigma = _lognormal_after_normal_bump(
+            volatility.as_lognormal_decimal(),
+            forward_swap_rate(option, curve_set),
+            option.strike,
+            option.time_to_expiry(valuation),
+            option.kind,
+            vol_bump_bp,
+        )
+        bumped = at(curve_set, Volatility.unchecked(sigma, VolUnits.LOGNORMAL_DECIMAL))
     else:
-        forward = (
-            forward_swap_rate(option, curve_set)
-            if isinstance(option, Swaption)
-            else caplet_forward_rate(option.caplets[-1], curve_set)
-        )
-        equivalent = volatility.atm_equivalent_normal(forward).as_normal_bp()
-        bumped_vol = Volatility.unchecked(
-            (equivalent + vol_bump_bp) * 1e-4 / forward, VolUnits.LOGNORMAL_DECIMAL
-        )
-    vega = (at(curve_set, bumped_vol) - base) / vol_bump_bp
+        bumped = _caplet_by_caplet(option, curve_set, volatility, valuation, fixings, vol_bump_bp)
+    vega = (bumped - base) / vol_bump_bp
 
     theta = _decayed_one_day(option, curve_set, volatility, valuation, fixings) - base
 
@@ -250,6 +339,12 @@ def option_greeks(
                 "rate_bump_basis": "zero_curve_parallel",
                 "vol_bump_bp": vol_bump_bp,
                 "vol_bump_basis": "normal_volatility",
+                "vol_bump_conversion": (
+                    "none: the quote is normal"
+                    if volatility.is_normal
+                    else "exact: through the normal volatility reproducing each "
+                    "option's price, caplet by caplet for a cap"
+                ),
                 "theta_basis": "one_calendar_day",
                 "theta_note": (
                     "Volatility time decay only: every expiry one day shorter, the "
