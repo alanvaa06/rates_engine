@@ -26,6 +26,7 @@ from conftest import require_published
 
 from rates_engine.conventions.calendar import SIFMA_US
 from rates_engine.conventions.schedule import imm_date, next_imm_on_or_after
+from rates_engine.core.errors import MissingFixingError
 from rates_engine.core.evidence import DataQuality, Provenance
 from rates_engine.instruments.futures import (
     SR1_CONTRACT_TENOR,
@@ -154,6 +155,29 @@ class TestSR1Settlement:
         # Using the wrong one of the two is a real error, and at these levels
         # it is larger than the 0.1 bp tolerance the CME comparison holds.
         assert compounded > averaged
+
+    def test_a_month_opening_on_a_weekend_refuses_a_stale_carried_fixing(self, fixtures_dir):
+        # August 2026 opens on a Saturday, so its first two days carry the
+        # rate of Friday 31 July. With July missing, the last fixing on file
+        # is 30 June's, and the code carried it in without a word -- 1.46 bp
+        # on the contract in the review's example.
+        full = load_series_csv(fixtures_dir / "sofr_fixings.csv", "SOFR")
+        kept = [
+            (d, v)
+            for d, v in zip(full.dates, full.values, strict=True)
+            if not date(2026, 7, 1) <= d <= date(2026, 7, 31)
+        ]
+        snapshot = MarketSnapshot(
+            as_of=kept[-1][0],
+            series={
+                "SOFR": Series(
+                    "SOFR", tuple(d for d, _ in kept), tuple(v for _, v in kept), full.provenance
+                )
+            },
+        )
+        assert date(2026, 8, 1).weekday() == 5
+        with pytest.raises(MissingFixingError, match="2026-07-31"):
+            SOFRFuture1M(date(2026, 8, 1)).settlement_rate(snapshot)
 
     def test_contract_month_spans_the_calendar_month(self):
         contract = SOFRFuture1M(date(2026, 2, 14))

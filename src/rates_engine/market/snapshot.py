@@ -228,7 +228,9 @@ class MarketSnapshot:
             The :class:`CompoundedRate`, with the count of repeated days.
 
         Raises:
-            MissingFixingError: A business day in the period has no fixing.
+            MissingFixingError: A business day in the period has no fixing,
+                or the period opens on a non-business day and the business
+                day before it has none. An older fixing is never carried in.
             ValueError: ``end`` precedes ``start``.
         """
         factor, business_days, repeated, first, last = self._accrue(
@@ -265,7 +267,9 @@ class MarketSnapshot:
             ``1 + rate * year_fraction``.
 
         Raises:
-            MissingFixingError: A business day in the period has no fixing.
+            MissingFixingError: A business day in the period has no fixing,
+                or the period opens on a non-business day and the business
+                day before it has none. An older fixing is never carried in.
             ValueError: ``end`` precedes ``start``.
         """
         total, business_days, repeated, first, last = self._sum(series_id, start, end, calendar)
@@ -296,16 +300,40 @@ class MarketSnapshot:
                 out.append((day, value, False))
             else:
                 if last_published is None:
-                    previous = series.last_on_or_before(day)
-                    if previous is None:
-                        raise MissingFixingError(
-                            f"series {series_id!r} has no fixing on or before {day} to carry "
-                            "into the non-publication day that starts this period"
-                        )
-                    last_published = previous[1]
+                    last_published = self._carried_in(series, series_id, day, calendar)
                 out.append((day, last_published, True))
             day += timedelta(days=1)
         return out
+
+    @staticmethod
+    def _carried_in(
+        series: Series, series_id: str, day: date, calendar: HolidayCalendar
+    ) -> float:
+        """The rate a period opening on non-publication ``day`` carries in.
+
+        It is the fixing of the business day immediately before ``day`` on
+        ``calendar``, and only that one. Reaching for the last observation on
+        file instead was the old behaviour, and it had no bound: with July
+        missing, an August SR1 carried 30 June's rate into 1-2 August and
+        settled 1.46 bp away without a word. A gap in the data is a refusal
+        here exactly as it is on a business day inside the period.
+        """
+        previous = calendar.previous_business_day(day)
+        value = series.get(previous)
+        if value is None:
+            held = series.last_on_or_before(previous)
+            found = (
+                f"the last fixing on file before it is {held[0]}, which is not the "
+                "rate this day takes"
+                if held
+                else "the series holds nothing that early"
+            )
+            raise MissingFixingError(
+                f"series {series_id!r} has no fixing for {previous}, the business day "
+                f"before {day} that opens this period and whose rate {day} takes; {found}. "
+                "Supply that fixing: an older one is never carried in its place"
+            )
+        return value
 
     def _accrue(
         self, series_id: str, start: date, end: date, calendar: HolidayCalendar

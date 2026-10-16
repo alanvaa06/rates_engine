@@ -165,6 +165,47 @@ class TestNonPublicationDays:
             whole.accrual_factor / (1 + friday * 3 / 360) * (friday**2 * 2 / 360**2), rel=1e-6
         )
 
+    def test_a_period_opening_on_a_weekend_carries_friday_s_rate(self, snapshot):
+        # Saturday 10 to Tuesday 13 January: Saturday and Sunday take the rate
+        # published for Friday 9 January, the business day before the period.
+        friday = snapshot.fixing("SOFR", date(2026, 1, 9))
+        monday = snapshot.fixing("SOFR", date(2026, 1, 12))
+        result = snapshot.compounded("SOFR", date(2026, 1, 10), date(2026, 1, 13))
+        assert result.accrual_factor == pytest.approx(
+            (1 + friday * 2 / 360) * (1 + monday / 360), rel=1e-15
+        )
+        assert result.repeated_days == 2
+        assert result.first_fixing_date == date(2026, 1, 12)
+
+    def test_only_the_business_day_before_the_period_may_be_carried_in(self, fixtures_dir):
+        # Remove Friday 9 January: the last fixing before Saturday is now
+        # Thursday's, which is not the rate a Saturday takes. Carrying it would
+        # be a guess, and an unbounded one -- with July missing, the review
+        # carried 30 June's fixing into an August SR1 settlement.
+        full = load_series_csv(fixtures_dir / "sofr_fixings.csv", "SOFR")
+        friday = date(2026, 1, 9)
+        pruned = Series(
+            "SOFR",
+            tuple(d for d in full.dates if d != friday),
+            tuple(v for d, v in zip(full.dates, full.values, strict=True) if d != friday),
+            full.provenance,
+        )
+        snap = MarketSnapshot(date(2026, 1, 15), {"SOFR": pruned})
+        for method in (snap.compounded, snap.averaged):
+            with pytest.raises(MissingFixingError) as excinfo:
+                method("SOFR", date(2026, 1, 10), date(2026, 1, 13))
+            message = str(excinfo.value)
+            assert "2026-01-09" in message
+            assert "2026-01-08" in message  # the fixing it declined to carry
+
+    def test_a_period_opening_on_a_holiday_carries_the_day_before(self, snapshot):
+        # Thursday 1 January 2026 is New Year's Day; the rate it takes is
+        # Wednesday 31 December's.
+        assert not SIFMA_US.is_business_day(date(2026, 1, 1))
+        new_year_s_eve = snapshot.fixing("SOFR", date(2025, 12, 31))
+        result = snapshot.averaged("SOFR", date(2026, 1, 1), date(2026, 1, 2))
+        assert result.rate == pytest.approx(new_year_s_eve, rel=1e-15)
+
     def test_average_and_compounded_differ(self, snapshot):
         averaged = snapshot.averaged("SOFR", date(2026, 1, 1), date(2026, 2, 1))
         compounded = snapshot.compounded("SOFR", date(2026, 1, 1), date(2026, 2, 1))
