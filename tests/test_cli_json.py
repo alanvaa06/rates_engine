@@ -195,8 +195,81 @@ class TestFailures:
         assert done.stdout == ""
 
     def test_an_unknown_command_is_rejected_by_the_parser(self):
+        # Used to be exit 2 with nothing on stdout. With --json a parser
+        # failure is a failure before a result like any other, so it is one
+        # document, and a malformed command line is an input the caller fixes:
+        # ConfigurationError, exit code 1 (docs/ERRORS.md, "Exit codes").
         done = _run("simulate", "--json")
+        assert done.returncode == 1
+        payload = json.loads(done.stdout)
+        assert payload["error"]["type"] == "ConfigurationError"
+        assert "simulate" in payload["error"]["message"]
+
+
+class TestParserFailuresKeepTheContract:
+    """``cli.py:7-8``: a failure before a result still puts one document on stdout.
+
+    On main, ``parse_args`` sat outside the ``try``, so ``rateng price --json``
+    without ``--config`` exited 2 with an empty stdout, and so did an unknown
+    flag (review script ``r02_cli_edges.py``, cases B and B2).
+    """
+
+    @pytest.mark.parametrize(
+        ("argv", "named"),
+        [
+            (["price", "--json"], "--config"),
+            (["describe", "--json", "--bogus"], "--bogus"),
+            (["hedge", "--json", "--config"], "--config"),
+            (["--json"], "command"),
+        ],
+        ids=["missing-config", "unknown-flag", "flag-without-value", "no-command"],
+    )
+    def test_with_json_a_parser_failure_is_one_document(self, argv, named, capsys):
+        code = main(argv)
+        captured = capsys.readouterr()
+        assert code == 1
+        assert captured.out.count("\n") == 1
+        payload = json.loads(captured.out)
+        assert payload["exit_code"] == 1
+        assert payload["error"]["type"] == "ConfigurationError"
+        assert payload["error"]["recoverable"] is True
+        assert named in payload["error"]["message"]
+        # The narration argparse would have printed still goes to stderr.
+        assert "usage: rateng" in captured.err
+
+    def test_an_abbreviated_json_flag_counts(self, capsys):
+        # argparse accepts --js for --json, so the contract has to as well.
+        assert main(["price", "--js"]) == 1
+        assert json.loads(capsys.readouterr().out)["error"]["type"] == "ConfigurationError"
+
+    def test_without_json_the_parser_behaves_as_argparse_does(self):
+        done = _run("price")
         assert done.returncode == 2
+        assert done.stdout == ""
+        assert "the following arguments are required: --config" in done.stderr
+
+    def test_help_is_still_help_with_json(self):
+        done = _run("describe", "--json", "--help")
+        assert done.returncode == 0
+        assert done.stdout.startswith("usage: rateng describe")
+
+
+class TestConfiglessCommandsDoNotOpenTheConfig:
+    """``--config`` says describe and list-instruments ignore it; they now do."""
+
+    @pytest.mark.parametrize("command", ["describe", "list-instruments"])
+    def test_a_missing_file_is_not_opened(self, command, tmp_path):
+        # On main this was exit 1 with FileNotFoundError for a flag documented
+        # as ignored.
+        done = _run(command, "--config", str(tmp_path / "nope.json"), "--json")
+        assert done.returncode == 0, done.stdout
+        assert json.loads(done.stdout)["evidence"] is None
+
+    @pytest.mark.parametrize("command", ["describe", "list-instruments"])
+    def test_a_file_that_is_not_a_config_is_not_read(self, command, tmp_path):
+        path = tmp_path / "notes.json"
+        path.write_text("this is not json", encoding="utf-8")
+        assert _run(command, "--config", str(path), "--json").returncode == 0
 
 
 class TestTyposThroughTheCLI:
