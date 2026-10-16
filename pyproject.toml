@@ -58,6 +58,8 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/alanvaa06/rates_engine"
 Repository = "https://github.com/alanvaa06/rates_engine"
+# The API reference docs.yml renders from the docstrings on every push to main.
+Documentation = "https://alanvaa06.github.io/rates_engine/"
 Issues = "https://github.com/alanvaa06/rates_engine/issues"
 Changelog = "https://github.com/alanvaa06/rates_engine/blob/main/CHANGELOG.md"
 

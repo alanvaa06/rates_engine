@@ -10,6 +10,8 @@ Every result returns the number **and** the evidence it rests on. No AI in runti
 
 Distribution: `finport-ratesengine`. Import: `rates_engine`. CLI: `rateng`.
 Python 3.11+. Core dependencies: numpy, pandas, scipy — and nothing else.
+The API reference is at <https://alanvaa06.github.io/rates_engine/>, rendered
+from the docstrings on every push to `main`.
 
 Conventions mirror [`alanvaa06/optimization_engine`](https://github.com/alanvaa06/optimization_engine)
 (`finport-optengine`).
@@ -154,8 +156,8 @@ filling a missing slice is a model fitted to a different slice. An asymptotic
 expansion never returns a negative volatility.
 
 Thirty-three named exceptions, each with an exit code and an entry in
-[`docs/ERRORS.md`](docs/ERRORS.md) saying whether it is recoverable and what
-to do about it.
+[`docs/ERRORS.md`](https://github.com/alanvaa06/rates_engine/blob/main/docs/ERRORS.md)
+saying whether it is recoverable and what to do about it.
 
 ## Evidence
 
@@ -251,23 +253,29 @@ pricing or hedging code knowing what a proxy is.
   volatility is held flat and the reading is marked unreliable rather than
   extrapolated into a negative density.
 
-[`docs/RESEARCH.md`](docs/RESEARCH.md) maps every formula to its source and
-says whether that source was read directly.
+[`docs/RESEARCH.md`](https://github.com/alanvaa06/rates_engine/blob/main/docs/RESEARCH.md)
+maps every formula to its source and says whether that source was read
+directly.
 
 ## Documents
 
+The links point at `main` on GitHub so that they also open from PyPI, which
+renders this page without the repository beside it.
+
 | Document | Path |
 | --- | --- |
-| Agent notes | `AGENTS.md` |
-| Refusal contract | `docs/ERRORS.md` |
-| Formula provenance | `docs/RESEARCH.md` |
-| Releasing | `docs/RELEASING.md` |
-| Architecture: layers, packages, extension points | `docs/architecture/ARCHITECTURE.md` |
-| Original design (phase 1) | `docs/design/2026-09-16-rates-engine-design.md` |
-| PRD-001 v1 | `docs/forge/prd/001-v1-curves-futures-swaps.md` |
-| Plan-design v1 | `docs/forge/plan/001-v1-plan-design.md` |
-| PRD-002 v2: swaptions, vol cube, MCP | `docs/forge/prd/002-v2-swaptions-vol-mcp.md` |
-| PRD-003 v3: MXN, FX forwards and options | `docs/forge/prd/003-v3-fx-mxn-hedging.md` |
+| API reference | [alanvaa06.github.io/rates_engine](https://alanvaa06.github.io/rates_engine/) |
+| Agent notes | [`AGENTS.md`](https://github.com/alanvaa06/rates_engine/blob/main/AGENTS.md) |
+| Refusal contract | [`docs/ERRORS.md`](https://github.com/alanvaa06/rates_engine/blob/main/docs/ERRORS.md) |
+| Formula provenance | [`docs/RESEARCH.md`](https://github.com/alanvaa06/rates_engine/blob/main/docs/RESEARCH.md) |
+| Releasing | [`docs/RELEASING.md`](https://github.com/alanvaa06/rates_engine/blob/main/docs/RELEASING.md) |
+| Architecture: layers, packages, extension points | [`docs/architecture/ARCHITECTURE.md`](https://github.com/alanvaa06/rates_engine/blob/main/docs/architecture/ARCHITECTURE.md) |
+| Original design (phase 1) | [`docs/design/2026-09-16-rates-engine-design.md`](https://github.com/alanvaa06/rates_engine/blob/main/docs/design/2026-09-16-rates-engine-design.md) |
+| PRD-001 v1 | [`docs/forge/prd/001-v1-curves-futures-swaps.md`](https://github.com/alanvaa06/rates_engine/blob/main/docs/forge/prd/001-v1-curves-futures-swaps.md) |
+| Plan-design v1 | [`docs/forge/plan/001-v1-plan-design.md`](https://github.com/alanvaa06/rates_engine/blob/main/docs/forge/plan/001-v1-plan-design.md) |
+| PRD-002 v2: swaptions, vol cube, MCP | [`docs/forge/prd/002-v2-swaptions-vol-mcp.md`](https://github.com/alanvaa06/rates_engine/blob/main/docs/forge/prd/002-v2-swaptions-vol-mcp.md) |
+| PRD-003 v3: MXN, FX forwards and options | [`docs/forge/prd/003-v3-fx-mxn-hedging.md`](https://github.com/alanvaa06/rates_engine/blob/main/docs/forge/prd/003-v3-fx-mxn-hedging.md) |
+| Changelog | [`CHANGELOG.md`](https://github.com/alanvaa06/rates_engine/blob/main/CHANGELOG.md) |
 
 Design documents are in Spanish; paper titles in English. `[[wikilinks]]`
 point to the author's private knowledge base and do not resolve here.
