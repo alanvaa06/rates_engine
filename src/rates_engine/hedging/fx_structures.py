@@ -329,10 +329,19 @@ class StructureResult(EngineResult):
         upfront_cost: Net premium in quote currency, per unit of base.
             Positive is paid, negative is received.
         total_cost: The same, scaled by the exposure.
-        worst_case_rate: The least favourable effective rate achievable, in
-            quote per base. ``None`` when the structure leaves the exposure
-            unbounded, which is information rather than a gap.
-        best_case_rate: The most favourable, or ``None`` when unbounded.
+        worst_case_rate: The least favourable effective rate the structure
+            can produce at any spot on the settlement date, in quote per
+            base. Worked out from the legs, not read off the grid, so it does
+            not move with ``grid_width`` and is reported even when the grid
+            stops short of the strike that sets it. ``None`` when the
+            structure leaves that side open — the rate keeps moving with the
+            spot past the outermost strike, so the extreme is set by how far
+            the spot goes rather than by the structure — which is
+            information rather than a gap.
+        best_case_rate: The most favourable, on the same terms, or ``None``
+            when that side is open. For a payable the favourable side runs
+            down towards a spot of zero, and that floor is not a bound any
+            structure bought.
         upside_participation: Fraction of a favourable move retained, in
             ``[0, 1]``, measured over the reported spot grid: the change in
             the effective rate as the spot moves from today's spot to the
@@ -527,18 +536,66 @@ def _participation(
     return max(0.0, min(1.0, kept / move))
 
 
+_FLAT = 1e-12
+"""A tail slope this close to zero is flat: quantities are whole units."""
+
+
+def _bounds(
+    exposure: Exposure,
+    legs: tuple[_Leg, ...],
+    forward_amount: float,
+    rate_at: Callable[[float], float],
+) -> tuple[float | None, float | None]:
+    """The worst and best effective rate over every spot, or ``None`` where open.
+
+    The effective rate is piecewise linear in the spot at settlement, with
+    kinks at the strikes, so its extremes over ``(0, inf)`` are at a kink
+    unless a tail keeps moving. Past the highest strike only calls are in
+    the money, and below the lowest only puts, so the two tail slopes come
+    straight from the legs: the open fraction of the exposure, plus or minus
+    each in-the-money leg's quantity. A tail that is not flat is open on the
+    side it moves towards — upwards without limit past the top strike, or
+    down to the spot's floor at zero below the bottom one, which no
+    structure bought — and that side reports ``None``.
+
+    This read the grid's largest and smallest rates, so every open side
+    reported the grid's edge: the unhedged payable's worst case was 22.20
+    on the default grid and 27.75 on a fifty-percent one.
+    """
+    open_fraction = 1.0 - abs(forward_amount) / exposure.amount
+    helped = 1.0 if exposure.direction is ExposureDirection.RECEIVABLE else -1.0
+    upper = open_fraction + helped * sum(
+        leg.quantity for leg in legs if leg.kind is OptionKind.CALL
+    )
+    lower = open_fraction - helped * sum(
+        leg.quantity for leg in legs if leg.kind is OptionKind.PUT
+    )
+    strikes = sorted({leg.strike for leg in legs})
+    if not strikes:
+        # Linear in the spot: constant when fully forward, open both ways
+        # otherwise. Any spot serves as the evaluation point of a constant.
+        if abs(open_fraction) <= _FLAT:
+            fixed = rate_at(1.0)
+            return fixed, fixed
+        return None, None
+    values = [rate_at(strike) for strike in strikes]
+    highest = None if upper > _FLAT or lower < -_FLAT else max(values)
+    lowest = None if upper < -_FLAT or lower > _FLAT else min(values)
+    if exposure.direction is ExposureDirection.PAYABLE:
+        return highest, lowest
+    return lowest, highest
+
+
 def _summarise(
     exposure: Exposure,
     spot: float,
     grid: tuple[float, ...],
-    rates: tuple[float, ...],
+    legs: tuple[_Leg, ...],
+    forward_amount: float,
     rate_at: Callable[[float], float],
-) -> tuple[float, float, float]:
+) -> tuple[float | None, float | None, float]:
     """Worst case, best case and participation."""
-    if exposure.direction is ExposureDirection.PAYABLE:
-        worst, best = max(rates), min(rates)
-    else:
-        worst, best = min(rates), max(rates)
+    worst, best = _bounds(exposure, legs, forward_amount, rate_at)
     return worst, best, _participation(exposure, spot, grid, rate_at)
 
 
@@ -562,7 +619,9 @@ def _structure(
         return _effective_rate(exposure, quote, legs, forward_amount, outright, upfront, spot)
 
     rates = tuple(rate_at(spot) for spot in grid)
-    worst, best, participation = _summarise(exposure, quote.spot, grid, rates, rate_at)
+    worst, best, participation = _summarise(
+        exposure, quote.spot, grid, legs, forward_amount, rate_at
+    )
     evidence = Evidence(
         produced_by=f"hedging_structures.{name}",
         fields={

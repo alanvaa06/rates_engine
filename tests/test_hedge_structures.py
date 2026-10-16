@@ -79,6 +79,9 @@ class TestTheTableHasWhatWasAskedFor:
         ]
 
     def test_each_row_reports_the_five_columns(self, payable):
+        """Every column is present on every row. The two bounds are `None`
+        where the structure leaves that side open, which
+        `TestTheBoundsAreTheStructuresNotTheGrids` pins row by row."""
         for structure in payable.structures:
             payload = structure.payload_fields()
             for column in (
@@ -89,6 +92,7 @@ class TestTheTableHasWhatWasAskedFor:
                 "payoff_grid",
             ):
                 assert column in payload
+            for column in ("upfront_cost", "upside_participation", "payoff_grid"):
                 assert payload[column] is not None
 
     def test_the_payoff_grid_matches_the_spot_grid(self, payable):
@@ -121,10 +125,11 @@ class TestTheBaselineRows:
         assert row.upside_participation == pytest.approx(1.0)
 
     def test_unhedged_is_the_widest_spread_of_outcomes(self, payable):
+        """Over the grid, since the unhedged row has no bound on either side."""
         row = payable.by_name("unhedged")
-        span = row.worst_case_rate - row.best_case_rate
+        span = max(row.payoff_grid) - min(row.payoff_grid)
         for other in payable.structures:
-            assert abs(other.worst_case_rate - other.best_case_rate) <= span + 1e-9
+            assert max(other.payoff_grid) - min(other.payoff_grid) <= span + 1e-9
 
     def test_the_forward_costs_nothing_and_fixes_everything(self, payable):
         row = payable.by_name("forward")
@@ -196,7 +201,10 @@ class TestThePremiumOrdering:
         collar = payable.by_name("collar_zero_cost")
         assert seagull.legs[-1][1] < collar.legs[-1][1]
         assert seagull.best_case_rate < collar.best_case_rate
-        assert seagull.worst_case_rate > collar.worst_case_rate
+        # Re-opened above the sold call: no bound at all, where the collar has one.
+        assert seagull.worst_case_rate is None
+        assert collar.worst_case_rate is not None
+        assert max(seagull.payoff_grid) > max(collar.payoff_grid)
 
     def test_ordering_by_cost_sorts_rather_than_ranks(self, payable):
         ordered = payable.ordered_by_cost()
@@ -254,8 +262,10 @@ class TestTheZeroCostCollar:
     def test_it_bounds_the_outcome_on_both_sides(self, payable):
         row = payable.by_name("collar_zero_cost")
         unhedged = payable.by_name("unhedged")
-        assert row.worst_case_rate < unhedged.worst_case_rate
-        assert row.best_case_rate > unhedged.best_case_rate
+        assert row.worst_case_rate is not None and row.best_case_rate is not None
+        assert unhedged.worst_case_rate is None and unhedged.best_case_rate is None
+        assert row.worst_case_rate < max(unhedged.payoff_grid)
+        assert row.best_case_rate > min(unhedged.payoff_grid)
 
 
 class TestTheTradeOff:
@@ -560,7 +570,10 @@ class TestItDoesNotRecommend:
         spread = payable.by_name("option_spread")
         collar = payable.by_name("collar_zero_cost")
         assert spread.upfront_cost > collar.upfront_cost
-        assert spread.worst_case_rate > collar.worst_case_rate
+        # Its sold far call re-opens the tail: no worst case at all.
+        assert spread.worst_case_rate is None
+        assert collar.worst_case_rate is not None
+        assert max(spread.payoff_grid) > collar.worst_case_rate
         assert TRADE_OFF_FRAME["monotone"] == "no"
 
     def test_participation_is_not_monotone_in_cost_either(self, payable):
@@ -747,3 +760,88 @@ class TestTheBasisReachesTheStructures:
     def test_an_implausible_basis_refuses(self):
         with pytest.raises(ImplausibleInputError, match="500 bp"):
             StructureQuote(18.50, 0.25, 0.0950, 0.0420, 0.115, basis_bp=-900.0)
+
+
+class TestTheBoundsAreTheStructuresNotTheGrids:
+    """The review's finding 3.3: a bound was the edge of the grid.
+
+    `worst_case_rate` and `best_case_rate` were the largest and smallest
+    rates on the reported grid, so a structure with no bound reported the
+    grid's edge -- a number that moved with `grid_width` -- and the promised
+    `None` never appeared (`REVISION-rates_engine-2026-10-15-repro/risk-app/
+    r04_fx_cli.py`: the unhedged payable's worst case was 22.20 on the
+    default grid and 27.75 on a 50% one). A bound is now worked out from the
+    legs over every spot, and `None` means that side is open: the rate keeps
+    moving with the spot past the outermost strike.
+    """
+
+    def _carried(self, row):
+        return row.upfront_cost * math.exp(QUOTE.r_domestic * QUOTE.expiry)
+
+    def test_which_rows_are_open_on_which_side_for_a_payable(self, payable):
+        open_sides = {
+            s.name: (s.worst_case_rate is None, s.best_case_rate is None)
+            for s in payable.structures
+        }
+        assert open_sides == {
+            "unhedged": (True, True),
+            "forward": (False, False),
+            "protective_option_atm": (False, True),
+            "protective_option_otm": (False, True),
+            "collar": (False, False),
+            "collar_zero_cost": (False, False),
+            "option_spread": (True, True),
+            "seagull": (True, False),
+        }
+
+    def test_a_protective_call_caps_a_payable_at_strike_plus_premium(self, payable):
+        """Above the strike the call pays the excess, so the payable never
+        costs more than the strike plus the premium carried to settlement."""
+        for name in ("protective_option_atm", "protective_option_otm"):
+            row = payable.by_name(name)
+            strike = row.legs[0][1]
+            assert row.worst_case_rate == pytest.approx(strike + self._carried(row), rel=1e-14)
+
+    def test_a_collar_is_bounded_by_its_two_strikes(self, payable):
+        for name in ("collar", "collar_zero_cost"):
+            row = payable.by_name(name)
+            (_, call_strike, _), (_, put_strike, _) = row.legs
+            assert row.worst_case_rate == pytest.approx(call_strike + self._carried(row), rel=1e-14)
+            assert row.best_case_rate == pytest.approx(put_strike + self._carried(row), rel=1e-14)
+
+    def test_a_seagulls_floor_is_its_sold_put(self, payable):
+        row = payable.by_name("seagull")
+        sold_put = row.legs[-1][1]
+        assert row.best_case_rate == pytest.approx(sold_put + self._carried(row), rel=1e-14)
+
+    def test_a_partial_forward_is_open_on_both_sides(self):
+        row = compare_structures(_exposure(), QUOTE, hedge_ratio=0.8).by_name("forward")
+        assert row.worst_case_rate is None and row.best_case_rate is None
+
+    def test_a_receivable_is_floored_by_its_put(self, receivable):
+        row = receivable.by_name("protective_option_atm")
+        strike = row.legs[0][1]
+        assert row.worst_case_rate == pytest.approx(strike - self._carried(row), rel=1e-14)
+        assert row.best_case_rate is None
+        assert receivable.by_name("unhedged").worst_case_rate is None
+
+    def test_the_bounds_do_not_move_with_the_grid(self):
+        narrow = compare_structures(_exposure(), QUOTE, grid_width=0.20)
+        wide = compare_structures(_exposure(), QUOTE, grid_width=0.50)
+        for a, b in zip(narrow.structures, wide.structures, strict=True):
+            assert a.worst_case_rate == b.worst_case_rate, a.name
+            assert a.best_case_rate == b.best_case_rate, a.name
+
+    def test_a_bound_the_grid_does_not_reach_is_still_reported(self):
+        """On a grid one percent wide the 8% collar's strikes are off the
+        grid, and its bounds are still the strikes, not the grid's edge."""
+        tight = compare_structures(_exposure(), QUOTE, grid_width=0.01).by_name("collar")
+        (_, call_strike, _), (_, put_strike, _) = tight.legs
+        assert max(tight.payoff_grid) < call_strike
+        assert tight.worst_case_rate == pytest.approx(call_strike + self._carried(tight), rel=1e-14)
+        assert tight.best_case_rate == pytest.approx(put_strike + self._carried(tight), rel=1e-14)
+
+    def test_an_open_side_serialises_as_null(self, payable):
+        payload = json.loads(json.dumps(payable.by_name("unhedged").to_dict()))
+        assert payload["worst_case_rate"] is None
+        assert payload["best_case_rate"] is None
