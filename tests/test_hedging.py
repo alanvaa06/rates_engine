@@ -422,6 +422,14 @@ class TestShockTable:
     def test_the_strip_pnl_basis_is_declared(self, table):
         assert "own forward move" in table.evidence.fields["strip_pnl_basis"]
 
+    @pytest.mark.parametrize("grid", [(0.0, 10.0), (-10.0, -0.0)])
+    def test_a_zero_shock_is_refused_by_name(self, par_swap, strip, as_of, grid):
+        # The implied convexity column is 2 x net / shock^2, which is 0/0 at
+        # a zero shock; it used to escape as a bare ZeroDivisionError.
+        hedge = strip_hedge(par_swap, strip, as_of=as_of)
+        with pytest.raises(ValueError, match="0 bp"):
+            shock_table(hedge, grid)
+
 
 class TestConvexityReconciliation:
     """PRD-001 AC-10.10: DV01 and money convexity reproduce the full reprice."""
@@ -558,3 +566,14 @@ def _sr1_config(as_of) -> dict:
         },
         "hedge": {"shocks_bp": [-10, 10]},
     }
+
+
+class TestTheHedgeCommandShocks:
+    """``hedge.shocks_bp`` through the command."""
+
+    def test_a_zero_shock_in_the_config_is_refused_by_name(self, as_of):
+        # It used to reach the caller as ZeroDivisionError, exit code 1.
+        config = _hedge_config(as_of)
+        config["hedge"]["shocks_bp"] = [0, 10]
+        with pytest.raises(ValueError, match="shocks_bp"):
+            commands.hedge(config)

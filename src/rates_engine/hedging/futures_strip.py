@@ -589,7 +589,7 @@ def shock_table(
 
     Args:
         hedge: A sized hedge.
-        shocks_bp: Parallel shifts in basis points.
+        shocks_bp: Parallel shifts in basis points, none of them zero.
 
     Returns:
         The :class:`ShockTableResult`. ``net_pnl`` is the swap's convexity in
@@ -602,12 +602,24 @@ def shock_table(
             ``contract_dv01_by_label``, a dollar constant, so
             netting it against a peso swap P&L would add two currencies in
             the ``net_pnl`` column and report the sum as one number.
+        ValueError: ``shocks_bp`` contains a zero shock.
     """
     require_same_currency(
         hedge.curve_set.currency,
         Currency.USD,
         operation="netting a futures strip P&L against a swap P&L",
     )
+    # Refused rather than dropped or filled with NaN. A zero shock moves
+    # nothing, so its row is the hedge itself, and the implied convexity
+    # column divides by the shock squared: 0/0, which used to escape as a
+    # bare ZeroDivisionError. Dropping it silently would return a table one
+    # row shorter than the grid asked for.
+    if any(shock == 0.0 for shock in shocks_bp):
+        raise ValueError(
+            f"shocks_bp {list(shocks_bp)} contains a 0 bp shock. It moves nothing, and "
+            "the implied money convexity is 2 x net / shock^2, undefined at zero; drop "
+            "it from the grid -- the unshocked position is the hedge itself"
+        )
     base_pv = discounted_value(hedge.swap, hedge.curve_set)
     rows: list[dict[str, float]] = []
     for shock in shocks_bp:
