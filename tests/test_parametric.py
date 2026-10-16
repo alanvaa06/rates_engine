@@ -468,5 +468,8 @@ class TestNoDependencyOnTheOtherRepo:
         assert offenders == [], offenders
 
     def test_the_package_declares_no_such_dependency(self):
-        text = (Path(rates_engine.__file__).parents[2] / "pyproject.toml").read_text()
+        # From this file, not from rates_engine.__file__: against a built
+        # wheel the package lives in a venv, two levels below which there is
+        # no pyproject.toml.
+        text = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8")
         assert "Nelson_Siegel_Model" not in text

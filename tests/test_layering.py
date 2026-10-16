@@ -28,6 +28,11 @@ from pathlib import Path
 import rates_engine
 
 ROOT = Path(rates_engine.__file__).parent
+#: The checkout or unpacked sdist this file sits in. Not ``ROOT.parent.parent``:
+#: that is the repository only under an editable install, and inside a venv's
+#: ``Lib`` when the suite runs against a built wheel — where ``AGENTS.md`` is
+#: missing and a glob for the tests finds nothing, so a check silently passes.
+REPO = Path(__file__).resolve().parents[1]
 
 #: Layers, lowest first. Every top-level package or module sits on exactly one.
 LAYERS: tuple[frozenset[str], ...] = (
@@ -245,7 +250,7 @@ def test_the_module_map_in_agents_md_lists_every_package():
     `curves/bootstrap.py` and the modules beside it."""
     import re
 
-    text = (ROOT.parent.parent / "AGENTS.md").read_text(encoding="utf-8")
+    text = (REPO / "AGENTS.md").read_text(encoding="utf-8")
     rows = set(re.findall(r"^\| `([\w_]+)` \|", text, re.M))
     present = {_top_level(p) for p in _modules()} - {"__init__"}
     assert sorted(present - rows) == [], "in the package, missing from AGENTS.md"
@@ -264,7 +269,11 @@ def test_no_test_imports_another_test_module():
     import re
 
     offenders = []
-    for path in sorted((ROOT.parent.parent / "tests").rglob("test_*.py")):
+    scanned = sorted((REPO / "tests").rglob("test_*.py"))
+    # An empty glob would make this pass having read nothing, which is what
+    # it did against an installed wheel before REPO replaced the package path.
+    assert Path(__file__).resolve() in scanned, "the scan did not find the test tree"
+    for path in scanned:
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             if re.match(r"\s*(import tests\b|from tests\b)", line):
                 offenders.append(f"{path.name}:{number}: {line.strip()}")
