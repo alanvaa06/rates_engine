@@ -14,8 +14,13 @@ import math
 
 import pytest
 
-from rates_engine.core.errors import CalibrationError, ExpansionBreakdownError, ShiftRequiredError
-from rates_engine.models import bachelier
+from rates_engine.core.errors import (
+    CalibrationError,
+    ExpansionBreakdownError,
+    ShiftRequiredError,
+    VolUnitsError,
+)
+from rates_engine.models import bachelier, black
 from rates_engine.models.sabr import (
     SABRParameters,
     calibrate,
@@ -236,6 +241,36 @@ class TestShiftAndRefusals:
         base = {"alpha": 0.009, "beta": 0.5, "rho": 0.0, "nu": 0.4, "shift": 0.0}
         with pytest.raises(ValueError, match="finite"):
             SABRParameters(**{**base, name: value})
+
+    def test_a_shifted_lognormal_vol_is_refused_unless_asked_for_by_name(self):
+        # With a shift the expansion runs on F + s and K + s, so it returns the
+        # sigma of Black(F + s, K + s) -- what QuantLib's shiftedSabrVolatility
+        # returns -- and nothing in this package prices that: Volatility,
+        # black.price and swaption_pv have no shift. Fed to plain Black it
+        # priced 0.001611 where the model says 0.002588.
+        shifted = SABRParameters(alpha=0.04, beta=0.5, rho=-0.2, nu=0.4, shift=0.01)
+        with pytest.raises(VolUnitsError, match="shifted"):
+            lognormal_vol(shifted, 0.03, 0.035, 2.0)
+
+    def test_the_shifted_vol_prices_in_shifted_black_and_only_there(self):
+        forward, strike, expiry, shift = 0.03, 0.035, 2.0, 0.01
+        smile = SABRParameters(alpha=0.04, beta=0.5, rho=-0.2, nu=0.4, shift=shift)
+        sigma = lognormal_vol(smile, forward, strike, expiry, shifted_black=True)
+        # The model's own price, through the normal expansion, which a shift
+        # does not disturb: Bachelier is unchanged by moving F and K together.
+        reference = bachelier.price(
+            forward, strike, expiry, normal_vol(smile, forward, strike, expiry)
+        )
+        shifted_black = black.price(forward + shift, strike + shift, expiry, sigma)
+        plain_black = black.price(forward, strike, expiry, sigma)
+        # Two expansions of one model agree closely; the unshifted use does not.
+        assert shifted_black == pytest.approx(reference, rel=1e-3)
+        assert abs(plain_black / reference - 1.0) > 0.3
+
+    def test_an_unshifted_smile_needs_no_acknowledgement(self):
+        assert lognormal_vol(TRUTH, FORWARD, 0.045, EXPIRY) == lognormal_vol(
+            TRUTH, FORWARD, 0.045, EXPIRY, shifted_black=True
+        )
 
     @pytest.mark.parametrize("forward,strike", [(float("nan"), 0.04), (0.04, float("nan"))])
     def test_a_forward_or_strike_that_is_not_a_number_refuses(self, forward, strike):

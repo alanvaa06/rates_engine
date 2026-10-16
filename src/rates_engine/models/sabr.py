@@ -44,7 +44,12 @@ import numpy as np
 from scipy.optimize import least_squares
 
 from rates_engine.conventions.option_kind import OptionKind
-from rates_engine.core.errors import CalibrationError, ExpansionBreakdownError, ShiftRequiredError
+from rates_engine.core.errors import (
+    CalibrationError,
+    ExpansionBreakdownError,
+    ShiftRequiredError,
+    VolUnitsError,
+)
 from rates_engine.core.evidence import Evidence
 from rates_engine.core.results import EngineResult
 
@@ -92,7 +97,9 @@ class SABRParameters:
         nu: Volatility of volatility, non-negative.
         shift: Added to both forward and strike before the formulas are
             applied, so that a negative forward becomes a positive shifted
-            one. Zero means unshifted.
+            one. Zero means unshifted. A shift changes what
+            :func:`lognormal_vol` returns -- a shifted-Black volatility --
+            and leaves :func:`normal_vol` meaning what it always means.
     """
 
     alpha: float
@@ -217,24 +224,57 @@ def _checked(value: float, flavour: str, strike: float, expiry: float) -> float:
 
 
 def lognormal_vol(
-    parameters: SABRParameters, forward: float, strike: float, expiry: float
+    parameters: SABRParameters,
+    forward: float,
+    strike: float,
+    expiry: float,
+    *,
+    shifted_black: bool = False,
 ) -> float:
     """Black implied volatility from Hagan (2.17a), with (2.18) at the money.
+
+    **With a shift it is a shifted-Black volatility, not a Black one.** The
+    expansion runs on ``F + s`` and ``K + s``, so what comes back is the
+    ``sigma`` of ``Black(F + s, K + s, sigma)`` -- the number QuantLib's
+    ``shiftedSabrVolatility`` returns, and it agrees with that to 3.7e-14.
+    Priced in plain ``Black(F, K, sigma)`` it is a different option: 0.001611
+    against the model's 0.002588 at F = 3%, K = 3.5%, two years, a 1% shift.
+    Nothing downstream carries a shift -- :class:`~rates_engine.volatility.
+    units.Volatility`, :func:`rates_engine.models.black.price` and
+    :func:`~rates_engine.pricing.options.swaption_pv` are all unshifted -- so
+    a shifted smile is refused here unless ``shifted_black=True`` says the
+    caller will price in ``Black(F + s, K + s)`` itself. :func:`normal_vol`
+    needs no such flag: a Bachelier price does not move when forward and
+    strike move together, so its volatility means the same with or without
+    a shift, and it is the one to hand to the pricers.
 
     Args:
         parameters: The calibrated smile.
         forward: Forward rate as a decimal, before the shift.
         strike: Strike as a decimal, before the shift.
         expiry: Time to expiry in years, non-negative.
+        shifted_black: Acknowledge that, with a non-zero shift, the answer is
+            a shifted-Black volatility for ``Black(F + shift, K + shift)``.
+            Ignored when the shift is zero.
 
     Returns:
-        The relative volatility as a decimal a year.
+        The relative volatility as a decimal a year: Black's when the shift
+        is zero, shifted Black's otherwise.
 
     Raises:
+        VolUnitsError: The smile is shifted and ``shifted_black`` is not set.
         ShiftRequiredError: The shifted forward or strike is not positive.
         ValueError: ``expiry`` is negative, or the forward, strike or expiry
             is not a finite number.
     """
+    if parameters.shift != 0.0 and not shifted_black:
+        raise VolUnitsError(
+            f"with a shift of {parameters.shift!r} Hagan's lognormal expansion returns a "
+            "shifted-Black volatility, valid in Black(F + shift, K + shift) and nowhere "
+            "else. Volatility, black.price and swaption_pv carry no shift, so the number "
+            "would price a different option. Use normal_vol, which a shift does not "
+            "change, or pass shifted_black=True and price the shifted rates yourself."
+        )
     if not expiry >= 0.0 or math.isinf(expiry):
         raise ValueError(f"expiry must be a finite non-negative number, got {expiry!r}")
     f, k = _shifted(parameters, forward, strike)
@@ -272,7 +312,10 @@ def normal_vol(
     This is the one the swaption market quotes, so it is the one the cube
     stores. It is a separate expansion, not the lognormal one multiplied by
     the forward: that shortcut is the at-the-money leading term and it is
-    wrong in the wings.
+    wrong in the wings. A shift leaves its meaning alone: Bachelier prices
+    the same option when forward and strike move together, so the number
+    goes straight to :func:`rates_engine.models.bachelier.price` on the
+    unshifted rates, shifted smile or not.
 
     Args:
         parameters: The calibrated smile.
