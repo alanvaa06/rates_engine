@@ -23,6 +23,12 @@ curve set and refuses one in another currency, so a peso swap on the dollar
 curve raises :class:`~rates_engine.core.errors.CurrencyMismatchError` rather
 than being quietly relabelled -- which is what v0.3 did, by taking the
 currency from the curve.
+
+**History.** A period paid on or before the curve set's ``as_of`` is not
+projected at all: it has been paid, and nothing about it is worth anything
+today. The pricer drops such flows again whatever projected them, so a
+product of the caller's own that returns its whole history is still
+valued correctly.
 """
 
 from __future__ import annotations
@@ -94,14 +100,14 @@ class Swappable(Priceable, Protocol):
 
 @singledispatch
 def project(instrument: object, curve_set: CurveSet) -> tuple[Cashflow, ...]:
-    """Every cashflow of ``instrument`` under ``curve_set``, signed for its side.
+    """Every cashflow of ``instrument`` still to be paid under ``curve_set``, signed for its side.
 
     Args:
         instrument: A registered instrument.
         curve_set: Discount and projection curves.
 
     Returns:
-        The flows, fixed leg first for a swap.
+        The flows paid after ``curve_set.as_of``, fixed leg first for a swap.
 
     Raises:
         TypeError: Nothing is registered for the instrument's type.
@@ -121,7 +127,7 @@ def float_leg(swap: object, curve_set: CurveSet) -> tuple[Cashflow, ...]:
         curve_set: Discount and projection curves.
 
     Returns:
-        One flow per floating period.
+        One flow per floating period paid after ``curve_set.as_of``.
 
     Raises:
         TypeError: Nothing is registered for the swap's type.
@@ -139,12 +145,15 @@ def _ois_float(swap: OISSwap, curve_set: CurveSet) -> tuple[Cashflow, ...]:
     """
     sign = -fixed_leg_sign(swap.side)
     curve = curve_set.discount
+    as_of = curve_set.as_of
     day_count = swap.index.day_count
     flows: list[Cashflow] = []
     schedule = swap.schedule
     for start, end, pay in zip(
         schedule.accrual_start, schedule.accrual_end, schedule.payment, strict=True
     ):
+        if pay <= as_of:
+            continue
         tau = year_fraction(start, end, day_count)
         growth = curve.df(start) / curve.df(end)
         rate = (growth - 1.0) / tau if tau else 0.0
@@ -175,11 +184,14 @@ def _irs_float(swap: IRSwap, curve_set: CurveSet) -> tuple[Cashflow, ...]:
     """
     sign = -fixed_leg_sign(swap.side)
     projection = curve_set.projection
+    as_of = curve_set.as_of
     flows: list[Cashflow] = []
     schedule = swap.float_schedule
     for start, end, pay in zip(
         schedule.accrual_start, schedule.accrual_end, schedule.payment, strict=True
     ):
+        if pay <= as_of:
+            continue
         tau = year_fraction(start, end, swap.float_day_count)
         rate = projection.forward(start, end, day_count=swap.float_day_count)
         flows.append(
@@ -197,14 +209,24 @@ def _irs_float(swap: IRSwap, curve_set: CurveSet) -> tuple[Cashflow, ...]:
     return tuple(flows)
 
 
+def _unpaid_fixed(swap: OISSwap | IRSwap, curve_set: CurveSet) -> tuple[Cashflow, ...]:
+    """The fixed coupons still to be paid, the one accruing today in full.
+
+    A fixed coupon is known from the trade date, so the period in progress
+    needs nothing but its own terms.
+    """
+    as_of = curve_set.as_of
+    return tuple(flow for flow in swap.fixed_cashflows() if flow.payment_date > as_of)
+
+
 @project.register
 def _project_ois(swap: OISSwap, curve_set: CurveSet) -> tuple[Cashflow, ...]:
-    return swap.fixed_cashflows() + _ois_float(swap, curve_set)
+    return _unpaid_fixed(swap, curve_set) + _ois_float(swap, curve_set)
 
 
 @project.register
 def _project_irs(swap: IRSwap, curve_set: CurveSet) -> tuple[Cashflow, ...]:
-    return swap.fixed_cashflows() + _irs_float(swap, curve_set)
+    return _unpaid_fixed(swap, curve_set) + _irs_float(swap, curve_set)
 
 
 def fra_fair_rate(fra: FRA, curve_set: CurveSet) -> float:
@@ -222,6 +244,8 @@ def fra_fair_rate(fra: FRA, curve_set: CurveSet) -> float:
 
 @project.register
 def _project_fra(fra: FRA, curve_set: CurveSet) -> tuple[Cashflow, ...]:
+    if fra.end <= curve_set.as_of:
+        return ()
     sign = -fixed_leg_sign(fra.side)
     projected = fra_fair_rate(fra, curve_set)
     tau = fra.year_fraction

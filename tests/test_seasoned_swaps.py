@@ -336,3 +336,105 @@ class TestSwapsThatStartOnOrAfterTheValuationDateDoNotMove:
         assert AS_OF in starts and any(start > AS_OF for start in starts)
         kinds = {type(instrument) for instrument, _ in cases.values()}
         assert kinds == {OISSwap, IRSwap, FRA}
+
+
+# ---------------------------------------------------------------------------
+# Flows already paid are worth nothing today.
+# ---------------------------------------------------------------------------
+
+NOTIONAL = 100_000_000.0
+FLAT = 0.04
+
+
+def _flat_curve(rate: float = FLAT, currency: Currency = Currency.USD) -> DiscountCurve:
+    """Flat continuous ``rate`` on ACT/365F, nodes every 365 days for ten years.
+
+    Log-linear on a flat curve is exact everywhere, including before the
+    first node, so ``df(d) == exp(-rate * days / 365)`` for every ``d`` after
+    ``AS_OF`` and the expected values below are written with :func:`_df`
+    rather than by asking the curve.
+    """
+    nodes = tuple(AS_OF + timedelta(days=365 * k) for k in range(1, 11))
+    dfs = tuple(math.exp(-rate * k) for k in range(1, 11))
+    return DiscountCurve(AS_OF, nodes, dfs, currency=currency)
+
+
+def _df(day: date, rate: float = FLAT) -> float:
+    return math.exp(-rate * (day - AS_OF).days / 365.0)
+
+
+class TestFlowsAlreadyPaidAreWorthNothing:
+    """A flow paid on or before ``as_of`` has left the trade; it is not discounted at one."""
+
+    def test_a_coupon_paid_on_the_valuation_date_is_not_in_the_price(self):
+        # Annual OIS with no payment lag: the first period ends and is paid
+        # on as_of itself, the second starts there, so nothing is in
+        # progress and no fixing is needed. Before this change the
+        # 4,055,556 USD fixed coupon paid today entered the price at a
+        # discount factor of one.
+        swap = OISSwap(effective=date(2025, 1, 15), maturity=date(2027, 1, 15), fixed_rate=0.04,
+                       notional=NOTIONAL, payment_lag_days=0)
+        curve_set = CurveSet(_flat_curve())
+        end = date(2027, 1, 15)
+        expected = -NOTIONAL * 0.04 * 365 / 360 * _df(end) + NOTIONAL * (1.0 - _df(end))
+        result = pv(swap, curve_set)
+        assert result.value == pytest.approx(expected, rel=1e-12)
+        assert all(flow.payment_date > AS_OF for flow in result.cashflows or ())
+        assert discounted_value(swap, curve_set) == result.value
+
+    def test_a_matured_swap_is_worth_exactly_nothing_and_needs_no_fixings(self):
+        # Paid 2025-01-21, a year before as_of. Before this change its fixed
+        # coupon came back at full value and its floating one at zero.
+        swap = OISSwap(effective=date(2024, 1, 16), maturity=date(2025, 1, 16), fixed_rate=0.04,
+                       notional=NOTIONAL)
+        result = pv(swap, CurveSet(_flat_curve()))
+        assert result.value == 0.0
+        assert result.cashflows == ()
+
+    def test_a_matured_fra_is_worth_exactly_nothing(self):
+        fra = FRA(start=date(2025, 7, 15), end=date(2025, 10, 15), rate=0.04, notional=NOTIONAL)
+        assert pv(fra, CurveSet(_flat_curve())).value == 0.0
+
+    def test_the_annuity_counts_only_coupons_still_to_be_paid(self):
+        # Coupons paid 2025-07-17 (gone), 2026-07-17 (accruing, counted in
+        # full) and 2027-07-19. The annuity needs no fixing: it is the fixed
+        # leg alone.
+        swap = OISSwap(effective=date(2024, 7, 15), maturity=date(2027, 7, 15), fixed_rate=0.04,
+                       notional=NOTIONAL)
+        expected = 365 / 360 * _df(date(2026, 7, 17)) + 365 / 360 * _df(date(2027, 7, 19))
+        assert annuity(swap, CurveSet(_flat_curve())).value == pytest.approx(expected, rel=1e-12)
+
+    def test_the_pricer_drops_a_paid_flow_whatever_projected_it(self):
+        # A product of the caller's own, registered the documented way, that
+        # returns its whole history. The pricer is the one place a flow
+        # meets the valuation date, so it is the one that drops it.
+        from dataclasses import dataclass
+
+        from rates_engine.instruments.cashflow import Cashflow
+        from rates_engine.pricing.projection import project
+
+        @dataclass(frozen=True)
+        class TwoBullets:
+            currency: Currency = Currency.USD
+
+            @property
+            def span(self) -> tuple[date, date]:
+                return date(2025, 1, 15), date(2027, 1, 15)
+
+            def describe(self) -> dict[str, object]:
+                return {"kind": "two_bullets"}
+
+        # The class is local, so it is named to ``register`` rather than read
+        # from an annotation that ``from __future__ import annotations``
+        # leaves as a string nothing can resolve.
+        @project.register(TwoBullets)
+        def _(instrument: TwoBullets, curve_set: CurveSet) -> tuple[Cashflow, ...]:
+            def bullet(day: date) -> Cashflow:
+                return Cashflow(payment_date=day, amount=1_000.0, leg="fixed",
+                                accrual_start=day, accrual_end=day, year_fraction=0.0)
+
+            return (bullet(date(2025, 7, 15)), bullet(AS_OF), bullet(date(2027, 1, 15)))
+
+        result = pv(TwoBullets(), CurveSet(_flat_curve()))
+        assert result.value == pytest.approx(1_000.0 * _df(date(2027, 1, 15)), rel=1e-12)
+        assert [flow.payment_date for flow in result.cashflows or ()] == [date(2027, 1, 15)]

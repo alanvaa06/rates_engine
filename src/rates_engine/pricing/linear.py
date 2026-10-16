@@ -8,6 +8,15 @@ leaving it to be inferred from the absence of an alternative.
 
 Sensitivities, the parallel DV01 included, are :mod:`rates_engine.risk`'s:
 they move the curve and call back into :func:`discounted_value`.
+
+**A flow paid on or before the valuation date is worth nothing.** It has
+left the trade. Until v0.4 every flow was discounted, and
+``DiscountCurve.df`` is one on or before ``as_of``, so a swap struck two
+years ago carried its paid coupons at face value: on a three-year 4% payer
+over USD 100m valued eighteen months in, the fixed coupon paid six months
+earlier came back as -4.06m USD. The filter is here rather than
+only in the projections because this is the one place a flow meets the
+valuation date, so a product of the caller's own is covered too.
 """
 
 from __future__ import annotations
@@ -134,20 +143,36 @@ class PriceResult(EngineResult):
         )
 
 
-def _pv_of(flows: tuple[Cashflow, ...], curve_set: CurveSet) -> float:
-    """Present value, refusing any flow the curve is not denominated to discount.
+def _unpaid(flows: tuple[Cashflow, ...], curve_set: CurveSet) -> tuple[Cashflow, ...]:
+    """The flows still to be paid: those strictly after the valuation date.
 
-    The check is here rather than in ``Cashflow`` because this is the one
-    place a flow and a curve meet. Without it, pricing a peso swap on the
-    dollar curve returns a number and the evidence chain records nothing.
+    A flow paid *on* ``as_of`` counts as paid, which is QuantLib's default
+    and the only reading under which a price struck at the close of the day
+    does not change when the day's payments settle.
+    """
+    as_of = curve_set.as_of
+    return tuple(flow for flow in flows if flow.payment_date > as_of)
+
+
+def _pv_of(flows: tuple[Cashflow, ...], curve_set: CurveSet) -> float:
+    """Present value of the unpaid flows, refusing any flow the curve cannot discount.
+
+    The currency check is here rather than in ``Cashflow`` because this is
+    the one place a flow and a curve meet. Without it, pricing a peso swap
+    on the dollar curve returns a number and the evidence chain records
+    nothing. It runs on paid flows too: a trade in the wrong currency is
+    wrong whatever part of it is left.
     """
     total = 0.0
+    as_of = curve_set.as_of
     for flow in flows:
         require_same_currency(
             flow.currency,
             curve_set.discount.currency,
             operation=f"discounting a {flow.leg} cashflow paid {flow.payment_date}",
         )
+        if flow.payment_date <= as_of:
+            continue
         total += flow.amount * curve_set.discount.df(flow.payment_date)
     return total
 
@@ -271,9 +296,10 @@ def pv(
 
     Returns:
         A :class:`PriceResult` with ``measure="pv"`` and the discount
-        curve's currency as its unit.
+        curve's currency as its unit. Its ``cashflows`` are the flows the
+        value counts: none paid on or before the valuation date.
     """
-    flows = project(instrument, curve_set)
+    flows = _unpaid(project(instrument, curve_set), curve_set)
     value = _pv_of(flows, curve_set)
     return PriceResult(
         evidence=valuation_evidence("pricing.pv", instrument, curve_set, {"cashflows": len(flows)}, source_evidence),
@@ -291,6 +317,10 @@ def annuity(
     source_evidence: tuple[Evidence, ...] = (),
 ) -> PriceResult:
     """Fixed-leg annuity per unit notional, in years of discounted accrual.
+
+    Counts the coupons still to be paid, the one accruing today in full:
+    the same set QuantLib's fixed-leg BPS counts. No fixing is needed, since
+    the fixed leg has none.
 
     Args:
         swap: A two-legged instrument.
