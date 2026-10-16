@@ -36,6 +36,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import date
 from typing import Any
 
 from rates_engine.conventions.side import Side
@@ -203,30 +204,66 @@ def _passing(fixings: MarketSnapshot | None) -> dict[str, MarketSnapshot]:
     return {} if fixings is None else {"fixings": fixings}
 
 
-def _history_used(flows: Iterable[Cashflow]) -> tuple[dict[str, Any], tuple[Provenance, ...]]:
-    """The ``realised_fixings`` field and the fixings' provenance, for flows resting on them.
+def _period(flow: Cashflow) -> dict[str, Any]:
+    return {
+        "leg": flow.leg,
+        "accrual_start": flow.accrual_start.isoformat(),
+        "accrual_end": flow.accrual_end.isoformat(),
+        "payment_date": flow.payment_date.isoformat(),
+    }
 
-    One record per flow -- the period, then what was read for it -- and one
-    provenance per series, in the order the flows first used it. Both are
-    empty when no flow rests on a fixing, so the evidence of a trade with no
-    history is exactly what it always was.
+
+def _history_used(
+    flows: Iterable[Cashflow], instrument: object, as_of: date
+) -> tuple[dict[str, Any], tuple[Provenance, ...]]:
+    """What the flows' floating amounts rest on, for the evidence, and the fixings' provenance.
+
+    ``realised_fixings``: one record per flow paid partly or wholly on
+    published fixings -- the period, then what was read for it -- with one
+    provenance per series among the inputs, in the order the flows first
+    used it.
+
+    ``fixings_dated_as_of``: one entry per term period whose fixing falls on
+    the valuation date itself, saying whether that fixing came from the
+    snapshot (``"source": "fixings"``) or, absent from it, the rate was
+    forecast off the curve (``"source": "curve"``), as QuantLib does. The
+    two give the same trade different numbers, so the price says which.
+
+    Each field is left out when it would be empty, so the evidence of a
+    trade with no history is exactly what it always was.
     """
-    records: list[dict[str, Any]] = []
+    realised: list[dict[str, Any]] = []
+    dated_today: list[dict[str, Any]] = []
     inputs: dict[Provenance, None] = {}
+    index = getattr(instrument, "rate_index", None)
     for flow in flows:
-        if flow.fixing is None:
-            continue
-        records.append(
-            {
-                "leg": flow.leg,
-                "accrual_start": flow.accrual_start.isoformat(),
-                "accrual_end": flow.accrual_end.isoformat(),
-                "payment_date": flow.payment_date.isoformat(),
-                **flow.fixing.to_dict(),
-            }
-        )
-        inputs.setdefault(flow.fixing.provenance)
-    return ({"realised_fixings": records} if records else {}), tuple(inputs)
+        if flow.fixing is not None:
+            realised.append({**_period(flow), **flow.fixing.to_dict()})
+            inputs.setdefault(flow.fixing.provenance)
+            if flow.fixing.method == "term" and flow.fixing.observed_from == as_of:
+                dated_today.append(
+                    {
+                        **_period(flow),
+                        "series_id": flow.fixing.series_id,
+                        "fixing_date": as_of.isoformat(),
+                        "source": "fixings",
+                    }
+                )
+        elif flow.projected_fixing_date is not None:
+            dated_today.append(
+                {
+                    **_period(flow),
+                    "series_id": index.name if index is not None else None,
+                    "fixing_date": flow.projected_fixing_date.isoformat(),
+                    "source": "curve",
+                }
+            )
+    fields: dict[str, Any] = {}
+    if realised:
+        fields["realised_fixings"] = realised
+    if dated_today:
+        fields["fixings_dated_as_of"] = dated_today
+    return fields, tuple(inputs)
 
 
 def valuation_evidence(
@@ -255,13 +292,15 @@ def valuation_evidence(
         sources: Evidence of the inputs, chained in.
         realised: The flows behind the result. Each one whose amount rests on
             published fixings adds a ``realised_fixings`` entry to the fields
-            and its series' provenance to the inputs. A result with none adds
-            neither, so its payload is what it always was.
+            and its series' provenance to the inputs; each term period fixed
+            on ``as_of`` itself adds a ``fixings_dated_as_of`` entry saying
+            whether that fixing was read or forecast. A result with none adds
+            nothing, so its payload is what it always was.
 
     Returns:
         The evidence record.
     """
-    history, inputs = _history_used(realised)
+    history, inputs = _history_used(realised, instrument, curve_set.as_of)
     return Evidence(
         produced_by=produced_by,
         inputs=inputs,
@@ -389,12 +428,14 @@ def pv(
         fixings: Published fixings, needed only when a floating coupon is
             already decided on ``curve_set.as_of``: an overnight period that
             has begun, or a term period whose fixing date -- two business days
-            before the start for Term SOFR, the start for TIIE 28 -- is on or
-            before ``as_of``, which a swap starting at spot already is. A
-            series named after the index (``"SOFR"``, ``"TERM_SOFR_3M"``,
-            ``"TIIE_FONDEO"``, ``"TIIE_28"``) holding one decimal rate per
-            business day. Overnight fixings dated on or after ``as_of`` are
-            never read, nor term fixings after it.
+            before the start for Term SOFR, the start for TIIE 28 -- is before
+            ``as_of``. A term fixing dated ``as_of`` is read if present and
+            forecast off the curve if not, as QuantLib does, so a swap struck
+            at spot today prices without one; the evidence's
+            ``fixings_dated_as_of`` says which. A series named after the index
+            (``"SOFR"``, ``"TERM_SOFR_3M"``, ``"TIIE_FONDEO"``, ``"TIIE_28"``)
+            holding one decimal rate per business day. Overnight fixings dated
+            on or after ``as_of`` are never read, nor term fixings after it.
 
     Returns:
         A :class:`PriceResult` with ``measure="pv"`` and the discount
@@ -603,7 +644,7 @@ def price_on_parametric(
     parametric_pv = _pv_of(parametric_flows, parametric)
     bootstrap_pv = _pv_of(project(instrument, bootstrapped, **_passing(fixings)), bootstrapped)
     # The history is the same on both curves; record it once.
-    history, inputs = _history_used(parametric_flows)
+    history, inputs = _history_used(parametric_flows, instrument, parametric.as_of)
     difference = parametric_pv - bootstrap_pv
     notional = instrument.describe().get("notional")
     per_bp = (

@@ -87,11 +87,12 @@ def _pinned_cases() -> dict[str, tuple[object, CurveSet]]:
                     notional=10_000_000.0, frequency_months=3, payment_lag_days=0),
             dual,
         ),
-        # A term-rate trade starts no earlier than 2026-01-21: Term SOFR
-        # fixes two SIFMA days before the period starts, so anything starting
-        # on the 20th (spot, over Martin Luther King Day) or earlier fixed on
-        # or before as_of and is history, not a forecast. Those are tested
-        # below with their fixings.
+        # Term SOFR fixes two SIFMA days before its period starts. A period
+        # starting on or before 2026-01-16 fixed before as_of and is history,
+        # tested below with its fixings; one starting at spot (the 20th, over
+        # Martin Luther King Day) fixed on as_of itself and, with no fixing
+        # supplied, is forecast exactly as before; from the 21st on it is
+        # all forecast.
         "irs_after_spot_payer": (
             IRSwap(effective=date(2026, 1, 21), maturity=date(2030, 1, 21), fixed_rate=0.037,
                    notional=100_000_000.0),
@@ -110,6 +111,17 @@ def _pinned_cases() -> dict[str, tuple[object, CurveSet]]:
         "ois_tiie_fondeo": (
             OISSwap(effective=AS_OF, maturity=date(2028, 1, 14), fixed_rate=0.075,
                     notional=500_000_000.0, frequency_months=3, index=TIIE_FONDEO),
+            peso,
+        ),
+        "irs_spot_fixed_today_payer": (
+            IRSwap(effective=date(2026, 1, 20), maturity=date(2030, 1, 20), fixed_rate=0.037,
+                   notional=100_000_000.0),
+            dual,
+        ),
+        # TIIE 28 fixes on its start, so this one fixed on as_of too.
+        "fra_tiie28_fixed_today": (
+            FRA(start=AS_OF, end=date(2026, 2, 12), rate=0.075, notional=1_000_000_000.0,
+                index=TIIE_28),
             peso,
         ),
         "fra_fwd_payer_dual": (
@@ -306,6 +318,42 @@ PINNED: dict[str, dict[str, object]] = {
         "par": 0.07322057983478619,
         "annuity": 1.863705071951486,
     },
+    "irs_spot_fixed_today_payer": {
+        "pv": 498055.7085923933,
+        "discounted_value": 498055.7085923933,
+        "flows": (
+            (-3751388.8888888885, 0.037),
+            (-3751388.8888888885, 0.037),
+            (-3782222.222222222, 0.037),
+            (-3751388.8888888885, 0.037),
+            (1033228.5279987418, 0.041329141119949675),
+            (1038355.3796825318, 0.04107779524018807),
+            (1049825.566154783, 0.04108013084953498),
+            (1045764.8613361849, 0.04092123370445941),
+            (953835.3565919034, 0.03815341426367613),
+            (964484.4734497892, 0.03815542971889276),
+            (975134.7136299104, 0.03815744531595302),
+            (971815.0377439061, 0.03802754495519633),
+            (904089.8223391159, 0.035766190773855136),
+            (904089.8223391159, 0.035766190773855136),
+            (914070.1450361942, 0.03576796219706847),
+            (934476.203487944, 0.035788450346346784),
+            (879018.9622396749, 0.03595986663707761),
+            (909121.3297941936, 0.03596523942042964),
+            (939232.6799155581, 0.0359706132733618),
+            (919821.0285091824, 0.03599299676775062),
+        ),
+        "par": 0.038345856015150705,
+        "annuity": 3.7006611627516364,
+    },
+    "fra_tiie28_fixed_today": {
+        "pv": -47619.33191668769,
+        "discounted_value": -47619.33191668769,
+        "flows": (
+            (-47894.830633031364, 0.07438420932043245),
+        ),
+        "fair": 0.07438420932043245,
+    },
     "fra_fwd_payer_dual": {
         "pv": 101122.05482570204,
         "discounted_value": 101122.05482570204,
@@ -351,7 +399,8 @@ class TestTradesWithNoHistoryDoNotMove:
     @pytest.mark.parametrize("name", sorted(PINNED))
     def test_handing_them_fixings_changes_nothing(self, name):
         # A book is priced with one snapshot for every trade; the ones with
-        # no history must not read it.
+        # no history must not read it, and the two fixed today find no print
+        # for their index in it and forecast as before.
         instrument, curve_set = _pinned_cases()[name]
         snapshot = _fixings(_history(), _history("TIIE_FONDEO", 0.07, calendar=BMV))
         assert _measure(instrument, curve_set, fixings=snapshot) == PINNED[name]
@@ -365,6 +414,9 @@ class TestTradesWithNoHistoryDoNotMove:
         assert AS_OF in starts and any(start > AS_OF for start in starts)
         kinds = {type(instrument) for instrument, _ in cases.values()}
         assert kinds == {OISSwap, IRSwap, FRA}
+        # And the term boundary: a period that fixed on as_of itself, which
+        # is forecast without a snapshot exactly as main forecast it.
+        assert {"irs_spot_fixed_today_payer", "fra_tiie28_fixed_today"} <= set(cases)
 
 
 # ---------------------------------------------------------------------------
@@ -710,9 +762,10 @@ class TestTermSOFRFixesTwoBusinessDaysBeforeItsPeriod:
     """A term coupon is history from its fixing date, which can precede the period itself.
 
     The ARRC convention, the one the cap pricer follows: Term SOFR is fixed
-    two SIFMA business days before the period it sets. A period that starts
-    after ``as_of`` but fixed on or before it is therefore not a forecast,
-    and the fixing it needs is published, not projected.
+    two SIFMA business days before the period it sets. A fixing dated before
+    ``as_of`` is history and must be supplied, even for a period that starts
+    after ``as_of``. One dated ``as_of`` is read if supplied and forecast if
+    not, QuantLib's default. One dated after is forecast.
     """
 
     def test_the_print_of_the_twentieth_sets_the_period_from_the_twenty_second(self):
@@ -727,26 +780,54 @@ class TestTermSOFRFixesTwoBusinessDaysBeforeItsPeriod:
         assert record["observed_from"] == record["observed_to"] == "2025-10-20"
         assert record["method"] == "term"
 
-    def test_a_swap_starting_at_spot_fixed_today_and_needs_that_fixing(self):
+    def test_a_period_starting_after_as_of_that_fixed_before_it_needs_its_fixing(self):
+        # Starts Friday 2026-01-16, after as_of, but fixed on Wednesday the
+        # 14th, before it: history, refused without the print.
+        irs = IRSwap(effective=date(2026, 1, 16), maturity=date(2027, 1, 16), fixed_rate=0.04,
+                     notional=NOTIONAL)
+        with pytest.raises(MissingFixingError) as caught:
+            pv(irs, CurveSet(_flat_curve()))
+        assert "fixed on 2026-01-14, before the valuation date 2026-01-15" in str(caught.value)
+
+    def test_a_swap_starting_at_spot_reads_todays_fixing_when_given_and_forecasts_otherwise(
+        self,
+    ):
         # Spot is 2026-01-20 (Martin Luther King Day is the 19th), so the
-        # first period fixed on as_of itself: what is dated as_of has
-        # happened, as it has for a caplet.
+        # first period fixed on as_of itself. QuantLib's default: the day's
+        # print is used if it is known and forecast if it is not, so a swap
+        # struck this morning prices before the print is out.
         irs = IRSwap(effective=date(2026, 1, 20), maturity=date(2027, 1, 20), fixed_rate=0.04,
                      notional=NOTIONAL)
         curve_set = CurveSet(_flat_curve())
-        with pytest.raises(MissingFixingError) as caught:
-            pv(irs, curve_set)
-        assert "fixing of 2026-01-15" in str(caught.value)
-        assert "on or before the valuation date 2026-01-15" in str(caught.value)
+        first_end, end = date(2026, 4, 20), date(2027, 1, 20)
+        fixed_leg = -NOTIONAL * 0.04 * 365 / 360 * _df(end)
+        rest = NOTIONAL * (_df(first_end) - _df(end))
+
+        forecast = pv(irs, curve_set)
+        first = NOTIONAL * (_df(date(2026, 1, 20)) / _df(first_end) - 1.0) * _df(first_end)
+        assert forecast.value == pytest.approx(fixed_leg + first + rest, rel=1e-12)
+        (entry,) = forecast.evidence.fields["fixings_dated_as_of"]
+        assert entry == {
+            "leg": "float",
+            "accrual_start": "2026-01-20",
+            "accrual_end": "2026-04-20",
+            "payment_date": "2026-04-20",
+            "series_id": "TERM_SOFR_3M",
+            "fixing_date": "2026-01-15",
+            "source": "curve",
+        }
+        assert "realised_fixings" not in forecast.evidence.fields
+        # A snapshot without that day is the same as no snapshot.
+        older = _fixings(_term("TERM_SOFR_3M", {date(2026, 1, 13): 0.0405}))
+        assert pv(irs, curve_set, fixings=older).value == forecast.value
+
         fixing = 0.0405
         snapshot = _fixings(_term("TERM_SOFR_3M", {AS_OF: fixing}))
-        first_end, end = date(2026, 4, 20), date(2027, 1, 20)
-        expected = (
-            -NOTIONAL * 0.04 * 365 / 360 * _df(end)
-            + NOTIONAL * fixing * 90 / 360 * _df(first_end)
-            + NOTIONAL * (_df(first_end) - _df(end))
-        )
-        assert pv(irs, curve_set, fixings=snapshot).value == pytest.approx(expected, rel=1e-12)
+        read = pv(irs, curve_set, fixings=snapshot)
+        expected = fixed_leg + NOTIONAL * fixing * 90 / 360 * _df(first_end) + rest
+        assert read.value == pytest.approx(expected, rel=1e-12)
+        assert read.evidence.fields["fixings_dated_as_of"][0]["source"] == "fixings"
+        assert read.evidence.fields["realised_fixings"][0]["observed_from"] == "2026-01-15"
 
     def test_three_business_days_out_it_is_still_a_forecast(self):
         # Starts Wednesday 2026-01-21, fixes Friday the 16th: after as_of, so
@@ -757,13 +838,19 @@ class TestTermSOFRFixesTwoBusinessDaysBeforeItsPeriod:
         expected = NOTIONAL * (forward - 0.04) * 90 / 360 * _df(end)
         assert pv(fra, CurveSet(_flat_curve())).value == pytest.approx(expected, rel=1e-12)
 
-    def test_a_tiie_28_period_starting_on_the_valuation_date_has_fixed(self):
-        # TIIE 28 is fixed on its start, and a fixing dated as_of has
-        # happened: the same rule as Term SOFR, two days later.
+    def test_a_tiie_28_period_fixed_today_follows_the_same_rule(self):
+        # TIIE 28 fixes on its start; a FRA starting on as_of fixed today, and
+        # is forecast without the print (the pinned number from main) and
+        # settled on it with.
         fra = FRA(start=AS_OF, end=date(2026, 2, 12), rate=0.075, notional=1_000_000_000.0,
                   index=TIIE_28)
-        with pytest.raises(MissingFixingError, match="TIIE_28 fixing of 2026-01-15"):
-            pv(fra, CurveSet(_flat_curve(0.07, Currency.MXN)))
+        curve_set = CurveSet(_flat_curve(0.07, Currency.MXN))
+        forecast = pv(fra, curve_set)
+        assert forecast.evidence.fields["fixings_dated_as_of"][0]["source"] == "curve"
+        snapshot = _fixings(_term("TIIE_28", {AS_OF: 0.0745}))
+        expected = 1_000_000_000.0 * (0.0745 - 0.075) * 28 / 360 * _df(date(2026, 2, 12), 0.07)
+        assert pv(fra, curve_set, fixings=snapshot).value == pytest.approx(expected, rel=1e-12)
+        assert fra_fair_rate(fra, curve_set, fixings=snapshot) == 0.0745
 
 
 #: The OIS strip of the review's repro scripts (``curves/common.py``), the
@@ -817,10 +904,14 @@ QL_ACCRUED_ANNUITY = 1.0137677357948412
 QL_IRS_PV = -814681.7892547129
 QL_IRS_FAIR = 0.034807974465136754
 #: Same index and curves, payer at 3.9% from spot, 2026-01-20 to 2028-01-20,
-#: with the fixing of 2026-01-15 -- the valuation date -- at 4.05%, which
-#: QuantLib reads from the index history because it is dated today.
+#: whose first period fixed on 2026-01-15, the valuation date. With that
+#: fixing in the index history at 4.05%, QuantLib reads it; with an index that
+#: has no history it forecasts it (``enforcesTodaysHistoricFixings`` False,
+#: the default).
 QL_SPOT_IRS_PV = -40555.79445490334
 QL_SPOT_IRS_FAIR = 0.03878812177284646
+QL_SPOT_IRS_FORECAST_PV = 60668.38180689141
+QL_SPOT_IRS_FORECAST_FAIR = 0.03931695370179005
 
 
 def _compounding_rule_gap(start: date, end: date, rate: float = 0.0430) -> float:
@@ -929,6 +1020,10 @@ class TestAgainstQuantLib:
         )
         assert par_rate(irs, curve_set, fixings=snapshot).value == pytest.approx(
             QL_SPOT_IRS_FAIR, abs=1e-10
+        )
+        assert pv(irs, curve_set).value == pytest.approx(QL_SPOT_IRS_FORECAST_PV, abs=1e-3)
+        assert par_rate(irs, curve_set).value == pytest.approx(
+            QL_SPOT_IRS_FORECAST_FAIR, abs=1e-10
         )
 
     def test_struck_at_its_par_rate_a_seasoned_swap_is_worth_nothing(self, strip_curve):

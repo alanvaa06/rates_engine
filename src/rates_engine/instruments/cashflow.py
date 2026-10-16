@@ -87,6 +87,11 @@ class Cashflow:
             ``realised_fixings``, rather than :meth:`to_dict`: evidence is
             where this package says what a number rests on, and a flow's own
             payload keeps one shape whether or not the trade has started.
+        projected_fixing_date: The fixing date of a term rate that fell on the
+            valuation date and was not among the fixings passed, so the rate
+            was forecast off the curve instead -- QuantLib's default for a
+            fixing dated today. ``None`` otherwise. Reported in the evidence
+            next to the fixings that were read.
     """
 
     payment_date: date
@@ -98,6 +103,7 @@ class Cashflow:
     rate: float | None = None
     currency: Currency = Currency.USD
     fixing: RealisedFixing | None = None
+    projected_fixing_date: date | None = None
 
     def to_dict(self) -> dict[str, object]:
         """Serialise to a JSON-ready mapping, ``None`` never a missing key."""

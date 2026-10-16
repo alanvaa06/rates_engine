@@ -42,13 +42,17 @@ known on the trade date and is counted in full. Its floating coupon:
   the rest -- the coupon QuantLib's ``OvernightIndexedCoupon`` pays. A
   period starting on ``as_of`` has no history: the day's rate is published
   the next morning.
-- a term rate is history once its fixing date is on or before ``as_of``,
-  whether or not its period has begun, and pays that fixing. Term SOFR fixes
-  two SIFMA business days before the accrual start, the ARRC's convention
-  (:data:`_TERM_SOFR_FIXING_LAG_DAYS`): the fixing published on 2025-10-20
-  sets the period that starts on the 22nd, and a swap starting at spot fixed
-  today. TIIE 28 is read on the accrual start itself, where this package has
-  always projected it from; its real lag is not established
+- a term rate is history once its fixing date is before ``as_of``, whether
+  or not its period has begun, and pays that fixing. A fixing dated
+  ``as_of`` itself is used when ``fixings`` holds it and projected off the
+  curve when it does not -- QuantLib's default, with
+  ``enforcesTodaysHistoricFixings`` off -- so a swap struck at spot today
+  still prices without a snapshot; the evidence says which it was. Term
+  SOFR fixes two SIFMA business days before the accrual start, the ARRC's
+  convention (:data:`_TERM_SOFR_FIXING_LAG_DAYS`): the fixing published on
+  2025-10-20 sets the period that starts on the 22nd. TIIE 28 is read on
+  the accrual start itself, where this package has always projected it
+  from; its real lag is not established
   (``docs/forge/research/003-mxn-conventions.md``) and is pending.
 
 Both come from a :class:`~rates_engine.market.snapshot.MarketSnapshot`
@@ -217,7 +221,7 @@ def _in_progress(
     when = (
         f"began before the valuation date {as_of}"
         if fixed_on is None
-        else f"fixed on {fixed_on}, on or before the valuation date {as_of}"
+        else f"fixed on {fixed_on}, before the valuation date {as_of}"
     )
     return f"{trade}: the floating period {start} to {end}, paid {pay}, {when}"
 
@@ -287,6 +291,37 @@ def _compounded_history(
         repeated_days=compounded.repeated_days,
         provenance=series.provenance,
     )
+
+
+def _term_history(
+    instrument: IRSwap | FRA,
+    index: RateIndex,
+    start: date,
+    end: date,
+    pay: date,
+    as_of: date,
+    fixings: MarketSnapshot | None,
+) -> tuple[RealisedFixing | None, date | None]:
+    """What a term period's rate rests on: a published fixing, or nothing yet.
+
+    Returns the record of the fixing to pay, or ``None`` with the curve to
+    forecast instead; and, when that forecast stands in for a fixing dated
+    ``as_of`` that ``fixings`` does not hold, that date, so the evidence can
+    say so. A fixing date before ``as_of`` is history and must be supplied.
+    One dated ``as_of`` is used if supplied and forecast if not, which is
+    QuantLib's default: the day's print may not be out when the book is
+    valued, and refusing a swap struck at spot this morning would be a
+    refusal of the ordinary case.
+    """
+    fixing_date = _term_fixing_date(index, start)
+    if fixing_date > as_of:
+        return None, None
+    if fixing_date == as_of:
+        series = fixings.series.get(index.name) if fixings is not None else None
+        if series is None or series.get(fixing_date) is None:
+            return None, fixing_date
+    context = _in_progress(instrument, start, end, pay, as_of, fixed_on=fixing_date)
+    return _term_fixing(index, fixing_date, fixings, context), None
 
 
 def _term_fixing(
@@ -385,8 +420,8 @@ def _irs_float(
     ``curve_set.projection``; the discounting, applied in
     :mod:`rates_engine.pricing.linear`, comes from ``curve_set.discount``.
     When the two are the same object the basis is zero and the result
-    collapses onto the OIS answer. A period whose fixing date is on or
-    before ``as_of`` pays that fixing instead of a forward.
+    collapses onto the OIS answer. A period that has fixed pays its fixing
+    instead of a forward; see the module docstring for when that is.
     """
     sign = -fixed_leg_sign(swap.side)
     projection = curve_set.projection
@@ -399,15 +434,10 @@ def _irs_float(
         if pay <= as_of:
             continue
         tau = year_fraction(start, end, swap.float_day_count)
-        realised: RealisedFixing | None = None
-        fixing_date = _term_fixing_date(swap.float_index, start)
-        if fixing_date <= as_of:
-            realised = _term_fixing(
-                swap.float_index,
-                fixing_date,
-                fixings,
-                _in_progress(swap, start, end, pay, as_of, fixed_on=fixing_date),
-            )
+        realised, projected_on = _term_history(
+            swap, swap.float_index, start, end, pay, as_of, fixings
+        )
+        if realised is not None:
             rate = realised.rate
         else:
             rate = projection.forward(start, end, day_count=swap.float_day_count)
@@ -422,6 +452,7 @@ def _irs_float(
                 rate=rate,
                 currency=swap.currency,
                 fixing=realised,
+                projected_fixing_date=projected_on,
             )
         )
     return tuple(flows)
@@ -453,19 +484,15 @@ def _project_irs(
 
 def _fra_rate(
     fra: FRA, curve_set: CurveSet, fixings: MarketSnapshot | None
-) -> tuple[float, RealisedFixing | None]:
-    """The rate the FRA settles on: its fixing once it has fixed, else the forward."""
-    as_of = curve_set.as_of
-    fixing_date = _term_fixing_date(fra.index, fra.start)
-    if fixing_date <= as_of:
-        realised = _term_fixing(
-            fra.index,
-            fixing_date,
-            fixings,
-            _in_progress(fra, fra.start, fra.end, fra.end, as_of, fixed_on=fixing_date),
-        )
-        return realised.rate, realised
-    return curve_set.projection.forward(fra.start, fra.end, day_count=fra.day_count), None
+) -> tuple[float, RealisedFixing | None, date | None]:
+    """The rate the FRA settles on, the fixing behind it, and a fixing date projected over."""
+    realised, projected_on = _term_history(
+        fra, fra.index, fra.start, fra.end, fra.end, curve_set.as_of, fixings
+    )
+    if realised is not None:
+        return realised.rate, realised, None
+    forward = curve_set.projection.forward(fra.start, fra.end, day_count=fra.day_count)
+    return forward, None, projected_on
 
 
 def fra_fair_rate(
@@ -475,25 +502,25 @@ def fra_fair_rate(
 
     Once the index has fixed the rate is no longer a forecast: it is the
     fixing, read from ``fixings``. Term SOFR fixes two business days before
-    the period starts, so a FRA starting up to two business days after
-    ``as_of`` has already fixed; TIIE 28 is read on the period start, a
-    convention still to be verified.
+    the period starts, TIIE 28 on the start itself (a convention still to be
+    verified). A fixing dated ``curve_set.as_of`` is used when ``fixings``
+    holds it and forecast when it does not, as QuantLib does.
 
     Args:
         fra: The contract.
         curve_set: Discount and projection curves.
-        fixings: Published fixings, needed only once the fixing date is on or
-            before ``curve_set.as_of``. The series is named after the index,
-            e.g. ``"TERM_SOFR_3M"``.
+        fixings: Published fixings, needed once the fixing date is before
+            ``curve_set.as_of`` and read, if present, when it is that date.
+            The series is named after the index, e.g. ``"TERM_SOFR_3M"``.
 
     Returns:
         The fair rate as a decimal on the FRA's day count.
 
     Raises:
-        MissingFixingError: The index has fixed and ``fixings`` does not hold
-            that fixing.
+        MissingFixingError: The index fixed before ``curve_set.as_of`` and
+            ``fixings`` does not hold that fixing.
     """
-    rate, _ = _fra_rate(fra, curve_set, fixings)
+    rate, _, _ = _fra_rate(fra, curve_set, fixings)
     return rate
 
 
@@ -504,7 +531,7 @@ def _project_fra(
     if fra.end <= curve_set.as_of:
         return ()
     sign = -fixed_leg_sign(fra.side)
-    settled, realised = _fra_rate(fra, curve_set, fixings)
+    settled, realised, projected_on = _fra_rate(fra, curve_set, fixings)
     tau = fra.year_fraction
     return (
         Cashflow(
@@ -517,5 +544,6 @@ def _project_fra(
             rate=settled,
             currency=fra.currency,
             fixing=realised,
+            projected_fixing_date=projected_on,
         ),
     )
