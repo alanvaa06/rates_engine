@@ -410,18 +410,21 @@ class TestSwaptionPricing:
     @pytest.mark.parametrize(
         "side,strike,expected",
         [
-            # QuantLib 1.44: ql.Swaption on a VanillaSwap from 2026-01-15 to
-            # 2036-01-15 (fixed annual ACT/360, Term SOFR 3M float), notional
-            # 10M, European exercise on the evaluation date 2026-01-15,
-            # FlatForward(4%, continuous, ACT/365F), Bachelier 85 bp and Black
-            # 21% -- both give these -- with includeReferenceDateEvents =
-            # True. With QuantLib's default, False, an event on the evaluation
-            # date has already happened and the NPV is 0.0: this package
-            # follows the first reading, the intrinsic value of an option
-            # that can still be exercised that day. Script:
-            # work-fix-options-vol/ql_swaption_today.py.
-            (Side.PAYER, 0.035, 430371.31368393294),
-            (Side.RECEIVER, 0.045, 389027.90334042895),
+            # QuantLib 1.44: ql.Swaption on a VanillaSwap from spot,
+            # 2026-01-20 (the 19th is Martin Luther King Day), to 2036-01-20
+            # -- fixed annual ACT/360, Term SOFR 3M float with fixingDays = 2,
+            # so its first period fixes on the evaluation date and, with no
+            # history, is forecast -- notional 10M, European exercise on the
+            # evaluation date 2026-01-15, FlatForward(4%, continuous,
+            # ACT/365F), Bachelier 85 bp and Black 21% -- both give these --
+            # with includeReferenceDateEvents = True. With QuantLib's
+            # default, False, an event on the evaluation date has already
+            # happened and the NPV is 0.0: this package follows the first
+            # reading, the intrinsic value of an option that can still be
+            # exercised that day. Script:
+            # work-fix-options-vol/ql_swaption_today_spot.py.
+            (Side.PAYER, 0.035, 430350.88106669177),
+            (Side.RECEIVER, 0.045, 388957.3543422748),
             (Side.PAYER, 0.045, 0.0),
             (Side.RECEIVER, 0.035, 0.0),
         ],
@@ -438,8 +441,12 @@ class TestSwaptionPricing:
 
         from rates_engine.instruments.swaps import IRSwap
 
+        # A swaption expiring today is exercised into a swap starting at spot.
+        # Starting it on the valuation date instead would put its first Term
+        # SOFR fixing two business days earlier, before the valuation date,
+        # and that fixing would have to be supplied.
         swap = IRSwap(
-            AS_OF, date(2036, 1, 15), strike, 10_000_000.0,
+            date(2026, 1, 20), date(2036, 1, 20), strike, 10_000_000.0,
             fixed_frequency_months=12, float_frequency_months=3,
         )
         swaption = Swaption(AS_OF, swap, strike, side, 10_000_000.0)
