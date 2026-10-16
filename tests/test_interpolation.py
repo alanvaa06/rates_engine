@@ -159,6 +159,83 @@ class TestPositivity:
         assert all(b <= a + 1e-15 for a, b in zip(values, values[1:], strict=False))
 
 
+class TestNonPositiveForwards:
+    """The collar protects positive intervals and leaves the others alone.
+
+    Hagan and West bound each node forward into ``[0, 2 min(f_i, f_{i+1})]``
+    to carry positivity from the inputs to the output. When a neighbouring
+    discrete forward is negative that range is empty, and clamping into it
+    returned ``2 min f`` — a curve flat at -50 bp came out with instantaneous
+    forwards from -88 to -26 bp, where log-linear gives -50 exactly.
+    """
+
+    def test_a_flat_negative_curve_stays_flat(self):
+        times = (0.25, 0.5, 1.0, 2.0, 3.0, 5.0)
+        level = -0.0050
+        interpolant = MonotoneConvex(times, _log_dfs(times, (level,) * len(times)))
+        assert interpolant.nodes == pytest.approx((level,) * (len(times) + 1), abs=1e-15)
+        grid = [times[-1] * k / 200.0 for k in range(201)]
+        for t in grid:
+            assert interpolant.instantaneous_forward(t) == pytest.approx(level, abs=1e-15)
+
+    def test_a_flat_negative_curve_object_reads_minus_fifty_bp_everywhere(self):
+        nodes = tuple(AS_OF + timedelta(days=round(365 * t)) for t in (0.25, 0.5, 1.0, 2.0, 5.0))
+        dfs = tuple(math.exp(0.0050 * (n - AS_OF).days / 365.0) for n in nodes)
+        curve = DiscountCurve(AS_OF, nodes, dfs, "monotone_convex")
+        day = AS_OF + timedelta(days=3)
+        while day < nodes[-1]:
+            assert curve.instantaneous_forward(day) * 1e4 == pytest.approx(-50.0, abs=1e-9)
+            day += timedelta(days=11)
+
+    def test_a_bump_through_zero_keeps_a_flat_curve_flat(self):
+        """The case that matters for risk: dv01's central difference shifts a
+        half-basis-point curve down by one, through zero."""
+        nodes = tuple(AS_OF + timedelta(days=round(365 * t)) for t in (0.25, 0.5, 1.0, 2.0, 5.0))
+        dfs = tuple(math.exp(-0.00005 * (n - AS_OF).days / 365.0) for n in nodes)
+        bumped = DiscountCurve(AS_OF, nodes, dfs, "monotone_convex").shifted(-1e-4)
+        for k in range(1, 50):
+            day = AS_OF + timedelta(days=17 * k)
+            assert bumped.instantaneous_forward(day) * 1e4 == pytest.approx(-0.5, abs=1e-9)
+
+    def test_a_negative_interval_is_not_clamped_into_an_empty_range(self):
+        times = (1.0, 2.0, 3.0)
+        discrete = (-0.004, -0.006, -0.003)
+        assert node_forwards(times, discrete) == node_forwards(times, discrete, collar=False)
+
+    @pytest.mark.parametrize(
+        "forwards",
+        [
+            (-0.004, -0.002, 0.001, 0.003, 0.004, 0.0045),   # out of negative rates
+            (0.003, 0.001, -0.001, -0.002, 0.0005, 0.002),   # through zero and back
+            (0.0002, -0.006, 0.0002, -0.006, 0.0002, 0.03),  # a sawtooth across zero
+        ],
+    )
+    def test_positive_intervals_stay_positive_beside_negative_ones(self, forwards):
+        times = tuple(0.5 * (k + 1) for k in range(len(forwards)))
+        interpolant = MonotoneConvex(times, _log_dfs(times, forwards))
+        grid = (0.0, *times)
+        for index, forward in enumerate(forwards):
+            if forward <= 0.0:
+                continue
+            left, right = grid[index], grid[index + 1]
+            inside = [left + (right - left) * k / 50.0 for k in range(51)]
+            worst = min(interpolant.instantaneous_forward(t) for t in inside)
+            assert worst >= -1e-15, f"interval {index} reached {worst}"
+
+    @pytest.mark.parametrize(
+        "forwards",
+        [(-0.004, -0.002, 0.001, 0.003), (0.003, 0.001, -0.001, -0.002), (-0.005,) * 4],
+    )
+    def test_mixed_signs_still_reproduce_every_discrete_forward(self, forwards):
+        times = (0.5, 1.0, 2.0, 3.0)
+        interpolant = MonotoneConvex(times, _log_dfs(times, forwards))
+        grid = (0.0, *times)
+        for index, expected in enumerate(forwards):
+            left, right = grid[index], grid[index + 1]
+            integral = -(interpolant.log_df(right) - interpolant.log_df(left))
+            assert integral / (right - left) == pytest.approx(expected, abs=1e-14)
+
+
 class TestNodeReproduction:
     """The interpolant passes through the data it was given."""
 

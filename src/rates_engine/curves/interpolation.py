@@ -18,8 +18,12 @@ The algorithm in three steps:
 
 1. Estimate an instantaneous forward at each node by interpolating the
    discrete forwards either side of it, with one-sided rules at the ends.
-2. Collar those estimates into ``[0, 2 min(f_i, f_{i+1})]``. This is what
-   makes positive inputs give positive outputs, which is PRD-002 AC-5.2.
+2. Collar those estimates into ``[0, 2 f]`` for each neighbouring interval
+   whose discrete forward ``f`` is not negative -- Hagan and West's
+   ``[0, 2 min(f_i, f_{i+1})]`` when both are. This is what makes positive
+   inputs give positive outputs, which is PRD-002 AC-5.2. An interval with a
+   negative average forward has no positivity to protect, and is left out of
+   the bound rather than clamped into an empty range.
 3. On each interval fit a quadratic in ``g = f - f_discrete`` chosen from four
    regions, each of which is the one shape that stays monotone there.
 
@@ -75,14 +79,23 @@ def node_forwards(
     inside ``[0, 2 min(f_i, f_{i+1})]`` cannot drive the quadratic on either
     neighbouring interval below zero.
 
+    The bound is taken over the neighbouring intervals whose discrete
+    forward is non-negative, and a node with none is not collared. Hagan and
+    West write the collar for positive inputs; applied to a negative one,
+    ``[0, 2 min]`` is empty and clamping into it returned ``2 min f``, which
+    bent a curve flat at -50 bp into forwards between -88 and -26 bp. When
+    every discrete forward is non-negative the bound is the paper's, and the
+    result is what it always was.
+
     Args:
         times: Node times in years.
-        discrete: Average forward per interval, from :func:`discrete_forwards`.
+        discrete: Average forward per interval, as a decimal rate, from
+            :func:`discrete_forwards`.
         collar: Apply the positivity collar. Turning it off is for showing,
             in a test, that it is what does the work.
 
     Returns:
-        ``len(times) + 1`` forwards, the first at time zero.
+        ``len(times) + 1`` forwards as decimal rates, the first at time zero.
     """
     grid = (0.0, *times)
     count = len(discrete)
@@ -100,14 +113,26 @@ def node_forwards(
     forwards = [first, *interior, last]
 
     if collar:
-        forwards[0] = min(max(0.0, forwards[0]), 2.0 * discrete[0])
+        forwards[0] = _collared(forwards[0], (discrete[0],))
         for index in range(1, count):
-            forwards[index] = min(
-                max(0.0, forwards[index]),
-                2.0 * min(discrete[index - 1], discrete[index]),
-            )
-        forwards[count] = min(max(0.0, forwards[count]), 2.0 * discrete[-1])
+            forwards[index] = _collared(forwards[index], (discrete[index - 1], discrete[index]))
+        forwards[count] = _collared(forwards[count], (discrete[-1],))
     return tuple(forwards)
+
+
+def _collared(forward: float, neighbours: tuple[float, ...]) -> float:
+    """One node forward held inside ``[0, 2 f]`` for each non-negative neighbour ``f``.
+
+    With every neighbour non-negative this is ``min(max(0, x), 2 min f)``,
+    the expression the collar always evaluated, so those curves are
+    unchanged to the bit. A negative neighbour drops out of the bound; with
+    no neighbour left there is no positivity to protect and the forward is
+    returned as step 1 estimated it.
+    """
+    protected = [f for f in neighbours if f >= 0.0]
+    if not protected:
+        return forward
+    return min(max(0.0, forward), 2.0 * min(protected))
 
 
 def _region(g0: float, g1: float) -> int:
