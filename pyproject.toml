@@ -41,10 +41,18 @@ classifiers = [
 # one root solver the bootstrap needs, and pandas is the shock table's
 # return type. A fourth entry here would have to earn a line explaining
 # what a caller gains that they cannot already reach.
+#
+# The floors are the oldest releases that install together, not the oldest
+# whose API would do. numpy 2.0 is the base, and pandas 2.2.2 and scipy 1.13
+# are the first releases built for it: pandas 2.2.0 requires numpy<2 and
+# scipy 1.11 numpy<1.28, so the floors this replaced (pandas>=2.2,
+# scipy>=1.11) admitted combinations no resolver can install. CI's
+# minimum-versions job installs exactly numpy 2.0.0, pandas 2.2.2 and
+# scipy 1.13.0 and runs the suite on them.
 dependencies = [
     "numpy>=2.0",
-    "pandas>=2.2",
-    "scipy>=1.11",
+    "pandas>=2.2.2",
+    "scipy>=1.13",
 ]
 
 [project.urls]
