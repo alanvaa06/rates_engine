@@ -17,7 +17,13 @@ one minimum -- so it scans a grid before it refines.
 **The FOMC step curve** (Heitfield and Park) says something the smooth models
 cannot: the overnight rate does not drift, it sits still and then jumps on
 eight scheduled days a year. Fitting a piecewise-constant path to SR1 and SR3
-recovers what the futures strip implies each meeting will do.
+recovers what the futures strip implies each meeting will do. The contracts
+are priced by their exchange rules: SR3 compounds ``1 + r_i d_i / 360`` over
+the business days of its quarter, ``d_i`` the calendar days rate ``r_i``
+applies for (three for a Friday), and SR1 averages every calendar day at the
+rate of the business day on or before it. A contract already in progress
+settles partly on fixings that are history by ``as_of``, and those come from
+the fixings, not the path.
 
 **The term rate it implies is not a swap rate.** A step curve fitted to
 futures gives an expected average overnight rate, and a term rate quoted in
@@ -29,19 +35,22 @@ warning rather than leaving it to be remembered.
 from __future__ import annotations
 
 import math
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Any
 
 import numpy as np
-from scipy.optimize import minimize_scalar
+from scipy.optimize import least_squares, minimize_scalar
 
 from rates_engine.conventions.calendar import SIFMA_US, HolidayCalendar
 from rates_engine.conventions.daycount import CURVE_TIME_BASIS, year_fraction
 from rates_engine.core.errors import (
     CalibrationError,
     ImplausibleInputError,
+    MissingFixingError,
     UnderdeterminedCurveError,
+    UnsupportedConventionError,
 )
 from rates_engine.core.evidence import DataQuality, Degradation, Evidence
 from rates_engine.core.money import Currency
@@ -79,6 +88,9 @@ best, matched or beat that grid on all 300, deterministically.
 
 _AT_BOUND_RELATIVE = 1e-6
 """How close to a bound, relative to it, a fitted decay counts as sitting on it."""
+
+_FUTURES_SYMBOLS = ("SR1", "SR3")
+"""The contracts the step fit knows how to settle: SR1 averages, SR3 compounds."""
 
 
 @dataclass(frozen=True)
@@ -421,12 +433,24 @@ class FOMCStepCurve:
                 break
         return self.segment_rates[index]
 
-    def compounded(self, start: date, end: date) -> float:
-        """Daily-compounded rate over a period, ACT/360, as a decimal.
+    def compounded(
+        self, start: date, end: date, *, calendar: HolidayCalendar = SIFMA_US
+    ) -> float:
+        """Compounded rate over a period by the CME and New York Fed rule, as a decimal.
+
+        ``(prod(1 + r_i d_i / 360) - 1) * 360 / D``: one factor per business
+        day ``i`` of the period, ``r_i`` the path's rate on it and ``d_i`` the
+        calendar days it applies for, three for a Friday. ``D`` is the
+        period's calendar days. This used to compound ``1 + r/360`` once per
+        calendar day, which turns each weekend into ``(1 + r/360)^3`` rather
+        than ``1 + 3r/360`` -- between 0.03 and 0.04 bp on a quarter.
 
         Args:
-            start: First accrual day, inclusive.
+            start: First accrual day, inclusive. If it is not a business day
+                its rate is the previous business day's, as for a fixing.
             end: Last, exclusive.
+            calendar: The business days the rate is published on; SIFMA for
+                SOFR.
 
         Returns:
             The compounded rate. This is SR3's settlement basis.
@@ -436,18 +460,22 @@ class FOMCStepCurve:
         """
         if end <= start:
             raise ValueError(f"end {end} must follow start {start}")
-        factor, day = 1.0, start
-        while day < end:
-            factor *= 1.0 + self.rate_on(day) / 360.0
-            day += timedelta(days=1)
-        return (factor - 1.0) / ((end - start).days / 360.0)
+        return _settlement_rate(
+            "SR3", _rate_days(start, end, calendar), self.rate_on, (end - start).days
+        )
 
-    def averaged(self, start: date, end: date) -> float:
-        """Day-weighted arithmetic average over a period, as a decimal.
+    def averaged(
+        self, start: date, end: date, *, calendar: HolidayCalendar = SIFMA_US
+    ) -> float:
+        """Calendar-day arithmetic average over a period by the CME rule, as a decimal.
+
+        Every calendar day counts once, at the rate of the business day on or
+        before it.
 
         Args:
             start: First accrual day, inclusive.
             end: Last, exclusive.
+            calendar: The business days the rate is published on.
 
         Returns:
             The average rate. This is SR1's settlement basis.
@@ -457,11 +485,9 @@ class FOMCStepCurve:
         """
         if end <= start:
             raise ValueError(f"end {end} must follow start {start}")
-        total, day = 0.0, start
-        while day < end:
-            total += self.rate_on(day)
-            day += timedelta(days=1)
-        return total / (end - start).days
+        return _settlement_rate(
+            "SR1", _rate_days(start, end, calendar), self.rate_on, (end - start).days
+        )
 
     def term_rate(
         self, start: date, months: int, *, calendar: HolidayCalendar = SIFMA_US
@@ -474,36 +500,50 @@ class FOMCStepCurve:
         Args:
             start: Start of the term.
             months: Term length in whole months.
-            calendar: Unused for the arithmetic, accepted so the signature
-                does not change when a business-day term is added.
+            calendar: The business days the overnight rate compounds on.
 
         Returns:
             The compounded rate as a decimal.
         """
-        del calendar
         from rates_engine.conventions.schedule import add_months
 
-        return self.compounded(start, add_months(start, months))
+        return self.compounded(start, add_months(start, months), calendar=calendar)
 
     def discount_curve(
-        self, nodes: tuple[date, ...], *, currency: Currency = Currency.USD
+        self,
+        nodes: tuple[date, ...],
+        *,
+        currency: Currency = Currency.USD,
+        calendar: HolidayCalendar = SIFMA_US,
     ) -> DiscountCurve:
         """Sample the step path onto a discount curve.
 
+        Each node's factor is ``1 / prod(1 + r_i d_i / 360)`` from ``as_of``,
+        the same rule :meth:`compounded` applies, with the business day open
+        at a node accruing only the calendar days up to it.
+
         Args:
             nodes: Dates to sample at, all after ``as_of``.
+            currency: What the curve discounts.
+            calendar: The business days the rate compounds on.
 
         Returns:
             The discount curve implied by compounding the path.
         """
-        factors, running, previous = [], 1.0, self.as_of
+        factors: list[float] = []
+        closed = 1.0
+        anchor = self.as_of
+        if not calendar.is_business_day(anchor):
+            anchor = calendar.previous_business_day(anchor)
+        covered, day = 0, self.as_of
         for node in nodes:
-            day = previous
             while day < node:
-                running *= 1.0 + self.rate_on(day) / 360.0
+                if day != anchor and calendar.is_business_day(day):
+                    closed *= 1.0 + self.rate_on(anchor) * covered / 360.0
+                    anchor, covered = day, 0
+                covered += 1
                 day += timedelta(days=1)
-            previous = node
-            factors.append(1.0 / running)
+            factors.append(1.0 / (closed * (1.0 + self.rate_on(anchor) * covered / 360.0)))
         return DiscountCurve(self.as_of, nodes, tuple(factors), currency=currency)
 
     def to_dict(self) -> dict[str, Any]:
@@ -548,6 +588,115 @@ class FOMCStepFit(EngineResult):
         }
 
 
+def _rate_days(start: date, end: date, calendar: HolidayCalendar) -> list[tuple[date, int]]:
+    """``(business day i, d_i)`` over ``[start, end)``: CME's terms, in order.
+
+    Every calendar day takes the rate of the business day on or before it, so
+    a period opening on a non-business day opens on the previous business
+    day's rate, and ``d_i`` counts the calendar days each business day's rate
+    covers inside the period -- three for an ordinary Friday, and cut short
+    by ``end``.
+    """
+    anchor = start if calendar.is_business_day(start) else calendar.previous_business_day(start)
+    out: list[tuple[date, int]] = []
+    covered, day = 0, start
+    while day < end:
+        if day != anchor and calendar.is_business_day(day):
+            out.append((anchor, covered))
+            anchor, covered = day, 0
+        covered += 1
+        day += timedelta(days=1)
+    out.append((anchor, covered))
+    return out
+
+
+def _settlement_rate(
+    symbol: str,
+    terms: Sequence[tuple[date, int]],
+    rate_for: Callable[[date], float],
+    days: int,
+) -> float:
+    """SR1's average or SR3's compounded rate over ``terms`` from :func:`_rate_days`.
+
+    Args:
+        symbol: ``"SR1"`` to average, anything else to compound.
+        terms: ``(business day, d_i)`` pairs.
+        rate_for: The overnight rate published for a business day, decimal.
+        days: Calendar days in the period, ``D``.
+
+    Returns:
+        The settlement rate as a decimal: ``sum(r_i d_i) / D`` or
+        ``(prod(1 + r_i d_i / 360) - 1) * 360 / D``.
+    """
+    if symbol == "SR1":
+        return sum(rate_for(day) * count for day, count in terms) / days
+    factor = 1.0
+    for day, count in terms:
+        factor *= 1.0 + rate_for(day) * count / 360.0
+    return (factor - 1.0) / (days / 360.0)
+
+
+@dataclass(frozen=True)
+class _PricedContract:
+    """One contract of the strip, its terms laid out once and its fixed days resolved.
+
+    Attributes:
+        label: The contract's label.
+        symbol: ``"SR1"`` or ``"SR3"``.
+        days: Calendar days in the reference period.
+        terms: ``(business day, d_i)`` over the period.
+        fixed: Published rate for each business day before ``as_of``.
+        realised_days: Calendar days priced from ``fixed``.
+        missing_from: The first business day before ``as_of`` with no fixing,
+            or ``None`` when every one has one.
+    """
+
+    label: str
+    symbol: str
+    days: int
+    terms: tuple[tuple[date, int], ...]
+    fixed: Mapping[date, float]
+    realised_days: int
+    missing_from: date | None
+
+    @classmethod
+    def build(
+        cls,
+        contract: tuple[str, date, date, str, float],
+        as_of: date,
+        fixings: Mapping[date, float] | None,
+        calendar: HolidayCalendar,
+    ) -> _PricedContract:
+        """Lay out a contract against ``as_of`` and the fixings available."""
+        label, begin, end, symbol, _price = contract
+        if end <= begin:
+            raise ValueError(f"contract {label!r}: end {end} must follow start {begin}")
+        terms = tuple(_rate_days(begin, end, calendar))
+        fixed: dict[date, float] = {}
+        missing: date | None = None
+        realised = 0
+        for day, count in terms:
+            if day >= as_of:
+                continue
+            realised += count
+            value = None if fixings is None else fixings.get(day)
+            if value is None:
+                missing = missing or day
+            else:
+                fixed[day] = float(value)
+        return cls(label, symbol.upper(), (end - begin).days, terms, fixed, realised, missing)
+
+    def rate(self, path: FOMCStepCurve) -> float:
+        """The settlement rate under ``path``, fixings first, as a decimal."""
+        fixed = self.fixed
+        return _settlement_rate(
+            self.symbol,
+            self.terms,
+            lambda day: fixed[day] if day in fixed else path.rate_on(day),
+            self.days,
+        )
+
+
 def fit_fomc_step_curve(
     as_of: date,
     meeting_dates: tuple[date, ...],
@@ -555,23 +704,44 @@ def fit_fomc_step_curve(
     *,
     tolerance_bp: float = 1.0,
     strict: bool = True,
+    fixings: Mapping[date, float] | None = None,
+    calendar: HolidayCalendar = SIFMA_US,
 ) -> FOMCStepFit:
     """Fit a piecewise-constant overnight path to SR1 and SR3 settlements.
+
+    Each contract is priced by its exchange rule (see the module docstring),
+    one business day at a time. A business day before ``as_of`` is history:
+    its rate is the published fixing from ``fixings``, not the path, which
+    starts at ``as_of``. The front SR1 is in progress on every day but the
+    first of its month, so this is the ordinary case rather than an edge.
+    Reading those days off the first segment instead -- what this did
+    before -- prices a month that straddled a meeting already held as if the
+    meeting had not happened, and bends the first segment to absorb it.
 
     Args:
         as_of: Valuation date, where the first segment starts.
         meeting_dates: Effective dates of the scheduled rate decisions.
         contracts: One tuple per contract: label, reference start, reference
-            end, ``"SR1"`` or ``"SR3"``, and the settlement price.
+            end, ``"SR1"`` or ``"SR3"``, and the settlement price (100 minus
+            the rate in percent).
         tolerance_bp: Repricing tolerance in basis points.
         strict: Refuse when any contract misses the tolerance.
+        fixings: Published overnight rates as decimals, by business day.
+            Required for every business day before ``as_of`` that a
+            contract's period covers, and ignored otherwise.
+        calendar: The business days the overnight rate is published on.
 
     Returns:
-        The :class:`FOMCStepFit`.
+        The :class:`FOMCStepFit`. Its evidence records how many calendar days
+        of each contract were priced from fixings.
 
     Raises:
         UnderdeterminedCurveError: Fewer contracts than segments, so some
             segment is pinned by nothing.
+        UnsupportedConventionError: A contract is neither SR1 nor SR3.
+        ImplausibleInputError: A price or a fixing is NaN or infinite.
+        MissingFixingError: A contract covers a business day before ``as_of``
+            and there is no fixing for it, or no ``fixings`` at all.
         CalibrationError: Under ``strict``, a contract missed the tolerance.
     """
     segments = len(meeting_dates) + 1
@@ -581,22 +751,49 @@ def fit_fomc_step_curve(
             f"({len(meeting_dates)} meetings plus the stub before the first). "
             "Extend the strip or drop the meetings it does not reach."
         )
+    for label, _begin, _end, symbol, price in contracts:
+        if symbol.upper() not in _FUTURES_SYMBOLS:
+            raise UnsupportedConventionError(
+                f"contract {label!r} is {symbol!r}; the step fit settles "
+                f"{' and '.join(_FUTURES_SYMBOLS)} only, and anything else used to be "
+                "compounded as an SR3 without a word"
+            )
+        if not math.isfinite(price):
+            raise ImplausibleInputError(
+                f"contract {label!r} has settlement price {price!r}, which is not a number "
+                "to fit; drop the contract or supply its price"
+            )
+    if fixings is not None:
+        bad = sorted(day for day, value in fixings.items() if not math.isfinite(value))
+        if bad:
+            raise ImplausibleInputError(
+                f"fixings on {[d.isoformat() for d in bad]} are not finite numbers"
+            )
+
+    priced = [
+        _PricedContract.build(contract, as_of, fixings, calendar) for contract in contracts
+    ]
+    unfixed = [p for p in priced if p.missing_from is not None]
+    if unfixed:
+        raise MissingFixingError(
+            "these contracts' periods started before "
+            f"{as_of.isoformat()} and part of their settlement is already fixed: "
+            + ", ".join(
+                f"{p.label!r} (needs a fixing for {p.missing_from.isoformat()})"
+                for p in unfixed
+                if p.missing_from is not None
+            )
+            + ". Pass the published fixings for those business days as `fixings`; "
+            "the path starts at as_of and does not know what the overnight rate did "
+            "before it."
+        )
 
     targets = np.array([(100.0 - price) / 100.0 for *_, price in contracts])
     start = float(targets[0])
 
     def model_rates(rates: np.ndarray) -> np.ndarray:
         candidate = FOMCStepCurve(as_of, meeting_dates, tuple(float(r) for r in rates))
-        out = []
-        for _, begin, end, symbol, _price in contracts:
-            out.append(
-                candidate.averaged(begin, end)
-                if symbol.upper() == "SR1"
-                else candidate.compounded(begin, end)
-            )
-        return np.array(out)
-
-    from scipy.optimize import least_squares
+        return np.array([contract.rate(candidate) for contract in priced])
 
     solution = least_squares(
         lambda r: model_rates(r) - targets,
@@ -636,6 +833,12 @@ def fit_fomc_step_curve(
             "implied_moves_bp": moves,
             "term_rate_caveat": TERM_RATE_CAVEAT,
             "convexity_adjustment_applied": False,
+            "settlement_rules": {
+                "SR1": "calendar-day average, each day at its business day's rate",
+                "SR3": "prod(1 + r_i d_i / 360) over business days (CME, New York Fed)",
+            },
+            "calendar": calendar.name,
+            "realised_days": {p.label: p.realised_days for p in priced},
         },
         warnings=(
             Degradation(

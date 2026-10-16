@@ -30,7 +30,9 @@ from rates_engine.conventions.side import Side
 from rates_engine.core.errors import (
     CalibrationError,
     ImplausibleInputError,
+    MissingFixingError,
     UnderdeterminedCurveError,
+    UnsupportedConventionError,
 )
 from rates_engine.core.evidence import DataQuality
 from rates_engine.curves.discount import CurveSet, DiscountCurve
@@ -46,6 +48,41 @@ from rates_engine.pricing.linear import ParametricComparison, price_on_parametri
 
 FIXTURES = Path(__file__).parent / "fixtures"
 AS_OF = date(2026, 9, 16)
+
+SIFMA_2026_HOLIDAYS = frozenset(
+    {date(2026, 10, 12), date(2026, 11, 11), date(2026, 11, 26), date(2026, 12, 25)}
+)
+"""SIFMA's full closes between September and December 2026, written out by hand
+(Columbus Day, Veterans Day, Thanksgiving, Christmas), so the reference below
+does not lean on the calendar it is checking."""
+
+
+def _is_business(day: date, holidays: frozenset[date]) -> bool:
+    return day.weekday() < 5 and day not in holidays
+
+
+def _business_day_weights(
+    start: date, end: date, holidays: frozenset[date]
+) -> list[tuple[date, int]]:
+    """CME's ``(business day, d_i)`` over ``[start, end)``, one calendar day at a time.
+
+    Every calendar day takes the rate of the business day on or before it;
+    ``d_i`` counts the calendar days each business day's rate covers. Written
+    independently of the package so the tests check its arithmetic rather
+    than repeat it.
+    """
+    out: list[tuple[date, int]] = []
+    day = start
+    while day < end:
+        anchor = day
+        while not _is_business(anchor, holidays):
+            anchor -= timedelta(days=1)
+        if out and out[-1][0] == anchor:
+            out[-1] = (anchor, out[-1][1] + 1)
+        else:
+            out.append((anchor, 1))
+        day += timedelta(days=1)
+    return out
 
 
 def _zero_curve() -> tuple[tuple[float, ...], tuple[float, ...]]:
@@ -346,15 +383,48 @@ class TestFOMCStepCurveTheFunction:
             FOMCStepCurve(AS_OF, (date(2026, 12, 17), date(2026, 11, 5)), (0.043, 0.04, 0.038))
 
     def test_the_discount_curve_compounds_the_path(self):
+        """Business day by business day, each rate for the calendar days it
+        covers, as the SR3 settlement does. It used to compound
+        ``1 + r/360`` once per calendar day, which turns a weekend into
+        ``(1 + r/360)^3`` rather than ``1 + 3r/360``."""
         curve = FOMCStepCurve(AS_OF, (), (0.043,))
         node = AS_OF + timedelta(days=90)
         sampled = curve.discount_curve((node,))
         expected = 1.0
-        day = AS_OF
-        while day < node:
-            expected *= 1.0 + 0.043 / 360.0
-            day += timedelta(days=1)
-        assert sampled.df(node) == pytest.approx(1.0 / expected)
+        for _, days in _business_day_weights(AS_OF, node, SIFMA_2026_HOLIDAYS):
+            expected *= 1.0 + 0.043 * days / 360.0
+        assert sampled.df(node) == pytest.approx(1.0 / expected, rel=1e-15)
+
+    def test_compounding_follows_the_cme_and_new_york_fed_formula(self):
+        """``prod(1 + r_i d_i / 360)`` over business days, ``d_i`` the calendar
+        days rate ``r_i`` applies for -- three for a Friday. The window holds
+        no SIFMA holiday (Columbus Day is the day before it, Veterans Day the
+        day after), so the weights are plain weekday arithmetic."""
+        rate = 0.043
+        curve = FOMCStepCurve(AS_OF, (), (rate,))
+        start, end = date(2026, 10, 13), date(2026, 11, 10)
+        factor = 1.0
+        for _, days in _business_day_weights(start, end, frozenset()):
+            factor *= 1.0 + rate * days / 360.0
+        expected = (factor - 1.0) * 360.0 / (end - start).days
+        assert curve.compounded(start, end) == pytest.approx(expected, abs=1e-15)
+        daily = (1.0 + rate / 360.0) ** (end - start).days
+        old = (daily - 1.0) * 360.0 / (end - start).days
+        assert abs(old - expected) * 1e4 > 0.02, "the window no longer separates the two"
+
+    def test_a_period_starting_on_a_weekend_carries_the_friday_rate(self):
+        """A step dated on a Saturday -- not a real effective date, chosen to
+        separate the two readings -- and a period starting that Saturday. The
+        weekend takes the rate published for Friday, the one before the step,
+        not the one the path holds on the calendar day."""
+        saturday = date(2026, 10, 17)
+        curve = FOMCStepCurve(AS_OF, (saturday,), (0.043, 0.040))
+        assert curve.compounded(saturday, saturday + timedelta(days=2)) == pytest.approx(
+            0.043, abs=1e-12
+        )
+        assert curve.averaged(saturday, saturday + timedelta(days=2)) == pytest.approx(
+            0.043, abs=1e-12
+        )
 
 
 class TestFOMCStepFit:
@@ -442,6 +512,119 @@ class TestFOMCStepFit:
         first = fit_fomc_step_curve(AS_OF, dates, strip)
         second = fit_fomc_step_curve(AS_OF, dates, strip)
         assert first.curve.segment_rates == second.curve.segment_rates
+
+    def test_a_non_finite_price_refuses_by_contract(self, strip, meetings):
+        """It used to reach scipy, which raised a bare ``ValueError`` about
+        residuals 'not finite in the initial point'."""
+        broken = strip[:1] + ((strip[1][0], strip[1][1], strip[1][2], "SR1", float("nan")),)
+        with pytest.raises(ImplausibleInputError, match=strip[1][0]):
+            fit_fomc_step_curve(AS_OF, tuple(d for d, _ in meetings), broken + strip[2:])
+
+    def test_an_unknown_symbol_refuses(self, strip, meetings):
+        """Anything that was not ``SR1`` used to be compounded as an SR3."""
+        relabelled = ((strip[0][0], strip[0][1], strip[0][2], "SR2", strip[0][4]), *strip[1:])
+        with pytest.raises(UnsupportedConventionError, match="SR2"):
+            fit_fomc_step_curve(AS_OF, tuple(d for d, _ in meetings), relabelled)
+
+
+class TestFOMCStepFitInProgress:
+    """A contract whose reference period started before ``as_of``.
+
+    Its settlement is part history. The path starts at ``as_of``, so before
+    this the days already fixed were read off the first segment as if the
+    overnight rate had sat there all along -- through a meeting already
+    held, if there was one. Now they come from the published fixings, and a
+    strip that needs them and does not have them is refused.
+    """
+
+    IN_PROGRESS_AS_OF = date(2026, 10, 15)
+    MEETINGS = (date(2026, 11, 5), date(2026, 12, 17))
+    PATH = (0.0430, 0.0405, 0.0380)
+    FIXING = 0.0450
+    """Every SOFR fixing before ``as_of``: deliberately not the first segment."""
+
+    def _fixings(self) -> dict[date, float]:
+        out: dict[date, float] = {}
+        day = date(2026, 9, 14)
+        while day < self.IN_PROGRESS_AS_OF:
+            if _is_business(day, SIFMA_2026_HOLIDAYS):
+                out[day] = self.FIXING
+            day += timedelta(days=1)
+        return out
+
+    def _rate(self, business_day: date) -> float:
+        """The overnight rate published for a business day: a fixing before
+        ``as_of``, the path from it."""
+        if business_day < self.IN_PROGRESS_AS_OF:
+            return self.FIXING
+        index = sum(1 for meeting in self.MEETINGS if business_day >= meeting)
+        return self.PATH[index]
+
+    def _sr1(self, start: date, end: date) -> float:
+        """CME SR1: the calendar-day average, each day at its business day's rate."""
+        weights = _business_day_weights(start, end, SIFMA_2026_HOLIDAYS)
+        total = sum(self._rate(day) * days for day, days in weights)
+        return 100.0 * (1.0 - total / (end - start).days)
+
+    def _sr3(self, start: date, end: date) -> float:
+        """CME SR3: ``prod(1 + r_i d_i / 360)`` over the business days."""
+        factor = 1.0
+        for day, days in _business_day_weights(start, end, SIFMA_2026_HOLIDAYS):
+            factor *= 1.0 + self._rate(day) * days / 360.0
+        return 100.0 * (1.0 - (factor - 1.0) * 360.0 / (end - start).days)
+
+    def _strip(self):
+        months = (
+            ("SR1-Oct26", date(2026, 10, 1), date(2026, 11, 1)),
+            ("SR1-Nov26", date(2026, 11, 1), date(2026, 12, 1)),
+            ("SR1-Dec26", date(2026, 12, 1), date(2027, 1, 1)),
+        )
+        strip = [(label, s, e, "SR1", self._sr1(s, e)) for label, s, e in months]
+        sep, dec = date(2026, 9, 16), date(2026, 12, 16)
+        strip.append(("SR3-Sep26", sep, dec, "SR3", self._sr3(sep, dec)))
+        return tuple(strip)
+
+    def test_without_fixings_it_refuses_and_names_the_contracts(self):
+        with pytest.raises(MissingFixingError) as excinfo:
+            fit_fomc_step_curve(self.IN_PROGRESS_AS_OF, self.MEETINGS, self._strip())
+        assert "SR1-Oct26" in str(excinfo.value)
+        assert "SR3-Sep26" in str(excinfo.value)
+
+    def test_with_fixings_it_recovers_the_path(self):
+        fit = fit_fomc_step_curve(
+            self.IN_PROGRESS_AS_OF, self.MEETINGS, self._strip(), fixings=self._fixings()
+        )
+        assert fit.curve.segment_rates == pytest.approx(self.PATH, abs=1e-10)
+        assert fit.max_residual_bp < 1e-6
+
+    def test_the_realised_days_are_in_the_evidence(self):
+        fit = fit_fomc_step_curve(
+            self.IN_PROGRESS_AS_OF, self.MEETINGS, self._strip(), fixings=self._fixings()
+        )
+        realised = fit.evidence.fields["realised_days"]
+        assert realised["SR1-Oct26"] == 14
+        assert realised["SR3-Sep26"] == 29
+        assert realised["SR1-Nov26"] == 0
+
+    def test_a_missing_business_day_is_named(self):
+        fixings = self._fixings()
+        del fixings[date(2026, 10, 7)]
+        with pytest.raises(MissingFixingError, match="2026-10-07"):
+            fit_fomc_step_curve(
+                self.IN_PROGRESS_AS_OF, self.MEETINGS, self._strip(), fixings=fixings
+            )
+
+    def test_a_non_finite_fixing_refuses(self):
+        fixings = self._fixings()
+        fixings[date(2026, 10, 7)] = float("nan")
+        with pytest.raises(ImplausibleInputError, match="2026-10-07"):
+            fit_fomc_step_curve(
+                self.IN_PROGRESS_AS_OF, self.MEETINGS, self._strip(), fixings=fixings
+            )
+
+    def test_a_strip_that_starts_after_as_of_needs_none(self, strip, meetings):
+        fit = fit_fomc_step_curve(AS_OF, tuple(d for d, _ in meetings), strip)
+        assert set(fit.evidence.fields["realised_days"].values()) == {0}
 
 
 class TestPricingOnAParametricCurve:
