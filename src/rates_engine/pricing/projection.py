@@ -36,12 +36,18 @@ A period paid after ``as_of`` whose coupon is already partly or wholly
 decided is history, and no curve can say what it was. Its fixed coupon was
 known on the trade date and is counted in full. Its floating coupon:
 
-- an overnight rate (SOFR, TIIE de Fondeo) is history once its period has
-  begun: the published fixings from the accrual start up to ``as_of``,
-  exclusive, are compounded, and the curve's ``P(as_of) / P(end)`` covers
-  the rest -- the coupon QuantLib's ``OvernightIndexedCoupon`` pays. A
-  period starting on ``as_of`` has no history: the day's rate is published
-  the next morning.
+- an overnight rate (SOFR, TIIE de Fondeo) is history up to the first day
+  whose rate is not yet decided, and the curve's ``P(that day) / P(end)``
+  covers the rest -- the coupon QuantLib's ``OvernightIndexedCoupon`` pays.
+  That day is ``as_of`` on a business day: the rate dated ``as_of`` is
+  published the next morning, so it is forecast, unless ``fixings`` holds
+  it, when it is read and decides the days to the next business day (the
+  convention every branch shares, QuantLib's default). On a weekend or a
+  holiday it is the next business day, because the last business day's
+  rate already covers the days in between: a period that started on Friday
+  and is valued on Saturday has its weekend decided. Forecasting it from
+  the curve, as #12 did, put a weekend start 0.03 bp off QuantLib. A period
+  starting on a business day ``as_of`` has no history.
 - a term rate is history once its fixing date is before ``as_of``, whether
   or not its period has begun, and pays that fixing. A fixing dated
   ``as_of`` itself is used when ``fixings`` holds it and projected off the
@@ -280,6 +286,29 @@ def _how_to_pass(index: RateIndex) -> str:
     )
 
 
+def _holds(fixings: MarketSnapshot | None, series_id: str, day: date) -> bool:
+    """Whether ``fixings`` serves a fixing of ``series_id`` dated ``day``."""
+    if fixings is None or series_id not in fixings.series:
+        return False
+    return fixings.require(series_id).get(day) is not None
+
+
+def _overnight_decided_until(
+    index: RateIndex, as_of: date, fixings: MarketSnapshot | None
+) -> date:
+    """The first day whose overnight rate is not yet decided on ``as_of``.
+
+    A rate published for a business day applies until the next one. On a
+    weekend or holiday that makes the next business day the first open one;
+    on a business day it is ``as_of`` itself, unless ``fixings`` holds the
+    rate dated ``as_of``, which then decides the days up to the next.
+    """
+    calendar = index.calendar
+    if not calendar.is_business_day(as_of) or _holds(fixings, index.name, as_of):
+        return calendar.next_business_day(as_of)
+    return as_of
+
+
 def _compounded_history(
     index: RateIndex,
     start: date,
@@ -345,10 +374,8 @@ def _term_history(
     fixing_date = _term_fixing_date(index, start)
     if fixing_date > as_of:
         return None, None
-    if fixing_date == as_of:
-        series = fixings.series.get(index.name) if fixings is not None else None
-        if series is None or series.get(fixing_date) is None:
-            return None, fixing_date
+    if fixing_date == as_of and not _holds(fixings, index.name, fixing_date):
+        return None, fixing_date
     context = _in_progress(instrument, start, end, pay, as_of, fixed_on=fixing_date)
     return _term_fixing(index, fixing_date, fixings, context), None
 
@@ -394,12 +421,14 @@ def _ois_float(
     The compounded overnight growth over a period is exactly the ratio of the
     period's discount factors on a deterministic curve, so no separate
     projection is needed and none is invented. A period in progress
-    compounds its published fixings up to ``as_of`` and the curve from there.
+    compounds its published fixings up to the first day not yet decided and
+    the curve from there.
     """
     sign = -fixed_leg_sign(swap.side)
     curve = curve_set.discount
     as_of = curve_set.as_of
     day_count = swap.index.day_count
+    decided_until = _overnight_decided_until(swap.index, as_of, fixings)
     flows: list[Cashflow] = []
     schedule = swap.schedule
     for start, end, pay in zip(
@@ -409,16 +438,17 @@ def _ois_float(
             continue
         tau = year_fraction(start, end, day_count)
         realised: RealisedFixing | None = None
-        if start < as_of:
+        if start < decided_until:
+            until = min(end, decided_until)
             realised = _compounded_history(
                 swap.index,
                 start,
-                min(end, as_of),
+                until,
                 fixings,
                 _in_progress(swap, start, end, pay, as_of),
             )
             assert realised.accrual_factor is not None  # set for every compounded record
-            remaining = curve.df(as_of) / curve.df(end) if end > as_of else 1.0
+            remaining = curve.df(until) / curve.df(end) if end > until else 1.0
             growth = realised.accrual_factor * remaining
         else:
             growth = curve.df(start) / curve.df(end)

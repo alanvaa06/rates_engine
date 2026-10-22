@@ -596,3 +596,89 @@ class TestTheConfigCarriesTheFixings:
         bare = dict(config)
         bare.pop("fixings")
         assert commands.COMMANDS["price"](config) == commands.COMMANDS["price"](bare)
+
+
+# ---------------------------------------------------------------------------
+# Cross-branch checks: the FOMC curve against the snapshot, a weekend start.
+# ---------------------------------------------------------------------------
+
+
+class TestTheFomcCurveAndTheSnapshotCompoundAlike:
+    """Two implementations of the New York Fed's rule, one for a path and one for a history.
+
+    ``FOMCStepCurve.compounded`` (#15) compounds a modelled path and
+    ``MarketSnapshot.compounded`` (#11) a published one. On a flat path they
+    have to agree, and both have to be what QuantLib 1.44's
+    ``OvernightIndexedCoupon`` pays over SR3 Sep-26, 2026-09-16 to
+    2026-12-16, with ``ql.Sofr()`` fixed at the flat rate on every
+    UnitedStates(SOFR) business day.
+    """
+
+    QUANTLIB = {0.0430: 0.04322943643757335, 0.0533: 0.05365281031184554}
+
+    @pytest.mark.parametrize("rate", sorted(QUANTLIB))
+    def test_sr3_sep_26_on_flat_sofr(self, rate):
+        from rates_engine.curves.parametric import FOMCStepCurve
+
+        start, end = date(2026, 9, 16), date(2026, 12, 16)
+        path = FOMCStepCurve(as_of=AS_OF, meeting_dates=(), segment_rates=(rate,))
+        days = [start - timedelta(days=30) + timedelta(days=k) for k in range(130)]
+        published = {d: rate for d in days if SIFMA_US.is_business_day(d)}
+        history = _fixings(_published("SOFR", published), as_of=date(2026, 12, 31))
+        compounded = history.compounded("SOFR", start, end).rate
+        assert path.compounded(start, end) == pytest.approx(compounded, rel=1e-14)
+        assert compounded == pytest.approx(self.QUANTLIB[rate], abs=1e-15)
+
+
+class TestAStartRolledBackOverAWeekend:
+    """The repro of #10's review: a month-end start that Modified Following rolls before as_of.
+
+    As of Saturday 2026-01-31, a SOFR OIS with effective date that Saturday
+    and maturity 2027-02-01 starts, adjusted, on Friday the 30th: before
+    the valuation date. #10 alone priced the Friday as if it accrued at a
+    discount factor of one (par 401.309 bp), and main by starting on the
+    Saturday (402.450 bp). The Friday's SOFR is history and decides the
+    whole weekend, since a published rate covers the calendar days to the
+    next business day; only from Monday does the curve forecast.
+    """
+
+    #: QuantLib 1.44: ``OvernightIndexedSwap`` (annual, ACT/360, payment lag
+    #: 2, UnitedStates(SOFR), Modified Following, backward) from 2026-01-31 to
+    #: 2027-02-01, schedule 2026-01-30, 2026-02-02, 2027-02-01, on
+    #: ``FlatForward(2026-01-31, 4%, Actual365Fixed, Continuous)``, with the
+    #: SOFR fixing of 2026-01-30 at 4.00%: ``fairRate()``.
+    QUANTLIB_FAIR_BP = 402.4738047068733
+
+    @staticmethod
+    def _setting():
+        from rates_engine.instruments.swaps import OISSwap
+
+        as_of = date(2026, 1, 31)
+        nodes = tuple(as_of + timedelta(days=365 * k) for k in range(1, 11))
+        curve = DiscountCurve(as_of, nodes, tuple(math.exp(-0.04 * k) for k in range(1, 11)))
+        swap = OISSwap(effective=as_of, maturity=date(2027, 2, 1), fixed_rate=0.04,
+                       notional=NOTIONAL)
+        return swap, CurveSet(curve), as_of
+
+    def test_without_the_friday_fixing_it_is_refused(self):
+        from rates_engine.core.errors import MissingFixingError
+        from rates_engine.pricing.linear import par_rate
+
+        swap, curve_set, _ = self._setting()
+        with pytest.raises(MissingFixingError, match="2026-01-30"):
+            par_rate(swap, curve_set)
+
+    def test_with_it_the_par_rate_is_quantlib_s(self):
+        from rates_engine.pricing.linear import par_rate
+
+        swap, curve_set, as_of = self._setting()
+        snapshot = _fixings(_published("SOFR", {date(2026, 1, 30): 0.04}), as_of=as_of)
+        par = par_rate(swap, curve_set, fixings=snapshot).value * 1e4
+        assert par == pytest.approx(self.QUANTLIB_FAIR_BP, abs=1e-9)
+        # The Friday's rate is the stub period's whole rate: the weekend is
+        # history, not forecast.
+        flows = pv(swap, curve_set, fixings=snapshot).cashflows or ()
+        stub = next(flow for flow in flows if flow.leg == "float")
+        # QuantLib's coupon rate for the stub is 0.039999999999995595 too.
+        assert stub.rate == pytest.approx(0.04, abs=1e-14)
+        assert stub.fixing is not None and stub.fixing.observed_to == date(2026, 2, 2)

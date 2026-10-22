@@ -695,18 +695,24 @@ class TestClosedForms:
         fixed = [flow for flow in result.cashflows or () if flow.leg == "fixed"]
         assert [flow.amount for flow in fixed] == [-NOTIONAL * 0.04 * 365 / 360]
 
-    def test_fixings_on_and_after_the_valuation_date_are_never_read(self):
-        # A period's coupon is history only up to the day before as_of; the
-        # rest is the curve's. A snapshot that holds later prints -- a
-        # backtest's look-ahead -- must not reach the price.
+    def test_the_fixing_dated_as_of_is_read_when_supplied_and_nothing_later_is(self):
+        # QuantLib's default, and the convention every branch shares: the
+        # rate dated as_of is history if the fixings hold it, deciding the
+        # day to Friday the 16th; the curve takes over from there. A print
+        # dated after as_of is never served by the snapshot.
         published = {date(2026, 1, 12): 0.0431, date(2026, 1, 13): 0.0429,
-                     date(2026, 1, 14): 0.0433}
-        future = {**published, AS_OF: 0.99, date(2026, 1, 16): 0.99}
+                     date(2026, 1, 14): 0.0433, AS_OF: 0.0435}
+        later = {**published, date(2026, 1, 16): 0.99}
         swap = OISSwap(effective=date(2026, 1, 12), maturity=date(2027, 1, 12), fixed_rate=0.04,
                        notional=NOTIONAL)
         curve_set = CurveSet(_flat_curve())
-        clean = pv(swap, curve_set, fixings=_fixings(_term("SOFR", published))).value
-        assert pv(swap, curve_set, fixings=_fixings(_term("SOFR", future))).value == clean
+        realised = math.prod(1.0 + r / 360.0 for r in published.values())
+        growth = realised * _df(date(2026, 1, 16)) / _df(date(2027, 1, 12))
+        pay = date(2027, 1, 14)
+        expected = (-NOTIONAL * 0.04 * 365 / 360 + NOTIONAL * (growth - 1.0)) * _df(pay)
+        read = pv(swap, curve_set, fixings=_fixings(_term("SOFR", published))).value
+        assert read == pytest.approx(expected, rel=1e-12)
+        assert pv(swap, curve_set, fixings=_fixings(_term("SOFR", later))).value == read
 
     def test_a_tiie_de_fondeo_ois_compounds_on_the_bmv_calendar_in_pesos(self):
         published = {date(2026, 1, 12): 0.0702, date(2026, 1, 13): 0.0700,
@@ -1014,31 +1020,13 @@ QL_SPOT_IRS_FORECAST_PV = 60668.38180689141
 QL_SPOT_IRS_FORECAST_FAIR = 0.03931695370179005
 
 
-def _compounding_rule_gap(start: date, end: date, rate: float = 0.0430) -> float:
-    """How far apart the two compounding rules put a flat history's growth.
-
-    ``MarketSnapshot.compounded`` multiplies ``1 + r/360`` once per calendar
-    day, so a weekend is ``(1 + r/360)^3``. QuantLib, CME and the New York
-    Fed multiply ``1 + r d/360`` once per business day, ``d`` the calendar
-    days it covers. The review's finding 3.4; the rule lives in
-    ``market/snapshot.py`` and is corrected on the branch that owns it, after
-    which this gap is what the two prices may still differ by and no more.
-    Written out here from the calendar alone, not by calling the snapshot.
-    """
-    days = [start + timedelta(days=k) for k in range((end - start).days)]
-    daily = math.prod(1.0 + rate / 360.0 for _ in days)
-    published = [day for day in days if SIFMA_US.is_business_day(day)]
-    following = published[1:] + [end]
-    business = math.prod(
-        1.0 + rate * (after - day).days / 360.0
-        for day, after in zip(published, following, strict=True)
-    )
-    return daily - business
-
-
-def _pv_tolerance(start: date, end: date) -> float:
-    """USD on USD 100m: the rule gap, grown by at most 5% of forecast and one dollar."""
-    return NOTIONAL * abs(_compounding_rule_gap(start, end)) * 1.05 + 1.0
+#: How close the engine comes to QuantLib on the seasoned OIS, now that
+#: ``MarketSnapshot.compounded`` compounds by the New York Fed's rule (#11):
+#: within 5e-8 USD of PV and 3e-16 of par rate on USD 100m. While it
+#: compounded once per calendar day the gap was 128 USD on the 2025 payer
+#: and 271 on the accrued year, and #12 could only hold the price to that.
+_PV_TOLERANCE_USD = 1e-6
+_PAR_TOLERANCE = 1e-13
 
 
 class TestAgainstQuantLib:
@@ -1046,21 +1034,18 @@ class TestAgainstQuantLib:
 
     @pytest.mark.parametrize("effective", [date(2025, 7, 15), date(2024, 7, 15)])
     def test_the_seasoned_payer_matches_quantlib(self, strip_curve, effective):
-        # Before this change: -2,238,694.78 (2025 start) and -6,294,250.34
-        # (2024 start) against QuantLib's -17,348.13; par 2.8519% and 1.8762%
-        # against 3.9911%. Now 128 USD and 0.0066 bp apart, all of it the
-        # compounding rule: 128.30 USD of coupon on this window.
+        # Before #12: -2,238,694.78 (2025 start) and -6,294,250.34 (2024
+        # start) against QuantLib's -17,348.13; par 2.8519% and 1.8762%
+        # against 3.9911%.
         swap = OISSwap(effective=effective, maturity=date(2027, 7, 15), fixed_rate=0.04,
                        notional=NOTIONAL)
         curve_set = CurveSet(strip_curve)
         snapshot = _fixings(_history())
-        tolerance = _pv_tolerance(date(2025, 7, 15), AS_OF)
-        assert tolerance < 150.0  # the 222 bp error this guards against is 2.2m USD
         assert pv(swap, curve_set, fixings=snapshot).value == pytest.approx(
-            QL_SEASONED_PV, abs=tolerance
+            QL_SEASONED_PV, abs=_PV_TOLERANCE_USD
         )
         assert par_rate(swap, curve_set, fixings=snapshot).value == pytest.approx(
-            QL_SEASONED_FAIR, abs=tolerance / (NOTIONAL * QL_SEASONED_ANNUITY)
+            QL_SEASONED_FAIR, abs=_PAR_TOLERANCE
         )
         assert annuity(swap, curve_set).value == pytest.approx(QL_SEASONED_ANNUITY, abs=1e-9)
 
@@ -1077,18 +1062,16 @@ class TestAgainstQuantLib:
         ).value
 
     def test_a_period_accrued_but_unpaid_matches_quantlib(self, strip_curve):
-        # A whole year of history, every day of it realised: 271 USD apart,
-        # the rule gap to the cent.
+        # A whole year of history, every day of it realised.
         swap = OISSwap(effective=date(2025, 1, 14), maturity=date(2026, 1, 14), fixed_rate=0.04,
                        notional=NOTIONAL)
         curve_set = CurveSet(strip_curve)
         snapshot = _fixings(_history())
-        tolerance = _pv_tolerance(date(2025, 1, 14), date(2026, 1, 14))
         assert pv(swap, curve_set, fixings=snapshot).value == pytest.approx(
-            QL_ACCRUED_PV, abs=tolerance
+            QL_ACCRUED_PV, abs=_PV_TOLERANCE_USD
         )
         assert par_rate(swap, curve_set, fixings=snapshot).value == pytest.approx(
-            QL_ACCRUED_FAIR, abs=tolerance / (NOTIONAL * QL_ACCRUED_ANNUITY)
+            QL_ACCRUED_FAIR, abs=_PAR_TOLERANCE
         )
 
     @pytest.mark.parametrize(("side", "expected"), [(Side.PAYER, 1.0), (Side.RECEIVER, -1.0)])
