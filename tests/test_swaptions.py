@@ -395,8 +395,12 @@ class TestSwaptionPricing:
                 side="long",
             )
 
-    @pytest.mark.parametrize("days_after", [1, 400])
+    @pytest.mark.parametrize("days_after", [0, 1, 400])
     def test_an_expired_swaption_refuses(self, atm_swaption, option_curve_set, days_after):
+        # Expiring on the valuation date counts as expired: an exercise dated
+        # that day has happened, as a payment dated that day has been made --
+        # QuantLib's default, includeReferenceDateEvents = False, under
+        # which such a swaption is worth nothing. One rule for every event.
         # It used to price an expired option at its intrinsic value, as if
         # the right to exercise still existed.
         from datetime import timedelta
@@ -406,57 +410,6 @@ class TestSwaptionPricing:
                 atm_swaption, option_curve_set, Volatility.normal_bp(80.0),
                 as_of=atm_swaption.expiry + timedelta(days=days_after),
             )
-
-    @pytest.mark.parametrize(
-        "side,strike,expected",
-        [
-            # QuantLib 1.44: ql.Swaption on a VanillaSwap from spot,
-            # 2026-01-20 (the 19th is Martin Luther King Day), to 2036-01-20
-            # -- fixed annual ACT/360, Term SOFR 3M float with fixingDays = 2,
-            # so its first period fixes on the evaluation date and, with no
-            # history, is forecast -- notional 10M, European exercise on the
-            # evaluation date 2026-01-15, FlatForward(4%, continuous,
-            # ACT/365F), Bachelier 85 bp and Black 21% -- both give these --
-            # with includeReferenceDateEvents = True. With QuantLib's
-            # default, False, an event on the evaluation date has already
-            # happened and the NPV is 0.0: this package follows the first
-            # reading, the intrinsic value of an option that can still be
-            # exercised that day. Script:
-            # work-fix-options-vol/ql_swaption_today_spot.py.
-            (Side.PAYER, 0.035, 430350.88106669177),
-            (Side.RECEIVER, 0.045, 388957.3543422748),
-            (Side.PAYER, 0.045, 0.0),
-            (Side.RECEIVER, 0.035, 0.0),
-        ],
-    )
-    @pytest.mark.parametrize(
-        "vol", [Volatility.normal_bp(85.0), Volatility(0.21, VolUnits.LOGNORMAL_DECIMAL)]
-    )
-    def test_on_its_expiry_day_a_swaption_is_its_intrinsic_value(
-        self, option_curve_set, side, strike, expected, vol
-    ):
-        from datetime import date
-
-        from conftest import AS_OF
-
-        from rates_engine.instruments.swaps import IRSwap
-
-        # A swaption expiring today is exercised into a swap starting at spot.
-        # Starting it on the valuation date instead would put its first Term
-        # SOFR fixing two business days earlier, before the valuation date,
-        # and that fixing would have to be supplied.
-        swap = IRSwap(
-            date(2026, 1, 20), date(2036, 1, 20), strike, 10_000_000.0,
-            fixed_frequency_months=12, float_frequency_months=3,
-        )
-        swaption = Swaption(AS_OF, swap, strike, side, 10_000_000.0)
-        result = swaption_pv(swaption, option_curve_set, vol)
-        assert result.value == pytest.approx(expected, rel=1e-13, abs=1e-9)
-        assert result.expiry == 0.0
-        assert result.evidence.fields["expires_on_valuation_date"] is True
-        greeks = option_greeks(swaption, option_curve_set, vol)
-        assert greeks.vega == 0.0
-        assert greeks.theta == 0.0
 
     def test_the_day_before_expiry_it_prices_and_theta_takes_the_last_day(
         self, atm_swaption, option_curve_set

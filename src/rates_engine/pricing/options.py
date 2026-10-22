@@ -33,12 +33,13 @@ v0.3 had no notion of any of it: the curve's discount factor is one on and
 before its date, so a floor from 2025-01-15 valued on 2026-01-15 counted
 231,666.67 of periods paid in 2025 inside a 314,181.72 price, and the
 running period of a cap was priced off a "forward" read across the
-valuation date -- 2.61% on a 4% curve. A swaption past its expiry is refused:
-it is no longer an option. One expiring on the valuation date is its
-intrinsic value on the forward swap rate, with no time left: it can still be
-exercised that day. That is QuantLib with ``includeReferenceDateEvents =
-True``; with its default, ``False``, QuantLib counts an exercise dated on the
-evaluation date as already happened and values the swaption at zero.
+valuation date -- 2.61% on a 4% curve.
+
+A swaption expiring on or before the valuation date is refused: it is no
+longer an option. An exercise dated the valuation date has happened, as a
+payment dated that day has been made -- one convention for every event, which
+is QuantLib's default ``includeReferenceDateEvents = False``, under which
+such a swaption is worth nothing.
 """
 
 from __future__ import annotations
@@ -327,22 +328,22 @@ def swaption_pv(
         source_evidence: Evidence of the curves and the volatility surface.
 
     Returns:
-        The :class:`OptionPriceResult`. A swaption expiring on the valuation
-        date has no time left and is worth its intrinsic value on the forward
-        swap rate, ``annuity * max(+-(F - K), 0)``; the evidence says so.
+        The :class:`OptionPriceResult`.
 
     Raises:
-        ValueError: The swaption expired before the valuation date. It is no
-            longer an option: value the swap it became, or nothing.
+        ValueError: The swaption expires on or before the valuation date. It
+            is no longer an option: value the swap it became, or nothing. An
+            exercise dated the valuation date has happened, as a payment
+            dated that day has been made.
         ShiftRequiredError: Black was implied and the forward is not positive.
     """
     valuation = as_of or curve_set.as_of
-    if swaption.expiry < valuation:
+    if swaption.expiry <= valuation:
         raise ValueError(
-            f"the swaption expired on {swaption.expiry}, before the valuation date "
+            f"the swaption expired on {swaption.expiry}, on or before the valuation date "
             f"{valuation}: it is no longer an option. If it was exercised, value the swap "
-            "it became with pv(); if it lapsed it is worth nothing. Priced as an option "
-            "it would report the intrinsic value of a right that no longer exists."
+            "it became with pv(); if it lapsed it is worth nothing. An exercise dated the "
+            "valuation date counts as done, as a payment dated that day does."
         )
     forward = forward_swap_rate(swaption, curve_set)
     numeraire = swaption_annuity(swaption, curve_set)
@@ -359,7 +360,6 @@ def swaption_pv(
                 "strike": swaption.strike,
                 "expiry_years": expiry,
                 "annuity": numeraire,
-                "expires_on_valuation_date": swaption.expiry == valuation,
                 "numeraire_note": (
                     "The swap annuity. Under the annuity measure the forward swap rate "
                     "is a martingale, which is what makes a one-dimensional option "

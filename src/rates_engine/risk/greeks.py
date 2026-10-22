@@ -107,7 +107,7 @@ def _decayed_one_day(
     or tomorrow: a caplet fixing today keeps today's value rather than, seen
     from tomorrow, demanding today's fixing; a period paid tomorrow does not
     drop out; and a swaption or caplet expiring tomorrow decays to its
-    intrinsic value on the forward.
+    intrinsic value on the forward rather than being refused as expired.
     """
     tomorrow = valuation + timedelta(days=1)
     if isinstance(option, Swaption):
@@ -278,7 +278,7 @@ def option_greeks(
 
     Raises:
         ValueError: Either bump is not positive, ``option`` is neither a
-            swaption nor a cap, a swaption expired before the valuation date,
+            swaption nor a cap, a swaption expires on or before the valuation date,
             or every period of a cap has been paid.
         MissingFixingError: A period of a cap fixed before the valuation date
             and ``fixings`` does not hold its fixing.
