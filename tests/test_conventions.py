@@ -515,11 +515,12 @@ class TestSaturdayObservance:
         assert (monday - timedelta(days=1)).weekday() == 6
         assert not SIFMA_US.is_business_day(monday)
 
-    def test_a_saturday_new_year_is_listed_without_closing_a_weekday(self):
-        # The holiday is still SIFMA's, so it is in the list; it simply falls
-        # on a day that was never a business day.
-        assert date(2022, 1, 1) in SIFMA_US.holidays(2022)
-        assert len(SIFMA_US.holidays(2022)) == 12
+    def test_a_saturday_new_year_closes_nothing_and_is_not_listed(self):
+        # holidays(year) is the set of weekdays the market closes, so a
+        # holiday that falls on a Saturday and is not moved is not in it.
+        assert date(2022, 1, 1) not in SIFMA_US.holidays(2022)
+        assert date(2021, 12, 31) not in SIFMA_US.holidays(2022)
+        assert len(SIFMA_US.holidays(2022)) == 11
         days = SIFMA_US.business_days(date(2021, 12, 29), date(2022, 1, 5))
         assert days == [
             date(2021, 12, 29),
@@ -528,6 +529,19 @@ class TestSaturdayObservance:
             date(2022, 1, 3),
             date(2022, 1, 4),
         ]
+
+
+    def test_both_on_a_saturday_leave_ten_closures(self):
+        # 1 January and 11 November 2028 are both Saturdays.
+        holidays = SIFMA_US.holidays(2028)
+        assert date(2028, 1, 1) not in holidays
+        assert date(2028, 11, 11) not in holidays
+        assert len(holidays) == 10
+
+    def test_every_listed_holiday_closes_a_weekday(self):
+        for year in range(2000, 2061):
+            weekend = [day for day in SIFMA_US.holidays(year) if day.weekday() >= 5]
+            assert weekend == [], year
 
 
 class TestObservanceAcrossAYearBoundary:

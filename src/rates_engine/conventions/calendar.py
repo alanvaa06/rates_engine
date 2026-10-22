@@ -155,8 +155,9 @@ def _observed_monday_only(day: date) -> date:
     2021 (0.05%) and Friday 10 November 2023 (5.32%), the days before the
     two that have fallen on a Saturday since SOFR began (FRED series
     ``SOFR``), and QuantLib's US government bond and SOFR calendars keep
-    both Fridays open. The Saturday is returned rather than dropped so that
-    every year still lists its twelve holidays.
+    both Fridays open. The Saturday is returned as it is;
+    :meth:`SIFMAUSCalendar.holidays` then leaves it out, because it closes
+    nothing.
     """
     if day.weekday() == 6:
         return day + timedelta(days=1)
@@ -182,8 +183,8 @@ class HolidayCalendar:
         a holiday *out of its own year*. A rule that observed a Saturday New
         Year's Day on the Friday would put 31 December 2021 in
         ``holidays(2022)``, because it is the 2022 holiday. SIFMA's calendar
-        has no such rule any more -- it leaves a Saturday New Year's Day where
-        it is -- but the base class does not assume that of every calendar.
+        has no such rule any more -- a Saturday New Year's Day closes nothing
+        -- but the base class does not assume that of every calendar.
         :meth:`is_business_day` accounts for it; see there.
         """
         raise NotImplementedError
@@ -296,7 +297,9 @@ class HolidayCalendar:
 class SIFMAUSCalendar(HolidayCalendar):
     """SIFMA's recommended US holiday schedule for the fixed income market.
 
-    Twelve holidays. Juneteenth only from 2022. It became a federal holiday
+    Twelve holidays, and as many closures in most years: a New Year's Day
+    or Veterans Day that falls on a Saturday closes no weekday, so 2022 has
+    eleven and 2028 ten. Juneteenth only from 2022. It became a federal holiday
     in June 2021, first observed on Friday 18 June, but SIFMA did not
     recommend a close for it until 2022, and the New York Fed published SOFR
     for 18 June 2021 (0.05%, FRED). Asking about 2021 correctly reports that
@@ -350,11 +353,13 @@ class SIFMAUSCalendar(HolidayCalendar):
             year: Calendar year.
 
         Returns:
-            The observed dates, already rolled off weekends where the rule
-            applies, plus any :attr:`SPECIAL_CLOSURES` in the year. Good
-            Friday and the n-th-weekday holidays never need a roll. New
-            Year's Day and Veterans Day on a Saturday are returned on the
-            Saturday, which closes no business day.
+            The weekdays the market is closed for the year's holidays,
+            already rolled off weekends where the rule applies, plus any
+            :attr:`SPECIAL_CLOSURES` in the year. Good Friday and the
+            n-th-weekday holidays never need a roll. A New Year's Day or
+            Veterans Day on a Saturday is not in the set: it closes nothing,
+            and a list of closures that also held non-events could not be
+            counted or diffed against a publication record.
         """
         days = {
             _observed_monday_only(date(year, 1, 1)),
@@ -372,7 +377,7 @@ class SIFMAUSCalendar(HolidayCalendar):
         if year >= 2022:
             days.add(_observed(date(year, 6, 19)))
         days.update(day for day in self.SPECIAL_CLOSURES if day.year == year)
-        return frozenset(days)
+        return frozenset(day for day in days if day.weekday() < 5)
 
 
 class BMVCalendar(HolidayCalendar):
