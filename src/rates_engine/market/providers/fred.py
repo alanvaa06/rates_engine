@@ -54,6 +54,8 @@ def fetch_series(series_id: str, *, timeout: float = 30.0, percent: bool | None 
             error for an index or an exchange rate.
         InsufficientDataError: The response holds no observations.
         ValueError: The response is not FRED's CSV of this series.
+        ImplausibleInputError: A rate came back above 30% after the
+            division, which FRED's units cannot produce.
     """
     from urllib.request import urlopen
 

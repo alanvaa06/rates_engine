@@ -89,17 +89,33 @@ class TestUnits:
         # The file provider's docstring promised this and did not keep it:
         # FRED's CSV read from disk gave 0 observations with the default
         # columns and values a hundred times too large, marked observed, with
-        # the columns named.
+        # the columns named. Naming the columns now means stating the units.
         downloaded = fred.fetch_series("SOFR")
         path = tmp_path / "SOFR.csv"
         path.write_text(CSV.format(series="SOFR"), encoding="utf-8")
+        named = {"value_column": "SOFR", "date_column": "observation_date"}
         for loaded in (
             load_series_csv(path, "SOFR"),
-            load_series_csv(path, "SOFR", value_column="SOFR", date_column="observation_date"),
+            load_series_csv(path, "SOFR", percent=True, **named),
         ):
             assert loaded.dates == downloaded.dates
             assert loaded.values == downloaded.values
         assert downloaded.values == (pytest.approx(0.0431), pytest.approx(0.0432))
+
+    def test_a_byte_order_mark_reads_the_same_off_the_wire_and_off_disk(
+        self, monkeypatch, tmp_path
+    ):
+        # Whether FRED sends one is not known here. If it does, the download
+        # and the saved file must still agree: the first version refused the
+        # download (its header read "﻿observation_date") and loaded the
+        # file, because only the file was decoded with utf-8-sig.
+        payload = "﻿observation_date,SOFR\n2026-01-13,4.31\n"
+        _serve(monkeypatch, payload)
+        path = tmp_path / "SOFR.csv"
+        path.write_text(payload, encoding="utf-8")
+        downloaded = fred.fetch_series("SOFR")
+        assert downloaded.values == load_series_csv(path, "SOFR").values
+        assert downloaded.values == (pytest.approx(0.0431),)
 
     def test_the_sofr_index_is_an_index_not_a_percentage(self, monkeypatch):
         # FRED publishes SOFRINDEX as an index level (2018-04-02 = 1), not in
