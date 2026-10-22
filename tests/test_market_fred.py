@@ -12,10 +12,15 @@ from datetime import date
 
 import pytest
 
+from rates_engine.core.errors import InsufficientDataError, UnsupportedConventionError
 from rates_engine.core.evidence import DataQuality
 from rates_engine.market.providers import fred
+from rates_engine.market.providers.file import load_series_csv
 
-CSV = "observation_date,SOFR\n2026-01-13,4.31\n2026-01-14,4.32\n2026-01-15,.\n"
+#: FRED's download layout: ``observation_date`` then a column named after the
+#: series. ``{series}`` is filled with the identifier the stub was asked for,
+#: as FRED itself does.
+CSV = "observation_date,{series}\n2026-01-13,4.31\n2026-01-14,4.32\n2026-01-15,.\n"
 
 
 class _Response(io.StringIO):
@@ -35,10 +40,14 @@ def stub_urlopen(monkeypatch):
 
     def fake(url, timeout=None):
         calls.append(url)
-        return _Response(CSV)
+        return _Response(CSV.format(series=url.rsplit("id=", 1)[1]))
 
     monkeypatch.setattr("urllib.request.urlopen", fake)
     return calls
+
+
+def _serve(monkeypatch, payload: str) -> None:
+    monkeypatch.setattr("urllib.request.urlopen", lambda url, timeout=None: _Response(payload))
 
 
 def test_it_fetches_and_records_provenance(stub_urlopen):
@@ -59,6 +68,80 @@ def test_percent_quotes_become_decimals(stub_urlopen):
 def test_a_non_publication_marker_is_skipped_not_read_as_zero(stub_urlopen):
     series = fred.fetch_series("SOFR")
     assert series.get(date(2026, 1, 15)) is None
+
+
+def test_every_spelling_of_missing_is_skipped(monkeypatch):
+    # The same markers as the file provider, so that a download and a file
+    # cannot disagree about which days exist.
+    _serve(
+        monkeypatch,
+        "observation_date,SOFR\n2026-01-12,4.31\n2026-01-13,nan\n2026-01-14,NaN\n"
+        "2026-01-15,N/A\n2026-01-16,na\n2026-01-20,4.33\n",
+    )
+    series = fred.fetch_series("SOFR")
+    assert series.dates == (date(2026, 1, 12), date(2026, 1, 20))
+
+
+class TestUnits:
+    """A download and the same bytes saved to disk are the same series."""
+
+    def test_a_saved_download_reads_the_same_as_the_download(self, stub_urlopen, tmp_path):
+        # The file provider's docstring promised this and did not keep it:
+        # FRED's CSV read from disk gave 0 observations with the default
+        # columns and values a hundred times too large, marked observed, with
+        # the columns named. Naming the columns now means stating the units.
+        downloaded = fred.fetch_series("SOFR")
+        path = tmp_path / "SOFR.csv"
+        path.write_text(CSV.format(series="SOFR"), encoding="utf-8")
+        named = {"value_column": "SOFR", "date_column": "observation_date"}
+        for loaded in (
+            load_series_csv(path, "SOFR"),
+            load_series_csv(path, "SOFR", percent=True, **named),
+        ):
+            assert loaded.dates == downloaded.dates
+            assert loaded.values == downloaded.values
+        assert downloaded.values == (pytest.approx(0.0431), pytest.approx(0.0432))
+
+    def test_a_byte_order_mark_reads_the_same_off_the_wire_and_off_disk(
+        self, monkeypatch, tmp_path
+    ):
+        # Whether FRED sends one is not known here. If it does, the download
+        # and the saved file must still agree: the first version refused the
+        # download (its header read "﻿observation_date") and loaded the
+        # file, because only the file was decoded with utf-8-sig.
+        payload = "﻿observation_date,SOFR\n2026-01-13,4.31\n"
+        _serve(monkeypatch, payload)
+        path = tmp_path / "SOFR.csv"
+        path.write_text(payload, encoding="utf-8")
+        downloaded = fred.fetch_series("SOFR")
+        assert downloaded.values == load_series_csv(path, "SOFR").values
+        assert downloaded.values == (pytest.approx(0.0431),)
+
+    def test_the_sofr_index_is_an_index_not_a_percentage(self, monkeypatch):
+        # FRED publishes SOFRINDEX as an index level (2018-04-02 = 1), not in
+        # percent; dividing it by 100 like the rates made it 1% of itself.
+        _serve(monkeypatch, "observation_date,SOFRINDEX\n2026-01-13,1.23456789\n")
+        assert fred.fetch_series("SOFRINDEX").values == (1.23456789,)
+
+    def test_a_series_of_unknown_units_is_refused_until_they_are_stated(self, monkeypatch):
+        # DEXMXUS is pesos per dollar. Dividing every FRED series by 100 read
+        # 17.5 as 0.175, marked observed.
+        _serve(monkeypatch, "observation_date,DEXMXUS\n2026-01-13,17.5\n")
+        with pytest.raises(UnsupportedConventionError) as excinfo:
+            fred.fetch_series("DEXMXUS")
+        assert "percent=" in str(excinfo.value)
+        assert fred.fetch_series("DEXMXUS", percent=False).values == (17.5,)
+        assert fred.fetch_series("DEXMXUS", percent=True).values == (pytest.approx(0.175),)
+
+    def test_an_empty_response_refuses_rather_than_returning_nothing(self, monkeypatch):
+        _serve(monkeypatch, "observation_date,SOFR\n2026-01-13,.\n")
+        with pytest.raises(InsufficientDataError, match="SOFR"):
+            fred.fetch_series("SOFR")
+
+    def test_a_response_for_another_series_refuses(self, monkeypatch):
+        _serve(monkeypatch, "observation_date,DGS2\n2026-01-13,4.05\n")
+        with pytest.raises(ValueError, match="DGS2"):
+            fred.fetch_series("SOFR")
 
 
 def test_it_calls_the_documented_endpoint(stub_urlopen):

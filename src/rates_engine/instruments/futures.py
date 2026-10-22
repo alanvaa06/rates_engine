@@ -119,7 +119,10 @@ class SOFRFuture1M:
             ``rate`` is the settlement rate as a decimal.
 
         Raises:
-            MissingFixingError: A business day in the month has no fixing.
+            MissingFixingError: A business day in the month has no fixing;
+                the month opens on a non-business day and the business day
+                before it has none (an older fixing is never carried in);
+                or the month runs past the snapshot's ``as_of``.
         """
         return snapshot.averaged(series_id, self.accrual_start, self.accrual_end)
 
@@ -134,7 +137,10 @@ class SOFRFuture1M:
             The price in the contract's own quotation, e.g. ``94.69``.
 
         Raises:
-            MissingFixingError: A business day in the month has no fixing.
+            MissingFixingError: A business day in the month has no fixing;
+                the month opens on a non-business day and the business day
+                before it has none (an older fixing is never carried in);
+                or the month runs past the snapshot's ``as_of``.
         """
         return 100.0 - 100.0 * self.settlement_rate(snapshot, series_id=series_id).rate
 
@@ -203,7 +209,10 @@ class SOFRFuture3M:
             The :class:`~rates_engine.market.snapshot.CompoundedRate`.
 
         Raises:
-            MissingFixingError: A business day in the period has no fixing.
+            MissingFixingError: A business day in the period has no fixing;
+                the period opens on a non-business day (Juneteenth 2030 is an
+                IMM Wednesday) and the business day before it has none; or
+                the period runs past the snapshot's ``as_of``.
         """
         return snapshot.compounded(series_id, self.imm_start, self.imm_end)
 
@@ -218,7 +227,10 @@ class SOFRFuture3M:
             The price in the contract's own quotation.
 
         Raises:
-            MissingFixingError: A business day in the period has no fixing.
+            MissingFixingError: A business day in the period has no fixing;
+                the period opens on a non-business day (Juneteenth 2030 is an
+                IMM Wednesday) and the business day before it has none; or
+                the period runs past the snapshot's ``as_of``.
         """
         return 100.0 - 100.0 * self.settlement_rate(snapshot, series_id=series_id).rate
 

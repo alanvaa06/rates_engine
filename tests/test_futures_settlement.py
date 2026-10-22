@@ -8,6 +8,13 @@ independent re-implementation of each formula, written from the definition
 rather than from the code under test. That catches a wrong formula. It cannot
 catch the two of us being wrong the same way, which is exactly the gap the
 skipped test fills, and the reason it is skipped rather than replaced.
+
+That gap is not hypothetical. Until this file pinned a QuantLib value, the
+SR3 re-implementation here compounded ``1 + r/360`` once per calendar day,
+exactly as the code did, so a weekend entered as ``(1 + r/360)**3`` rather
+than CME's ``1 + 3r/360`` and both sides agreed on a rate 0.02-0.04 bp too
+high. The constant from QuantLib below is the third party that breaks the
+tie until CME's own settlements are supplied.
 """
 
 from __future__ import annotations
@@ -19,6 +26,8 @@ from conftest import require_published
 
 from rates_engine.conventions.calendar import SIFMA_US
 from rates_engine.conventions.schedule import imm_date, next_imm_on_or_after
+from rates_engine.core.errors import MissingFixingError
+from rates_engine.core.evidence import DataQuality, Provenance
 from rates_engine.instruments.futures import (
     SR1_CONTRACT_TENOR,
     SR1_NOTIONAL,
@@ -28,7 +37,79 @@ from rates_engine.instruments.futures import (
     SOFRFuture3M,
 )
 from rates_engine.market.providers.file import load_series_csv
-from rates_engine.market.snapshot import MarketSnapshot
+from rates_engine.market.snapshot import MarketSnapshot, Series
+
+
+def _cme_sr3_rate(snapshot, start: date, end: date) -> float:
+    """SR3's settlement rate, written from CME's rule rather than from the code.
+
+    ``R = [prod_i (1 + r_i * d_i / 360) - 1] * 360 / D``: the product runs
+    over the publication days ``i`` of the reference quarter, ``r_i`` is the
+    SOFR published for day ``i`` and ``d_i`` the number of calendar days it
+    applies to. A Friday's rate covers Friday, Saturday and Sunday, so it
+    enters once with ``d_i = 3`` -- not three times with ``d_i = 1``, which is
+    the error this function exists to catch. Days before the quarter's first
+    publication day carry the rate of the publication day before it.
+    """
+    series = snapshot.require("SOFR")
+    calendar_days = [start + timedelta(days=k) for k in range((end - start).days)]
+    publication = [d for d in calendar_days if SIFMA_US.is_business_day(d)]
+    weighted: list[tuple[float, int]] = []
+    if publication[0] != start:
+        carried = series.get(SIFMA_US.previous_business_day(start))
+        assert carried is not None, "fixture is missing the day before the quarter"
+        weighted.append((carried, (publication[0] - start).days))
+    for k, day in enumerate(publication):
+        following = publication[k + 1] if k + 1 < len(publication) else end
+        rate = series.get(day)
+        assert rate is not None, f"fixture is missing {day}"
+        weighted.append((rate, (following - day).days))
+    assert sum(days for _, days in weighted) == (end - start).days
+    factor = 1.0
+    for rate, days in weighted:
+        factor *= 1.0 + rate * days / 360.0
+    return (factor - 1.0) * 360.0 / (end - start).days
+
+
+def _synthetic_rate(day: date) -> float:
+    """4.00% plus 0 to 12 bp by the day's ordinal: varied, and rebuildable anywhere."""
+    return 0.0400 + 0.0001 * (day.toordinal() % 13)
+
+
+#: The window the synthetic fixings cover, and the only holidays in it that
+#: fall on a weekday. QuantLib's ``UnitedStates(SOFR)`` calendar and
+#: ``SIFMA_US`` agree on every day from 2026-08-01 to 2027-01-31, which is
+#: why the window was chosen; the holidays are pinned so that a calendar
+#: change shows up as itself rather than as a mysterious rate mismatch.
+SYNTHETIC_WINDOW = (date(2026, 8, 1), date(2027, 1, 31))
+SYNTHETIC_SR3_HOLIDAYS = [date(2026, 10, 12), date(2026, 11, 11), date(2026, 11, 26)]
+
+#: QuantLib 1.44: ``ql.OvernightIndexedCoupon(payment=end, nominal=1.0,
+#: start=2026-09-16, end=2026-12-16, ql.Sofr())`` with ``.rate()`` read
+#: after adding :func:`_synthetic_rate` as the fixing of every
+#: ``ql.UnitedStates(ql.UnitedStates.SOFR)`` business day in
+#: :data:`SYNTHETIC_WINDOW`. Computed in a scratch environment and pasted
+#: here; QuantLib is not a dependency of the package or of this suite. The
+#: per-calendar-day product the package used before gives
+#: 0.04080118534023062 on the same fixings, 0.0224 bp higher.
+QUANTLIB_SR3_SEP_2026 = 0.040798949343134126
+
+
+@pytest.fixture(scope="module")
+def synthetic_snapshot() -> MarketSnapshot:
+    first, last = SYNTHETIC_WINDOW
+    days = [
+        first + timedelta(days=k)
+        for k in range((last - first).days + 1)
+        if SIFMA_US.is_business_day(first + timedelta(days=k))
+    ]
+    series = Series(
+        "SOFR",
+        tuple(days),
+        tuple(_synthetic_rate(d) for d in days),
+        Provenance(source="test", series_id="SOFR", data_quality=DataQuality.SYNTHETIC),
+    )
+    return MarketSnapshot(as_of=last, series={"SOFR": series})
 
 
 def _daily_rates(snapshot, start: date, end: date) -> list[float]:
@@ -75,6 +156,29 @@ class TestSR1Settlement:
         # it is larger than the 0.1 bp tolerance the CME comparison holds.
         assert compounded > averaged
 
+    def test_a_month_opening_on_a_weekend_refuses_a_stale_carried_fixing(self, fixtures_dir):
+        # August 2026 opens on a Saturday, so its first two days carry the
+        # rate of Friday 31 July. With July missing, the last fixing on file
+        # is 30 June's, and the code carried it in without a word -- 1.46 bp
+        # on the contract in the review's example.
+        full = load_series_csv(fixtures_dir / "sofr_fixings.csv", "SOFR")
+        kept = [
+            (d, v)
+            for d, v in zip(full.dates, full.values, strict=True)
+            if not date(2026, 7, 1) <= d <= date(2026, 7, 31)
+        ]
+        snapshot = MarketSnapshot(
+            as_of=kept[-1][0],
+            series={
+                "SOFR": Series(
+                    "SOFR", tuple(d for d, _ in kept), tuple(v for _, v in kept), full.provenance
+                )
+            },
+        )
+        assert date(2026, 8, 1).weekday() == 5
+        with pytest.raises(MissingFixingError, match="2026-07-31"):
+            SOFRFuture1M(date(2026, 8, 1)).settlement_rate(snapshot)
+
     def test_contract_month_spans_the_calendar_month(self):
         contract = SOFRFuture1M(date(2026, 2, 14))
         assert contract.accrual_start == date(2026, 2, 1)
@@ -105,13 +209,43 @@ class TestSR3Settlement:
         for _ in range(3):
             following = next_imm_on_or_after(period + timedelta(days=1))
             contract = SOFRFuture3M(period, following)
-            rates = _daily_rates(snapshot, period, following)
-            factor = 1.0
-            for rate in rates:
-                factor *= 1.0 + rate / 360.0
-            expected = (factor - 1.0) / ((following - period).days / 360.0)
+            expected = _cme_sr3_rate(snapshot, period, following)
             assert contract.settlement_rate(snapshot).rate == pytest.approx(expected, rel=1e-14)
             period = following
+
+    def test_matches_quantlib_overnight_indexed_coupon(self, synthetic_snapshot):
+        contract = SOFRFuture3M.from_contract_month(2026, 9)
+        assert (contract.imm_start, contract.imm_end) == (date(2026, 9, 16), date(2026, 12, 16))
+        weekday_holidays = [
+            contract.imm_start + timedelta(days=k)
+            for k in range((contract.imm_end - contract.imm_start).days)
+            if (contract.imm_start + timedelta(days=k)).weekday() < 5
+            and not SIFMA_US.is_business_day(contract.imm_start + timedelta(days=k))
+        ]
+        assert weekday_holidays == SYNTHETIC_SR3_HOLIDAYS, (
+            "the QuantLib constant was computed on these holidays; recompute it if they change"
+        )
+        rate = contract.settlement_rate(synthetic_snapshot).rate
+        # Rounding in a product of some sixty factors, evaluated in a
+        # different order, is a few times 1e-14; the error this guards
+        # against is 2.2e-6.
+        assert rate == pytest.approx(QUANTLIB_SR3_SEP_2026, abs=1e-13)
+        assert rate == pytest.approx(
+            _cme_sr3_rate(synthetic_snapshot, contract.imm_start, contract.imm_end), rel=1e-14
+        )
+
+    def test_a_long_weekend_is_one_simple_period_at_friday_s_rate(self, synthetic_snapshot):
+        # Friday 9 October 2026 to Tuesday 13 October, Columbus Day between:
+        # one rate for four days is 1 + 4r/360, so the period rate is r
+        # itself. Compounding the four days separately gives r + 0.068 bp.
+        # QuantLib's OvernightIndexedCoupon over the same dates returns
+        # 0.04030000000000422; the 4e-15 is the rounding of 1 + x - 1.
+        friday = date(2026, 10, 9)
+        assert _synthetic_rate(friday) == pytest.approx(0.0403, abs=1e-15)
+        result = synthetic_snapshot.compounded("SOFR", friday, date(2026, 10, 13))
+        assert result.rate == pytest.approx(_synthetic_rate(friday), abs=1e-14)
+        assert result.business_days == 1
+        assert result.repeated_days == 3
 
     def test_reference_period_runs_between_third_wednesdays(self):
         contract = SOFRFuture3M.from_contract_month(2026, 3)
