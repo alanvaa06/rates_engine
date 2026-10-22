@@ -869,14 +869,24 @@ class TestTheMarketIsCheckedBeforeItIsUsed:
         with pytest.raises(VolUnitsError, match="lognormal"):
             self._quote(volatility=11.5)
 
-    def test_a_volatility_below_the_band_refuses(self):
-        """0.0115 is 115 bp, a normal-vol number in the wrong place."""
+    def test_a_percent_divided_twice_refuses(self):
+        """11.5% arriving as 0.00115, below MIN_PLAUSIBLE_FX_VOLATILITY."""
         from rates_engine.core.errors import VolUnitsError
 
-        with pytest.raises(VolUnitsError):
-            self._quote(volatility=0.0115)
+        with pytest.raises(VolUnitsError, match="0.2%"):
+            self._quote(volatility=0.00115)
 
-    @pytest.mark.parametrize("bad", [-0.115, float("nan"), float("inf")])
+    @pytest.mark.parametrize("low", [0.03, 0.0115, 0.006])
+    def test_a_low_but_real_fx_volatility_is_accepted(self, low):
+        """A quiet G10 pair trades near 3% and a pegged one below 1%. The
+        first version applied the 5% rates floor here and refused them
+        (Alan Vazquez on PR #13, finding 5)."""
+        from rates_engine.hedging.fx_structures import MIN_PLAUSIBLE_FX_VOLATILITY
+
+        assert MIN_PLAUSIBLE_FX_VOLATILITY == 0.002
+        assert self._quote(volatility=low).vol_at(18.8) == low
+
+    @pytest.mark.parametrize("bad", [0.0, -0.115, float("nan"), float("inf")])
     def test_a_volatility_that_is_not_one_refuses(self, bad):
         with pytest.raises(ValueError, match="volatility"):
             self._quote(volatility=bad)
@@ -899,8 +909,32 @@ class TestTheMarketIsCheckedBeforeItIsUsed:
         with pytest.raises(ImplausibleInputError, match=key):
             self._quote(**{key: bad})
 
-    def test_zero_volatility_is_still_the_degenerate_case(self):
-        assert self._quote(volatility=0.0).price(18.0, OptionKind.CALL) > 0.0
+    def test_the_escape_is_an_unchecked_volatility(self):
+        """Zero, or any market outside the band, is passed on purpose as a
+        `Volatility` built with `unchecked`. At zero the call is worth its
+        discounted intrinsic value on the forward."""
+        from rates_engine.volatility.units import Volatility, VolUnits
+
+        zero = self._quote(volatility=Volatility.unchecked(0.0, VolUnits.LOGNORMAL_DECIMAL))
+        assert zero.price(18.0, OptionKind.CALL) == pytest.approx(
+            math.exp(-0.095 * 0.25) * (zero.forward - 18.0)
+        )
+        huge = self._quote(volatility=Volatility.unchecked(6.0, VolUnits.LOGNORMAL_DECIMAL))
+        assert huge.vol_at(18.8) == 6.0
+
+    def test_a_volatility_in_percent_units_is_read_as_a_decimal(self):
+        from rates_engine.volatility.units import Volatility
+
+        quote = self._quote(volatility=Volatility.lognormal_percent(11.5))
+        assert quote.vol_at(18.8) == pytest.approx(0.115)
+        assert quote.to_dict()["volatility"] == pytest.approx(0.115)
+
+    def test_a_normal_volatility_refuses(self):
+        from rates_engine.core.errors import VolUnitsError
+        from rates_engine.volatility.units import Volatility
+
+        with pytest.raises(VolUnitsError):
+            self._quote(volatility=Volatility.normal_bp(80.0))
 
     def test_a_callable_volatility_is_the_escape_hatch_and_is_not_banded(self):
         assert self._quote(volatility=lambda k: 0.115).price(18.8, OptionKind.CALL) > 0.0
@@ -919,3 +953,63 @@ class TestTheMarketIsCheckedBeforeItIsUsed:
         with pytest.raises(ValueError, match="positive size"):
             Exposure(float("nan"), ExposureDirection.PAYABLE, SETTLEMENT, USDMXN)
 
+
+class TestTheSmileHasToSitOnTheLegsForward:
+    """Alan Vazquez on PR #13, finding 6: a `VannaVolgaSmile` passed as the
+    volatility keeps its own rates, so with a basis on the quote its
+    at-the-money and delta pillars sat on a forward about one percent of
+    strike from the legs' at -100 bp, and nothing said so. A smile that
+    reports its forward is now held to the quote's; one that does not is
+    marked."""
+
+    @staticmethod
+    def _smile(r_domestic):
+        from rates_engine.models.fx_delta import DeltaBasis, DeltaConvention, PremiumAdjustment
+        from rates_engine.volatility.fx_smile import ATMConvention, SmileQuotes, VannaVolgaSmile
+
+        return VannaVolgaSmile(
+            spot=18.50, expiry=0.25, r_domestic=r_domestic, r_foreign=0.0420,
+            quotes=SmileQuotes(atm=0.1150, risk_reversal_25=0.0180, butterfly_25=0.0035),
+            delta_convention=DeltaConvention(DeltaBasis.SPOT, PremiumAdjustment.UNADJUSTED),
+            atm_convention=ATMConvention.DELTA_NEUTRAL_STRADDLE,
+        )
+
+    def test_a_smile_without_the_basis_refuses(self):
+        with pytest.raises(ValueError, match="with the basis on it"):
+            StructureQuote(18.50, 0.25, 0.0950, 0.0420, self._smile(0.0950), basis_bp=-100.0)
+
+    def test_a_smile_on_the_basis_adjusted_rate_is_accepted(self):
+        quote = StructureQuote(18.50, 0.25, 0.0950, 0.0420, self._smile(0.0850), basis_bp=-100.0)
+        assert quote.volatility.forward == pytest.approx(quote.forward, rel=1e-14)
+        compare_structures(_exposure(), quote, otm_offset=0.02, spread_offset=0.04)
+
+    def test_a_smile_on_another_expiry_refuses(self):
+        from dataclasses import replace
+
+        with pytest.raises(ValueError, match="expiry"):
+            StructureQuote(18.50, 0.25, 0.0950, 0.0420, replace(self._smile(0.0950), expiry=0.5))
+
+    def test_a_smile_that_cannot_say_its_forward_is_marked(self):
+        from rates_engine.core.evidence import DataQuality
+
+        class StandIn:
+            def volatility_at(self, strike):
+                from rates_engine.core.evidence import Evidence
+
+                class Reading:
+                    volatility = 0.115
+                    evidence = Evidence(produced_by="test.stand_in")
+
+                return Reading()
+
+        result = compare_structures(_exposure(), StructureQuote(18.50, 0.25, 0.0950, 0.0420, StandIn()))
+        codes = set()
+
+        def walk(evidence):
+            codes.update(w.code for w in evidence.warnings)
+            for source in evidence.sources:
+                walk(source)
+
+        walk(result.evidence)
+        assert "smile_forward_unverified" in codes
+        assert result.evidence.worst_quality is DataQuality.ASSUMED

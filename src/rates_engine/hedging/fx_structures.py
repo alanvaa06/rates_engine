@@ -38,7 +38,7 @@ from typing import Any, Protocol, runtime_checkable
 from rates_engine.conventions.currency_pair import CurrencyPair
 from rates_engine.conventions.option_kind import OptionKind
 from rates_engine.core.errors import ImplausibleInputError, VolUnitsError
-from rates_engine.core.evidence import Evidence
+from rates_engine.core.evidence import DataQuality, Degradation, Evidence
 from rates_engine.core.results import EngineResult
 from rates_engine.models import garman_kohlhagen as gk
 from rates_engine.pricing.fx_forward import (
@@ -46,10 +46,11 @@ from rates_engine.pricing.fx_forward import (
     require_plausible_basis,
     require_plausible_rate,
 )
-from rates_engine.volatility.units import Volatility, VolUnits
+from rates_engine.volatility.units import LOGNORMAL_MAX_DECIMAL, Volatility
 
 __all__ = [
     "STRUCTURE_NAMES",
+    "MIN_PLAUSIBLE_FX_VOLATILITY",
     "ExposureDirection",
     "Exposure",
     "StructureQuote",
@@ -184,26 +185,62 @@ class ReadableSmile(Protocol):
         ...
 
 
-def _check_volatility(value: float) -> None:
-    """A single volatility, held to the lognormal band :class:`Volatility` applies.
+MIN_PLAUSIBLE_FX_VOLATILITY = 0.002
+"""Below this, as a decimal a year, a single FX volatility is refused.
 
-    FX volatility is lognormal and quoted in percent, so a decimal outside
-    ``[5%, 500%]`` is almost certainly a unit slip: 11.5 for 11.5%, or a
-    normal-vol number such as 0.0115. Zero is allowed, as the degenerate
-    case. A smile or a callable is not checked here: a smile carries its own
-    evidence, and a callable is the escape hatch.
+0.2%. FX volatility has no normal-volatility convention to be confused with,
+so the 5% lognormal floor :class:`~rates_engine.volatility.units.Volatility`
+applies to rates — which exists to catch a basis-point normal vol passed as
+a lognormal one — would refuse real markets here: a quiet G10 pair trades
+near 3%, and a pegged one below 1%. What a floor can still catch is a
+percent figure divided by one hundred twice, 11.5% arriving as 0.00115.
+The ceiling is the lognormal one, 500%, which catches 11.5 for 11.5%. Both
+are plausibility bands, not measurements; a market outside them is passed
+as ``Volatility.unchecked(value, VolUnits.LOGNORMAL_DECIMAL)``.
+"""
+
+
+def _check_volatility(value: float) -> None:
+    """A single float volatility, held to the FX band.
+
+    Positive, finite, and inside ``[MIN_PLAUSIBLE_FX_VOLATILITY, 500%]``.
+    Zero is refused: it is no market, and the hedge comparison priced every
+    option at its intrinsic value on it. A smile, a callable and a
+    :class:`~rates_engine.volatility.units.Volatility` are not checked here:
+    the smile carries its own evidence, the callable is an escape hatch, and
+    a ``Volatility`` has had its own band applied — or was built with
+    ``Volatility.unchecked`` on purpose.
     """
-    if not 0.0 <= value < math.inf:
+    if not 0.0 < value < math.inf:
         raise ValueError(
-            f"volatility is a lognormal volatility as a decimal, zero or more; got "
-            f"{value!r}"
+            f"volatility is a lognormal FX volatility as a positive decimal; got "
+            f"{value!r}. For the deterministic limit, or any market outside the band, "
+            "pass Volatility.unchecked(value, VolUnits.LOGNORMAL_DECIMAL)."
         )
-    try:
-        Volatility(value, VolUnits.LOGNORMAL_DECIMAL)
-    except VolUnitsError as exc:
+    if not MIN_PLAUSIBLE_FX_VOLATILITY <= value <= LOGNORMAL_MAX_DECIMAL:
         raise VolUnitsError(
-            f"{exc} An FX volatility is a lognormal decimal: 0.115 for 11.5%."
-        ) from exc
+            f"an FX volatility of {value!r} is {value:.4%}, outside the plausible "
+            f"{MIN_PLAUSIBLE_FX_VOLATILITY:.1%} to {LOGNORMAL_MAX_DECIMAL:.0%} band. An FX "
+            "volatility is a lognormal decimal: 0.115 for 11.5%, not 11.5 and not "
+            "0.00115. A market genuinely outside the band is passed as "
+            "Volatility.unchecked(value, VolUnits.LOGNORMAL_DECIMAL)."
+        )
+
+
+_UNVERIFIED_SMILE = Evidence(
+    produced_by="hedging_structures.smile_check",
+    warnings=(
+        Degradation(
+            code="smile_forward_unverified",
+            message=(
+                "The smile does not report the forward it was built on, so it could not "
+                "be checked against the forward the legs are struck on, basis included. "
+                "A smile on another forward reads each leg from the wrong part of it."
+            ),
+            data_quality=DataQuality.ASSUMED,
+        ),
+    ),
+)
 
 
 @dataclass(frozen=True)
@@ -221,15 +258,23 @@ class StructureQuote:
         r_domestic: Quote currency rate, continuously compounded, as a
             decimal a year on the same time basis as ``expiry``.
         r_foreign: Base currency rate, the same convention.
-        volatility: One of three things. A ``float`` is a single lognormal
-            volatility for every leg. A :class:`ReadableSmile` — anything
-            with ``volatility_at(strike)`` returning a reading, which is
-            what :class:`~rates_engine.volatility.fx_smile.VannaVolgaSmile` is —
+        volatility: One of four things. A ``float`` is a single lognormal
+            volatility for every leg, as a decimal, held to the FX band
+            (:data:`MIN_PLAUSIBLE_FX_VOLATILITY` to 500%; zero refused). A
+            lognormal :class:`~rates_engine.volatility.units.Volatility` is
+            the same with its own units, and is how a market outside the
+            band, or the zero-volatility limit, is passed:
+            ``Volatility.unchecked(value, VolUnits.LOGNORMAL_DECIMAL)``. A
+            :class:`ReadableSmile` — anything with ``volatility_at(strike)``
+            returning a reading, which is what
+            :class:`~rates_engine.volatility.fx_smile.VannaVolgaSmile` is —
             prices each leg on its own point of the smile *and* carries
             that reading's evidence, which is the honest way to price a
-            collar. A bare callable returning a float also works and is the
-            escape hatch, but its evidence cannot be collected because it
-            has none to give; the payload says which of the three was used.
+            collar; it has to be built on the forward the legs are struck
+            on, basis included (see :meth:`__post_init__`). A bare callable
+            returning a float also works and is the escape hatch, but its
+            evidence cannot be collected because it has none to give; the
+            payload says which was used.
         evidence: Evidence of where the rates and the spot came from — the
             curves, typically. Without it a structure priced on an MXN curve
             does not inherit that curve's ASSUMED quality, which two places
@@ -248,11 +293,28 @@ class StructureQuote:
     expiry: float
     r_domestic: float
     r_foreign: float
-    volatility: float | ReadableSmile | Callable[[float], float]
+    volatility: float | Volatility | ReadableSmile | Callable[[float], float]
     evidence: tuple[Evidence, ...] = ()
     basis_bp: float = 0.0
 
     def __post_init__(self) -> None:
+        """Refuse a market no quote produces, and a smile on another forward.
+
+        A smile that reports its ``forward`` (and ``expiry``) has to match
+        this quote's, basis included: its at-the-money and delta pillars are
+        placed on its own forward, and a smile built without the basis read
+        every leg about one percent of strike away from the strike priced at
+        -100 bp. A smile that reports no forward cannot be checked, and its
+        readings carry a ``smile_forward_unverified`` degradation instead.
+
+        Raises:
+            ValueError: A non-positive or non-finite spot, expiry or float
+                volatility, a normal :class:`Volatility`, or a smile on a
+                different forward or expiry.
+            VolUnitsError: A float volatility outside the FX band, or a
+                normal-units :class:`Volatility`.
+            ImplausibleInputError: A rate or the basis outside its band.
+        """
         # Every number here used to be priced whatever it was: a volatility
         # typed in percent, a negative one, a settlement in the past, a rate
         # typed in percent (REVISION risk-app/r14_fx_inputs.py).
@@ -268,8 +330,29 @@ class StructureQuote:
         require_plausible_rate(self.r_foreign, "r_foreign")
         require_plausible_basis(self.basis_bp)
         source = self.volatility
-        if not isinstance(source, ReadableSmile) and not callable(source):
+        if isinstance(source, Volatility):
+            source.as_lognormal_decimal()  # a normal volatility raises VolUnitsError
+        elif isinstance(source, ReadableSmile):
+            self._check_smile(source)
+        elif not callable(source):
             _check_volatility(float(source))
+
+    def _check_smile(self, smile: ReadableSmile) -> None:
+        forward = getattr(smile, "forward", None)
+        if forward is None:
+            return
+        expiry = getattr(smile, "expiry", None)
+        same_forward = math.isclose(float(forward), self.forward, rel_tol=1e-12)
+        same_expiry = expiry is None or math.isclose(float(expiry), self.expiry, rel_tol=1e-12)
+        if not (same_forward and same_expiry):
+            raise ValueError(
+                f"the smile is built on a forward of {float(forward):.6f} (expiry "
+                f"{expiry!r}) and the legs on {self.forward:.6f} (expiry {self.expiry!r}), "
+                "so its at-the-money and delta pillars sit on another forward and every "
+                "leg would read a volatility from the wrong part of it. Build the smile "
+                "with the same spot and expiry and r_domestic = "
+                f"{self.r_domestic_effective!r}, the quote currency rate with the basis on it."
+            )
 
     @property
     def r_domestic_effective(self) -> float:
@@ -281,8 +364,10 @@ class StructureQuote:
         return self.volatility if isinstance(self.volatility, ReadableSmile) else None
 
     def vol_at(self, strike: float) -> float:
-        """The volatility for a leg struck at ``strike``."""
+        """The volatility for a leg struck at ``strike``, as a lognormal decimal."""
         source = self.volatility
+        if isinstance(source, Volatility):
+            return source.as_lognormal_decimal()
         if isinstance(source, ReadableSmile):
             return float(source.volatility_at(strike).volatility)
         if callable(source):
@@ -300,6 +385,8 @@ class StructureQuote:
         """
         collected = list(self.evidence)
         smile = self._smile
+        if smile is not None and getattr(smile, "forward", None) is None:
+            collected.append(_UNVERIFIED_SMILE)
         if smile is not None:
             collected.extend(
                 smile.volatility_at(strike).evidence for strike in dict.fromkeys(strikes)
@@ -347,7 +434,11 @@ class StructureQuote:
                 if self._smile is not None
                 else "callable" if callable(self.volatility) else "single"
             ),
-            "volatility": None if callable(self.volatility) else self.volatility,
+            "volatility": (
+                None
+                if callable(self.volatility) or isinstance(self.volatility, ReadableSmile)
+                else self.vol_at(self.spot)
+            ),
         }
 
 
