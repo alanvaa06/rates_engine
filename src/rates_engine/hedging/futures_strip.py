@@ -6,8 +6,14 @@ and reprice the swap. That is deliberately *not* the key-rate profile in
 :mod:`rates_engine.risk.sensitivities`, which bumps curve nodes instead. The two answer
 different questions — how much of the swap's risk this contract can take, and
 how the swap's risk is distributed along the curve — and they are reported
-under different names for that reason. They do sum to the same parallel DV01,
-and ``test_risk_key_rate.py`` checks that they do.
+under different names for that reason. Each sums to its own parallel, and the
+two parallels are different numbers: the key rates sum to the zero-curve DV01,
+the bucketed deltas to :attr:`HedgeResult.quote_parallel_dv01`, the DV01 to
+every futures quote moving at once. On the README strip that is -21,870.07
+against -21,949.91 USD/bp, 0.37% apart, because a basis point on a quoted
+ACT/360 forward is not a basis point on the continuously compounded zero
+rate (the factor is in :func:`shock_table`). ``test_risk_key_rate.py`` checks
+each identity in its own basis and does not compare the two.
 
 **What the shock table is for.** A futures strip pays linearly in the rate and
 a swap does not, so a hedge that is exact at the money is not exact anywhere
@@ -19,32 +25,78 @@ points of carry the convexity is worth over the life of the hedge.
 
 from __future__ import annotations
 
+import math
+from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 import pandas as pd
 
-from rates_engine.core.errors import IncompleteStripError
-from rates_engine.core.evidence import Evidence
+from rates_engine.conventions.schedule import next_imm_on_or_after
+from rates_engine.core.errors import ConfigurationError, IncompleteStripError
+from rates_engine.core.evidence import DataQuality, Degradation, Evidence
 from rates_engine.core.money import Currency, require_same_currency
 from rates_engine.core.results import EngineResult
 from rates_engine.curves.bootstrap import (
     CalibrationInstrument,
+    FuturesContract,
     FuturesNode,
+    _residual_keys,
     bootstrap_discount_curve,
 )
 from rates_engine.curves.discount import CurveSet
-from rates_engine.instruments.futures import BASIS_POINT, SR3_CONTRACT_TENOR, SR3_NOTIONAL
+from rates_engine.instruments.futures import (
+    BASIS_POINT,
+    SR1_CONTRACT_TENOR,
+    SR1_NOTIONAL,
+    SR3_CONTRACT_TENOR,
+    SR3_NOTIONAL,
+    SOFRFuture1M,
+)
 from rates_engine.pricing.linear import discounted_value
 from rates_engine.pricing.projection import Priceable
 from rates_engine.risk.bumps import shifted as shift_curves
 from rates_engine.risk.sensitivities import dv01
 
-__all__ = ["SR3_DV01", "HedgeResult", "ShockTableResult", "strip_hedge", "shock_table", "DEFAULT_SHOCKS_BP"]
+__all__ = [
+    "SR1_DV01",
+    "SR3_DV01",
+    "HedgeResult",
+    "ShockTableResult",
+    "strip_hedge",
+    "shock_table",
+    "DEFAULT_SHOCKS_BP",
+]
 
 SR3_DV01 = SR3_NOTIONAL * SR3_CONTRACT_TENOR * BASIS_POINT
 """USD 25.00 per basis point, derived from the contract rather than quoted."""
+
+SR1_DV01 = SR1_NOTIONAL * SR1_CONTRACT_TENOR * BASIS_POINT
+"""USD 41.67 per basis point: 5,000,000 x 30/360 x 1bp, derived like :data:`SR3_DV01`.
+
+The notional is assumed rather than read from the CME contract spec (see
+:mod:`rates_engine.instruments.futures`), and a hedge sized with it records a
+degradation that says so.
+"""
+
+_CONTRACT_DV01: dict[FuturesContract, float] = {
+    FuturesContract.SR1: SR1_DV01,
+    FuturesContract.SR3: SR3_DV01,
+}
+_CONTRACT_DV01_DERIVATION: dict[FuturesContract, str] = {
+    FuturesContract.SR1: (
+        f"{SR1_NOTIONAL:,.0f} x 30/360 x 1bp = {SR1_DV01:.2f} USD/bp, on a notional "
+        "assumed rather than read from the CME contract spec"
+    ),
+    FuturesContract.SR3: (
+        f"{SR3_NOTIONAL:,.0f} x {SR3_CONTRACT_TENOR} x 1bp = {SR3_DV01:.2f} USD/bp"
+    ),
+}
+
+_SHORT_PERIOD_DAYS = 35
+"""A period no longer than this reads as a month, for the hint in the assumed-contract degradation."""
 
 DEFAULT_SHOCKS_BP: tuple[float, ...] = (-100.0, -50.0, -25.0, -10.0, 10.0, 25.0, 50.0, 100.0)
 """Shock grid for :func:`shock_table`, symmetric so convexity shows as asymmetry."""
@@ -57,14 +109,23 @@ class HedgeResult(EngineResult):
     Attributes:
         swap: The instrument being hedged.
         curve_set: The base curves the hedge was sized on.
-        contracts: Contract count per futures label, signed. Positive is long.
+        contracts: Contract count per futures contract, signed. Positive is
+            long. Keyed by the contract's label, or by ``label@period-end``
+            where two contracts share a label, so no contract is ever folded
+            into another; every dict below uses the same keys.
         bucketed_delta_by_instrument: The swap's DV01 attributable to each
             futures quote, in USD per basis point. ``bump_basis`` for these is
             ``"instrument_quote"``, not a curve node.
-        total_contracts: Sum of :attr:`contracts`.
+        total_contracts: Sum of :attr:`contracts` when every contract is
+            worth the same per basis point, ``None`` when the strip mixes SR1
+            and SR3: 28.5 SR1 and 299.5 SR3 contracts are not 328 of anything.
+            :attr:`total_contracts_by_contract` has each.
         swap_dv01: The swap's parallel DV01 in USD per basis point.
-        strip_dv01: The strip's DV01 at these contract counts.
-        contract_dv01: USD per basis point for one contract.
+        strip_dv01: The strip's DV01 at these contract counts, each contract
+            at its own tick, in USD per basis point.
+        contract_dv01: USD per basis point for one contract when every
+            contract in the strip is worth the same, ``None`` when the strip
+            mixes SR1 and SR3 and there is no one number to report.
         periods: Reference period of each contract, for the report.
         quote_parallel_dv01: The swap's DV01 to a simultaneous one basis point
             move in every futures quote. This, and not the zero-curve parallel
@@ -74,19 +135,31 @@ class HedgeResult(EngineResult):
             point on an ACT/360 simple forward is not a basis point on a
             continuously compounded zero rate, and because the realised stub
             is not a quote that moves.
+        base_forwards: Each contract's forward on the base curve, as a
+            decimal on ACT/360; the shock table measures every contract's move
+            from it.
+        contract_dv01_by_label: USD per basis point for one contract, per
+            contract, keyed like :attr:`contracts`. An SR1 is worth USD 41.67
+            and an SR3 USD 25.00, and each count was sized at its own.
+        total_contracts_by_contract: Sum of :attr:`contracts` per contract
+            type, ``"SR1"`` and ``"SR3"``, or ``"caller"`` for contracts sized
+            at a ``contract_dv01`` the caller gave for a period that names
+            neither. Signed like :attr:`contracts`.
     """
 
     swap: Priceable
     curve_set: CurveSet
     contracts: dict[str, float]
     bucketed_delta_by_instrument: dict[str, float]
-    total_contracts: float
+    total_contracts: float | None
     swap_dv01: float
     strip_dv01: float
-    contract_dv01: float
+    contract_dv01: float | None
     periods: dict[str, tuple[date, date]]
     quote_parallel_dv01: float
     base_forwards: dict[str, float]
+    contract_dv01_by_label: dict[str, float]
+    total_contracts_by_contract: dict[str, float]
 
     @property
     def hedge_ratio(self) -> float:
@@ -105,6 +178,7 @@ class HedgeResult(EngineResult):
         """Contracts, deltas and the DV01s they were derived from."""
         return {
             "total_contracts": self.total_contracts,
+            "total_contracts_by_contract": dict(self.total_contracts_by_contract),
             "contracts": dict(self.contracts),
             "bucketed_delta_by_instrument": dict(self.bucketed_delta_by_instrument),
             "bump_basis": "instrument_quote",
@@ -122,6 +196,7 @@ class HedgeResult(EngineResult):
             ),
             "strip_dv01": self.strip_dv01,
             "contract_dv01": self.contract_dv01,
+            "contract_dv01_by_label": dict(self.contract_dv01_by_label),
             "hedge_ratio": self.hedge_ratio,
             "periods": {
                 label: [start.isoformat(), end.isoformat()]
@@ -135,7 +210,7 @@ def strip_hedge(
     instruments: tuple[CalibrationInstrument, ...],
     *,
     as_of: date,
-    contract_dv01: float = SR3_DV01,
+    contract_dv01: float | None = None,
     long_end_source: str | None = None,
     require_full_coverage: bool = True,
     swap_start: date | None = None,
@@ -150,7 +225,17 @@ def strip_hedge(
             hedging instruments; the rest still move the curve when one of them
             is bumped, which is why the whole set is required.
         as_of: Valuation date.
-        contract_dv01: USD per basis point for one contract.
+        contract_dv01: USD per basis point for one contract, applied to every
+            contract in the strip. ``None``, the default, sizes each contract
+            at its own tick -- SR1 USD 41.67, SR3 USD 25.00 -- naming the
+            contract from :attr:`FuturesNode.contract
+            <rates_engine.curves.bootstrap.FuturesNode.contract>`, or from
+            the period when that is ``None``: a calendar month is an SR1, an
+            IMM quarter an SR3, and anything else is sized as an SR3, as every
+            contract was before the two were told apart, with a degradation
+            saying so. Pass a number only for a contract that is neither: a
+            number that contradicts a contract the node declares, or one its
+            period names, is refused rather than obeyed.
         long_end_source: Passed through to the bootstrap.
         require_full_coverage: When true, a gap between the swap's span and the
             strip's coverage raises rather than producing a partial hedge that
@@ -166,6 +251,11 @@ def strip_hedge(
         IncompleteStripError: The strip has no contract covering part of the
             swap's span, and ``require_full_coverage`` is set. A missing
             contract is never interpolated from its neighbours.
+        ConfigurationError: Two instruments' keys cannot be told apart even
+            with the node date appended; a node declares a contract its
+            period contradicts (an SR1 on an IMM quarter, an SR3 on a
+            calendar month); or ``contract_dv01`` contradicts a contract that
+            is declared or that the period names.
         ValueError: There are no futures among ``instruments``.
     """
     futures = tuple(i for i in instruments if isinstance(i, FuturesNode))
@@ -178,29 +268,54 @@ def strip_hedge(
     if require_full_coverage:
         _check_coverage(futures, start, end)
 
+    # The bootstrap first: it refuses two instruments pinning one node, which
+    # is what a contract passed twice is, under its own name.
     base = bootstrap_discount_curve(as_of, instruments, long_end_source=long_end_source)
     curve_set = CurveSet(base.curve)
     swap_dv01 = dv01(swap, curve_set, source_evidence=(base.evidence,)).value
 
+    # Every dict below is keyed per contract, not per label. Two futures with
+    # the same label -- the default "future", or "SR3" on every row of a CLI
+    # config -- once shared one entry, so each overwrote the last and the
+    # README strip without labels was sized as a single contract: 101.6
+    # contracts instead of 878, with no error.
+    keys = _contract_keys(instruments, futures)
+    sizes, sizing = _contract_sizes(futures, keys, contract_dv01)
+
     deltas: dict[str, float] = {}
     contracts: dict[str, float] = {}
     periods: dict[str, tuple[date, date]] = {}
-    for contract in futures:
+    for key, contract in zip(keys, futures, strict=True):
         up = _reprice_with_quote_bump(swap, instruments, contract, +BASIS_POINT, as_of, long_end_source)
         down = _reprice_with_quote_bump(swap, instruments, contract, -BASIS_POINT, as_of, long_end_source)
         delta = (down - up) / 2.0
-        deltas[contract.label] = delta
-        contracts[contract.label] = -delta / contract_dv01
-        periods[contract.label] = (contract.start, contract.end)
+        deltas[key] = delta
+        contracts[key] = -delta / sizes[key]
+        periods[key] = (contract.start, contract.end)
 
-    total = sum(contracts.values())
-    strip_dv01 = total * contract_dv01
+    # Summed per tick value, with ``sum`` over each group in contract order,
+    # so that a strip of one contract type is its total times its tick to
+    # the last bit, as it was when there was only one tick.
+    counts_by_size: dict[float, list[float]] = {}
+    for key, count in contracts.items():
+        counts_by_size.setdefault(sizes[key], []).append(count)
+    strip_dv01 = sum(size * sum(counts) for size, counts in counts_by_size.items())
+    distinct = set(sizes.values())
+    single_size = next(iter(distinct)) if len(distinct) == 1 else None
+    # A count of SR1 contracts and a count of SR3 contracts do not add up to
+    # a count of anything, so a mixed strip reports one per contract type and
+    # no single total, as it reports no single contract_dv01.
+    counts_by_contract: dict[str, list[float]] = {}
+    for key, count in contracts.items():
+        counts_by_contract.setdefault(sizing[key]["contract"] or "caller", []).append(count)
+    total_by_contract = {name: sum(counts) for name, counts in counts_by_contract.items()}
+    total = sum(contracts.values()) if single_size is not None else None
     quote_parallel_dv01 = _quote_parallel_dv01(
         swap, instruments, futures, as_of, long_end_source
     )
     base_forwards = {
-        contract.label: base.curve.forward(contract.start, contract.end)
-        for contract in futures
+        key: base.curve.forward(contract.start, contract.end)
+        for key, contract in zip(keys, futures, strict=True)
     }
 
     evidence = Evidence(
@@ -211,10 +326,9 @@ def strip_hedge(
             "bump_shape": "single_quote",
             "bump_bp": 1.0,
             "difference": "central",
-            "contract_dv01": contract_dv01,
-            "contract_dv01_derivation": (
-                f"{SR3_NOTIONAL:,.0f} x {SR3_CONTRACT_TENOR} x 1bp = {SR3_DV01:.2f} USD/bp"
-            ),
+            "contract_dv01": single_size,
+            "contract_dv01_derivation": _derivations(sizing, contract_dv01),
+            "contract_sizing": sizing,
             "futures_count": len(futures),
             "coverage_checked": require_full_coverage,
             "swap_span": [start.isoformat(), end.isoformat()],
@@ -222,11 +336,14 @@ def strip_hedge(
             "bucket_sum": sum(deltas.values()),
             "note": (
                 "Bucketed delta by instrument quote, not a key-rate profile by curve "
-                "node. The two sum to the same parallel DV01 and answer different "
-                "questions; see rates_engine.key_rate_dv01."
+                "node. Each sums to its own parallel: these to quote_parallel_dv01 "
+                "(every futures quote moved at once), the key rates to the zero-curve "
+                "DV01. The two parallels are different derivatives, about 0.4% apart "
+                "at 4%, and answer different questions; see rates_engine.key_rate_dv01."
             ),
         },
         sources=(base.evidence,),
+        warnings=_sizing_warnings(futures, keys, sizing),
     )
     return HedgeResult(
         evidence=evidence,
@@ -237,10 +354,12 @@ def strip_hedge(
         total_contracts=total,
         swap_dv01=swap_dv01,
         strip_dv01=strip_dv01,
-        contract_dv01=contract_dv01,
+        contract_dv01=single_size,
         periods=periods,
         quote_parallel_dv01=quote_parallel_dv01,
         base_forwards=base_forwards,
+        contract_dv01_by_label=sizes,
+        total_contracts_by_contract=total_by_contract,
     )
 
 
@@ -272,6 +391,202 @@ def _quote_parallel_dv01(
     return (repriced(-BASIS_POINT) - repriced(+BASIS_POINT)) / 2.0
 
 
+def _contract_keys(
+    instruments: tuple[CalibrationInstrument, ...], futures: tuple[FuturesNode, ...]
+) -> list[str]:
+    """Each contract's key, by the rule the bootstrap keys its residuals with.
+
+    The rule is the bootstrap's own, imported rather than restated: a label
+    that appears once among *all* the calibration instruments is its own key,
+    and a repeated one gets its node date appended, ``"future@2026-06-17"``.
+    Counting repeats among the futures alone keyed a future that shares its
+    label with a swap differently from the bootstrap, so the hedge's keys
+    could not look up the curve's residuals. The bootstrap has already refused
+    two instruments pinning one node, so the suffix separates any two.
+
+    Raises:
+        ConfigurationError: A key made this way equals another instrument's,
+            e.g. one labelled ``"X@2026-06-17"`` and two labelled ``"X"``.
+            Picking one would merge two contracts again.
+    """
+    keys = _residual_keys(instruments)
+    clashes = sorted(key for key, count in Counter(keys).items() if count > 1)
+    if clashes:
+        raise ConfigurationError(
+            f"instrument keys {clashes} still collide after appending the node date to "
+            "repeated labels; give these instruments distinct labels"
+        )
+    by_identity = {id(instrument): key for instrument, key in zip(instruments, keys, strict=True)}
+    return [by_identity[id(contract)] for contract in futures]
+
+
+def _period_contract(contract: FuturesNode) -> FuturesContract | None:
+    """The future whose reference period this node spans, or ``None``.
+
+    SR1 references a calendar month and SR3 runs from one IMM date to the
+    next, so the two periods never coincide: no IMM date is the first of a
+    month. Both are read off the instruments' own definitions rather than
+    restated here.
+    """
+    month = SOFRFuture1M(contract.start)
+    if (month.accrual_start, month.accrual_end) == (contract.start, contract.end):
+        return FuturesContract.SR1
+    following = next_imm_on_or_after(contract.start + timedelta(days=1))
+    if contract.start == next_imm_on_or_after(contract.start) and contract.end == following:
+        return FuturesContract.SR3
+    return None
+
+
+_PERIOD_BASIS = {FuturesContract.SR1: "calendar_month", FuturesContract.SR3: "imm_quarter"}
+_PERIOD_SHAPE = {FuturesContract.SR1: "a calendar month", FuturesContract.SR3: "an IMM quarter"}
+
+
+def _contract_sizes(
+    futures: tuple[FuturesNode, ...], keys: list[str], contract_dv01: float | None
+) -> tuple[dict[str, float], dict[str, dict[str, Any]]]:
+    """USD per basis point for each contract, and how each was established.
+
+    Every contract used to be divided by one ``contract_dv01``, SR3's 25.00
+    by default, so an SR1 month was bought 1.67 times over. Nothing in the
+    result showed it, because the strip DV01 was multiplied back by the same
+    tick; the error was in the number of contracts a trader would buy.
+
+    Returns:
+        ``(sizes, sizing)``: the tick per key in USD per basis point, and per
+        key the contract (``None`` when the caller's ``contract_dv01`` stands
+        in for one the period does not name), the ``basis`` it was read from
+        (``declared``, ``calendar_month``, ``imm_quarter``, ``assumed`` for a
+        period that is neither and is sized as SR3 as before, or ``caller``),
+        the tick, and whether the tick is the ``contract``'s or the
+        ``caller``'s.
+
+    Raises:
+        ConfigurationError: A declared contract contradicts its period, or
+            ``contract_dv01`` contradicts a contract that is declared or that
+            the period names.
+    """
+    sizes: dict[str, float] = {}
+    sizing: dict[str, dict[str, Any]] = {}
+    for key, contract in zip(keys, futures, strict=True):
+        from_period = _period_contract(contract)
+        name: FuturesContract | None
+        if contract.contract is not None:
+            declared = FuturesContract(contract.contract)
+            if from_period is not None and from_period != declared:
+                raise ConfigurationError(
+                    f"{key} is declared {declared}, but its period {contract.start} to "
+                    f"{contract.end} is {_PERIOD_SHAPE[from_period]}, which is "
+                    f"{from_period}'s; fix the contract or the dates"
+                )
+            name, basis = declared, "declared"
+        elif from_period is not None:
+            name, basis = from_period, _PERIOD_BASIS[from_period]
+        else:
+            name, basis = None, "assumed"
+
+        if contract_dv01 is None:
+            name = name or FuturesContract.SR3
+            size, source = _CONTRACT_DV01[name], "contract"
+        elif name is not None:
+            # Checked against an inferred contract as well as a declared one:
+            # 25.00, the old default, on an undeclared calendar month bought
+            # that SR1 1.67 times over without a word. A cent of rounding on
+            # the published tick (41.67 for 41.666...) is the same contract;
+            # anything further is two statements that cannot both be true.
+            if not math.isclose(contract_dv01, _CONTRACT_DV01[name], rel_tol=1e-3):
+                how = "declared" if basis == "declared" else f"by its period, {_PERIOD_SHAPE[name]}"
+                raise ConfigurationError(
+                    f"contract_dv01={contract_dv01} USD/bp contradicts {key}, which is "
+                    f"{name} ({_CONTRACT_DV01[name]:.2f} USD/bp) {how}; drop contract_dv01 "
+                    "to size each contract at its own tick"
+                )
+            size, source = contract_dv01, "caller"
+        else:
+            basis, size, source = "caller", contract_dv01, "caller"
+        sizes[key] = size
+        sizing[key] = {
+            "contract": None if name is None else str(name),
+            "basis": basis,
+            "dv01": size,
+            "dv01_source": source,
+        }
+    return sizes, sizing
+
+
+def _derivations(
+    sizing: dict[str, dict[str, Any]], contract_dv01: float | None
+) -> dict[str, str]:
+    """Where each tick the hedge used came from, one line per contract type."""
+    if contract_dv01 is not None:
+        return {
+            "caller": (
+                f"contract_dv01 = {contract_dv01:.2f} USD/bp, given by the caller and applied "
+                "to every contract; not derived from a contract spec"
+            )
+        }
+    names = dict.fromkeys(FuturesContract(entry["contract"]) for entry in sizing.values())
+    return {str(name): _CONTRACT_DV01_DERIVATION[name] for name in names}
+
+
+def _sizing_warnings(
+    futures: tuple[FuturesNode, ...], keys: list[str], sizing: dict[str, dict[str, Any]]
+) -> tuple[Degradation, ...]:
+    """What the sizing assumed, as degradations rather than fields alone.
+
+    Two assumptions. The SR1 notional, on any hedge with an SR1 in it: a
+    ``contract_dv01`` the caller gave has to agree with the SR1 tick within a
+    cent to be accepted, so it rests on the same notional, and the warning
+    used to hang on float equality (``41.666...`` warned, ``41.67`` did
+    not). And the contract itself, for a period that is neither a calendar
+    month nor an IMM quarter and so is sized as SR3 by default -- including an
+    SR1 month whose dates were rolled to business days, which that default
+    buys 1.67 times over.
+    """
+    warnings: list[Degradation] = []
+    sr1 = [key for key, entry in sizing.items() if entry["contract"] == FuturesContract.SR1]
+    if sr1:
+        warnings.append(
+            Degradation(
+                code="sr1_notional_assumed",
+                message=(
+                    f"SR1 contracts are sized at {SR1_DV01:.2f} USD per basis point from a "
+                    f"{SR1_NOTIONAL:,.0f} USD notional that has not been read from the CME "
+                    "contract spec. Affected contracts: " + ", ".join(sr1)
+                ),
+                data_quality=DataQuality.ASSUMED,
+            )
+        )
+    assumed = [key for key, entry in sizing.items() if entry["basis"] == "assumed"]
+    if assumed:
+        by_key = dict(zip(keys, futures, strict=True))
+        short = [
+            key
+            for key in assumed
+            if (by_key[key].end - by_key[key].start).days <= _SHORT_PERIOD_DAYS
+        ]
+        hint = (
+            f" {', '.join(short)} run about a month: if they are SR1 contracts with dates "
+            "rolled to business days, declare contract='SR1', or they are bought 1.67 "
+            "times over."
+            if short
+            else ""
+        )
+        warnings.append(
+            Degradation(
+                code="futures_contract_assumed",
+                message=(
+                    "Futures " + ", ".join(assumed) + " span periods that are neither a "
+                    "calendar month (SR1) nor one IMM date to the next (SR3), so they are "
+                    f"sized as SR3 at {SR3_DV01:.2f} USD per basis point. Declare the "
+                    "contract (FuturesNode.contract, or `contract` on a CLI futures entry), "
+                    "or pass contract_dv01 for a contract that is neither." + hint
+                ),
+                data_quality=DataQuality.ASSUMED,
+            )
+        )
+    return tuple(warnings)
+
+
 def _check_coverage(futures: tuple[FuturesNode, ...], start: date, end: date) -> None:
     """Refuse when the strip leaves a hole anywhere inside the swap's span."""
     ordered = sorted(futures, key=lambda f: f.start)
@@ -287,12 +602,19 @@ def _check_coverage(futures: tuple[FuturesNode, ...], start: date, end: date) ->
             f"the strip ends at {covered_to} but the swap runs to {end}; "
             "no contract covers the closing period and none is extrapolated"
         )
-    for left, right in zip(ordered, ordered[1:], strict=False):
-        if right.start > left.end and left.end < end and right.start > start:
+    # Walk the contracts in start order, carrying the furthest end reached so
+    # far. Comparing each contract only with the one starting next refused
+    # valid strips: SR1 months traded under an SR3 quarter overlap it, and
+    # the April SR1 ending on 1 May reported a hole to 17 June that the
+    # March SR3 quarter, which started earlier, covers to the day.
+    reach = ordered[0].end
+    for contract in ordered[1:]:
+        if contract.start > reach and reach < end and contract.start > start:
             raise IncompleteStripError(
-                f"the strip has no contract covering {left.end} to {right.start}, "
+                f"the strip has no contract covering {reach} to {contract.start}, "
                 f"which lies inside the swap span {start} to {end}"
             )
+        reach = max(reach, contract.end)
 
 
 def _with_quote_shift(
@@ -318,7 +640,14 @@ def _reprice_with_quote_bump(
     long_end_source: str | None,
 ) -> float:
     """Reprice the swap with one futures quote moved and the curve rebuilt."""
-    bumped = tuple(_with_quote_shift(i, shift) if i is target else i for i in instruments)
+    # Identity, as in _quote_parallel_dv01: two distinct contracts can compare
+    # equal. Spelt as id() rather than ``is`` because the protocol-typed
+    # instruments and the FuturesNode target look disjoint to mypy --strict,
+    # which reports the ``is`` as a non-overlapping identity check.
+    target_id = id(target)
+    bumped = tuple(
+        _with_quote_shift(i, shift) if id(i) == target_id else i for i in instruments
+    )
     curve = bootstrap_discount_curve(as_of, bumped, long_end_source=long_end_source).curve
     return discounted_value(swap, CurveSet(curve))
 
@@ -345,22 +674,23 @@ class ShockTableResult(EngineResult):
             "columns": list(self.table.columns),
             "currency": Currency.USD.value,
             "currency_note": (
-                "Every money column is USD. The strip's leg is priced off "
-                f"SR3_DV01, which is a dollar constant ({SR3_DV01:.2f} USD/bp), "
-                "so shock_table refuses a curve set in any other currency "
-                "rather than netting the two legs across currencies."
+                "Every money column is USD. The strip's leg is priced off each "
+                f"contract's tick, a dollar constant (SR3 {SR3_DV01:.2f}, SR1 "
+                f"{SR1_DV01:.2f} USD/bp), so shock_table refuses a curve set in any "
+                "other currency rather than netting the two legs across currencies."
             ),
         }
 
 
 def shock_table(
-    hedge: HedgeResult, shocks_bp: tuple[float, ...] = DEFAULT_SHOCKS_BP
+    hedge: HedgeResult, shocks_bp: Iterable[float] = DEFAULT_SHOCKS_BP
 ) -> ShockTableResult:
     """Reprice the hedged position across parallel shocks and report the residual.
 
     Args:
         hedge: A sized hedge.
-        shocks_bp: Parallel shifts in basis points.
+        shocks_bp: Parallel shifts in basis points, none of them zero. Any
+            iterable; it is read once.
 
     Returns:
         The :class:`ShockTableResult`. ``net_pnl`` is the swap's convexity in
@@ -369,31 +699,50 @@ def shock_table(
 
     Raises:
         CurrencyMismatchError: The hedge's curve set is not in USD. The
-            strip's P&L comes from ``contract_dv01``, a dollar constant, so
+            strip's P&L comes from each contract's tick in
+            ``contract_dv01_by_label``, a dollar constant, so
             netting it against a peso swap P&L would add two currencies in
             the ``net_pnl`` column and report the sum as one number.
+        ConfigurationError: ``shocks_bp`` contains a zero shock.
     """
+    # Materialised first: the zero check below used to consume a generator
+    # grid, and the rows were then built from nothing.
+    grid = tuple(shocks_bp)
     require_same_currency(
         hedge.curve_set.currency,
         Currency.USD,
         operation="netting a futures strip P&L against a swap P&L",
     )
+    # Refused rather than dropped or filled with NaN. A zero shock moves
+    # nothing, so its row is the hedge itself, and the implied convexity
+    # column divides by the shock squared: 0/0, which used to escape as a
+    # bare ZeroDivisionError. Dropping it silently would return a table one
+    # row shorter than the grid asked for.
+    if any(shock == 0.0 for shock in grid):
+        raise ConfigurationError(
+            f"shocks_bp {list(grid)} contains a 0 bp shock. It moves nothing, and "
+            "the implied money convexity is 2 x net / shock^2, undefined at zero; drop "
+            "it from the grid -- the unshocked position is the hedge itself"
+        )
     base_pv = discounted_value(hedge.swap, hedge.curve_set)
     rows: list[dict[str, float]] = []
-    for shock in shocks_bp:
+    for shock in grid:
         shifted = shift_curves(hedge.curve_set, shock * 1e-4)
         swap_pnl = discounted_value(hedge.swap, shifted) - base_pv
         # A long futures position loses when rates rise, linearly in *its own*
         # forward rate. Using a nominal parallel basis point here instead would
         # leave a first-order residual in the net column and make the swap's
-        # convexity unreadable underneath it: a basis point on a continuously
-        # compounded zero rate is not a basis point on an ACT/360 simple
-        # forward, and the difference is roughly 365/360.
+        # convexity unreadable underneath it. One basis point on the
+        # continuously compounded ACT/365F zero rate moves an ACT/360 simple
+        # forward by (1 + F tau) x 360/365 basis points -- 0.9963 on a 4% IMM
+        # quarter -- so the quote parallel DV01 runs about
+        # (365/360) / (1 + F tau) times the zero one: 1.00365 on the README
+        # strip, not the 365/360 (1.0139) the factor is sometimes rounded to.
         strip_pnl = 0.0
         for label, count in hedge.contracts.items():
             start, end = hedge.periods[label]
             move_bp = (shifted.discount.forward(start, end) - hedge.base_forwards[label]) * 1e4
-            strip_pnl -= count * hedge.contract_dv01 * move_bp
+            strip_pnl -= count * hedge.contract_dv01_by_label[label] * move_bp
         post_dv01 = dv01(hedge.swap, shifted).value
         net = swap_pnl + strip_pnl
         rows.append(
@@ -414,11 +763,12 @@ def shock_table(
     evidence = Evidence(
         produced_by="hedging.shock_table",
         fields={
-            "shocks_bp": list(shocks_bp),
+            "shocks_bp": list(grid),
             "bump_basis": "zero_curve_parallel",
             "base_pv": base_pv,
             "total_contracts": hedge.total_contracts,
             "contract_dv01": hedge.contract_dv01,
+            "contract_dv01_by_label": dict(hedge.contract_dv01_by_label),
             "strip_pnl_basis": "each contract's own forward move, not a nominal parallel bp",
             "net_definition": (
                 "swap P&L plus strip P&L. Non-zero because the strip pays linearly "
@@ -428,4 +778,4 @@ def shock_table(
         },
         sources=(hedge.evidence,),
     )
-    return ShockTableResult(evidence=evidence, table=table, shocks_bp=tuple(shocks_bp))
+    return ShockTableResult(evidence=evidence, table=table, shocks_bp=grid)
