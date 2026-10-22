@@ -147,7 +147,10 @@ wherever a wrong number used to come back with exit code 0.
   `price_on_parametric`, `project`, `float_leg` and `fra_fair_rate` take a
   keyword-only `fixings`, a `MarketSnapshot` read by the series named after
   the index (`SOFR`, `TIIE_FONDEO`, `TERM_SOFR_3M`, `TIIE_28`). An
-  overnight period is decided once it has begun. A term period is decided
+  overnight period is decided up to the first day whose rate is not yet
+  published: `as_of` on a business day (the SOFR dated `as_of` is read if
+  supplied), the next business day on a weekend or holiday, since a
+  published rate covers the days to the next one. A term period is decided
   once its fixing date is before `as_of`; a fixing dated `as_of` itself is
   read if supplied and forecast off the curve if not, as QuantLib does by
   default, so a swap struck at spot today still prices without fixings.
@@ -157,10 +160,12 @@ wherever a wrong number used to come back with exit code 0.
   ARRC convention, as for caplets below); TIIE 28 is read on its period
   start, a lag still to be verified. Without the fixings it needs, a trade
   raises `MissingFixingError` (exit code 1) naming the period, the fixing
-  date or window, the series and how to pass it. It used to return a number
-  with the decided part priced off the curve, or at zero once begun. Risk
-  measures, hedges and `rateng price` call these functions and refuse such
-  a trade until they pass fixings on.
+  date or window, the series and how to pass it. It used to return a
+  number with the decided part priced off the curve, or at zero once
+  begun. The risk measures and `strip_hedge` take the same `fixings=`,
+  `shock_table` reprices with the hedge's (`HedgeResult.fixings`), and the
+  CLI and MCP read them from a `fixings` block in the config; the refusal
+  names the config key there.
 - **`key_rate_duration` is in years.** It is `KR DV01 / (PV x 1bp)`, and its
   `total` equals `effective_duration`; it was reported per basis point,
   1e4 smaller.
@@ -171,12 +176,19 @@ wherever a wrong number used to come back with exit code 0.
   business day of it; a fixing dated `as_of` is read if present and
   otherwise forecast, with the `curve_forward_for_todays_fixing:SOFR`
   degradation.
+- **A forward that starts before the curve's valuation date is refused.**
+  `DiscountCurve.forward` raises `MissingFixingError` when `start` is before
+  `as_of`: the curve reads its discount factors there as one, so the rate
+  was nobody's (2.61% for a quarter begun a month ago on a flat 4% curve).
+  A bootstrap given a futures period that has started is refused too; its
+  realised part belongs in a `RealizedStubNode`.
 - **A caplet expires at its fixing.** Term SOFR fixes two US Government
   Securities business days before its period (ARRC), so `cap_floor_pv` and
   `caplet_pv` measure expiry to `Caplet.fixing_date`, not to the accrual
   start. A five-year cap is about 0.24% cheaper (216,763.11 to 216,249.07)
-  and now matches QuantLib with `fixingDays = 2` to 2.4e-15.
-  `fixing_lag_days=0` restores the old numbers.
+  and now matches QuantLib with `fixingDays = 2` to 2.4e-15. The lag is
+  the index's `RateIndex.fixing_lag_days`, the one IRSs and FRAs read;
+  `fixing_lag_days=0` on the cap restores the old numbers.
 - **A cap, floor or swaption that has started is valued on what has
   happened**, under QuantLib's default conventions
   (`includeReferenceDateEvents = False`, `enforcesTodaysHistoricFixings =
@@ -350,6 +362,8 @@ wherever a wrong number used to come back with exit code 0.
   (PEP 639); building needs setuptools>=77.
 - Dependency floors raised to `pandas>=2.2.2` and `scipy>=1.13`: the
   previous floors could not be installed together with `numpy>=2.0`.
+- `authors` in `pyproject.toml` adds Eduardo Ramos, and the README has an
+  Authors section.
 
 ### Fixed
 
@@ -414,6 +428,11 @@ wherever a wrong number used to come back with exit code 0.
   to 5e-8 USD with the SR3 compounding above. Term SOFR IRSs, seasoned or
   starting at spot, match QuantLib (`fixingDays = 2`) to 1e-7 USD. Trades
   with no decided coupon are bit-identical.
+- **A swap whose start rolls back over a weekend.** As of Saturday
+  2026-01-31, a SOFR OIS from that day to 2027-02-01 starts on Friday the
+  30th; the Friday's fixing now decides the whole weekend, and the par rate
+  is QuantLib's 402.474 bp (main 402.450, the forecast weekend 402.443),
+  with that fixing at 4.00% on a flat 4% curve.
 - `bootstrap_discount_curve(interpolation="monotone_convex")` now reprices
   instruments that read discount factors inside an interval (an OIS paid
   two business days after each period): the curve is swept to a fixed
@@ -579,6 +598,11 @@ wherever a wrong number used to come back with exit code 0.
 - `rates_engine.pricing.projection.is_paid(payment_date, as_of)`: the one
   statement of the paid-flow convention (a payment on `as_of` has happened,
   QuantLib's default).
+- `RateIndex.fixing_lag_days` (Term SOFR 2, SOFR, TIIE de Fondeo and TIIE
+  28 0) and the unresolved convention `tiie_28_fixing_lag`.
+- `fixings=` on `risk.bumps.repriced`, every measure in
+  `risk.sensitivities`, and `strip_hedge`; `HedgeResult.fixings`;
+  `pricing.linear.history_evidence`; `pricing.projection.may_have_history`.
 - `bootstrap_discount_curve(max_iterations=, iteration_tolerance=)`,
   `DEFAULT_MAX_ITERATIONS`, `DEFAULT_ITERATION_TOLERANCE`; evidence
   `iterations`, `max_iterations`, `iteration_tolerance`.
@@ -591,7 +615,7 @@ wherever a wrong number used to come back with exit code 0.
 - `pricing.options.option_value`, `PeriodStatus` (`paid`, `fixed`,
   `fixes_today`, `live`), `CapletValuation`, `cap_floor_periods`;
   `Caplet.fixing_date` and `Caplet.time_to_expiry`; `fixing_lag_days` on
-  `CapFloor` and `Caplet`; `TERM_RATE_FIXING_LAG_DAYS`;
+  `CapFloor` and `Caplet`;
   `fixings=` on `cap_floor_pv`, `caplet_pv` and `option_greeks`;
   `OptionPriceResult.currency`; `CubeQuote.reliable`;
   `volatility.cube.STRIKE_TOLERANCE`; `pricing.options.FIXING_FORECAST_CODE`
@@ -611,6 +635,9 @@ wherever a wrong number used to come back with exit code 0.
   a JSON boolean); `SR1_DV01` and `FuturesContract`.
 - `rateng describe --json` publishes every config key under `config`, with
   units, defaults and the commands that read it, the `fx` block included.
+- The config's `fixings` block (`fixings.SOFR.values`, `source`,
+  `data_quality`) for `price` and `hedge`; `app.builders.fixings_snapshot`.
+- `describe` lists `FEDERAL_RESERVE` among `calendars`.
 - The sdist now carries `tests/conftest.py`, `tests/fixtures/`, `scripts/`,
   `AGENTS.md`, `CHANGELOG.md`, `llms.txt` and `docs/**/*.md` (new
   `MANIFEST.in`), so the suite runs from an unpacked sdist.
