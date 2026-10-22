@@ -539,6 +539,7 @@ evidence chain:
 | `nelson_siegel_tau_at_bound` | The fitted decay `tau` sits on a bound of `tau_bounds`: the range set it, not the data. Widen the bounds if the range was not a deliberate constraint. `assumed`. |
 | `term_rate_without_convexity` | A term rate read off a futures-fitted curve is the expected average overnight rate, with no convexity adjustment (`TERM_RATE_CAVEAT`). `assumed`. |
 | `unresolved_convention:<name>` | A convention this build assumes rather than knows: one per entry of `UNRESOLVED_MXN` on a peso curve, and one per unresolved convention of the instrument's index and of the collateral rate on a price (`mxn_collateral_rate` on any peso one). `assumed`; `bootstrap_mxn_curve(strict_conventions=True)` refuses with `UnresolvedConventionError` instead. |
+| `hedge_ratio_outside_band`, `instrument_not_permitted`, `instrument_not_stated` | A finding of `audit_hedge` above informational severity: the proposed ratio outside the programme's band, an instrument the policy does not permit, or no instrument stated. Carried as a degradation (`assumed`) when the audit reports; `strict=True` raises `PolicyBreachError` for a proposal that is not compliant. |
 
 Read them with `rates_engine.core.diagnostics.all_warnings(result.evidence)`, or
 check `result.evidence.worst_quality`.
