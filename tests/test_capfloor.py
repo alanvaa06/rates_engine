@@ -248,6 +248,17 @@ class TestTheOptionExpiresAtTheFixing:
         with pytest.raises(ValueError, match="fixing_lag_days"):
             self._five_year("cap", lag=-1)
 
+    @pytest.mark.parametrize("lag", [1.5, 2.0, True, "2"])
+    def test_a_lag_that_is_not_a_whole_number_of_days_refuses_at_construction(self, lag):
+        # 1.5 used to be accepted; add_business_days' countdown then never
+        # reached zero, walked back for seconds and died on "year 0 is out
+        # of range". A bool is an int to Python and not a number of days.
+        with pytest.raises(ValueError, match="whole number"):
+            self._five_year("cap", lag=lag)
+        caplet = self._five_year("cap").caplets[0]
+        with pytest.raises(ValueError, match="whole number"):
+            replace(caplet, fixing_lag_days=lag)
+
 
 class TestStructure:
     """The strip itself: periods, kinds and what the payload carries."""

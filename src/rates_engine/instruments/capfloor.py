@@ -59,9 +59,14 @@ one constant covers them all.
 
 
 def _require_lag(lag: int) -> None:
-    if lag < 0:
+    # A whole number of days, checked by type: 1.5 used to pass ``lag < 0``,
+    # and add_business_days' countdown never reached zero -- it walked back
+    # through the calendar until the year ran out. A bool is an int to
+    # Python and is not a number of days.
+    if isinstance(lag, bool) or not isinstance(lag, int) or lag < 0:
         raise ValueError(
-            f"fixing_lag_days must be zero or more business days before the period, got {lag!r}"
+            f"fixing_lag_days must be a whole number of business days, zero or more, "
+            f"got {lag!r}"
         )
 
 
