@@ -62,6 +62,9 @@ progress: its realised part is compounded by `MarketSnapshot.compounded`,
 which compounds on 360, so the index cannot be valued part-way through a
 period.
 
+And for a `RateIndex` whose `fixing_lag_days` is not a whole number of
+days, zero or more.
+
 ### `ConventionError`
 
 **Exit code 1. Recoverable: change the terms.**
@@ -123,10 +126,12 @@ if not, and anything later is forecast. A forecast in place of a fixing
 dated `as_of` is reported, as the degradation
 `curve_forward_for_todays_fixing:<series>` (below), not raised.
 
-- A swap or FRA needs the history of an overnight period once the period
-  has begun, and the fixing of a term period once its fixing date is before
-  `as_of` (Term SOFR fixes two SIFMA business days before its period; TIIE
-  28 is read on its start). It raises this when `fixings=` is not passed,
+- A swap or FRA needs the history of an overnight period up to the first
+  day whose rate is not yet published (`as_of` on a business day, the next
+  business day on a weekend or holiday), and the fixing of a term period
+  once its fixing date is before `as_of` (the index's `fixing_lag_days`:
+  Term SOFR fixes two SIFMA business days before its period; TIIE 28 is
+  read on its start). It raises this when `fixings=` is not passed,
   or lacks the index's series (named after the index: `SOFR`,
   `TIIE_FONDEO`, `TERM_SOFR_3M`, `TIIE_28`) or a date it needs. The message
   names the trade, the period, the fixing date or window, the series and
@@ -143,9 +148,15 @@ dated `as_of` is reported, as the degradation
 - `fit_fomc_step_curve` raises it when a contract started before `as_of`
   and its `fixings` snapshot is absent or lacks the `"SOFR"` series or a
   business day of it.
+- The risk measures and `strip_hedge` raise it like `pv`, and take
+  `fixings=` the same way. Under `rateng price` and `hedge` the message
+  names the config key, `fixings.SOFR.values`.
+- `DiscountCurve.forward` raises it for a period starting before `as_of`,
+  and a bootstrap for a futures period that has started: a curve holds no
+  history, and the realised part belongs in a `RealizedStubNode`.
 
 Recoverable in every case by passing them: `fixings=MarketSnapshot(...)`,
-with the series named after the index.
+with the series named after the index, or the config's `fixings` block.
 
 ### `InsufficientDataError`
 
@@ -269,6 +280,9 @@ appended to repeated labels; a zero in `shock_table`'s `shocks_bp`
 (`hedge.shocks_bp[i]`); and a `hedge.require_full_coverage` that is not a
 JSON boolean.
 
+A `fixings` rate of 1 or more (a percent written for a decimal) or a date
+given twice is refused by its path.
+
 Also raised by `load_program` for a policy file this engine cannot read: an
 unknown key, a missing required one, a rebalance frequency that is not one
 of the four, a value that will not coerce, or an `allowed_instruments` entry
@@ -296,10 +310,11 @@ calculation rather than after.
 The case it exists for is MXN. PRD-003's research gate could not reach
 Banxico, ISDA or CME from the build environment, so the TIIE day count, the
 28-day coupon period, the distinction between TIIE 28 and TIIE de Fondeo,
-and the difference between the BMV and Banxico calendars are all
-assumptions. They are stored as a data gap rather than a code one:
-`rates_engine.curves.mxn.UNRESOLVED_MXN` is a tuple, and resolving them
-shortens it and changes nothing else.
+the TIIE 28 fixing lag (`tiie_28_fixing_lag`) and the difference between
+the BMV and Banxico calendars are all assumptions. They are stored as a
+data gap rather than a code one:
+`rates_engine.conventions.indices.UNRESOLVED_MXN` is a tuple, and
+resolving them shortens it and changes nothing else.
 
 ### `MarketDataError`
 

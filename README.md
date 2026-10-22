@@ -104,10 +104,12 @@ rateng hedge-structures --config fx.json --json  # eight structures, costed side
 
 `python scripts/write_example_config.py config.json` writes a config to start
 from, and `rateng describe --json` lists every config key under `config`,
-with its units, its default and the commands that read it. With `--json`,
-stdout is exactly one parseable document and all narration goes to stderr.
-Exit code 1 means the inputs are unusable, 2 means the calculation is
-impossible.
+with its units, its default and the commands that read it.
+`fixings.SOFR.values: [{"date": "2025-09-17", "rate": 0.043}, ...]` gives
+`price` and `hedge` the history a swap that has started needs. With
+`--json`, stdout is exactly one parseable document and all narration goes
+to stderr. Exit code 1 means the inputs are unusable, 2 means the
+calculation is impossible.
 
 ## The MCP server
 
@@ -256,8 +258,8 @@ pricing or hedging code knowing what a proxy is.
 - **No MXN convention is verified.** Banxico, ISDA and CME are all unreachable
   from the build environment, and QuantLib — the one substantive source that
   is — has no TIIE index at all. The TIIE day count, the 28-day coupon period,
-  the TIIE 28 versus TIIE de Fondeo distinction and the SIE series identifiers
-  are assumptions, named in `UNRESOLVED_MXN`, carried as a degradation on
+  the TIIE 28 versus TIIE de Fondeo distinction, the TIIE 28 fixing lag and
+  the SIE series identifiers are assumptions, named in `UNRESOLVED_MXN`, carried as a degradation on
   every peso result, and refusable with `strict_conventions=True`. Resolving
   them shortens a tuple and changes nothing else.
 - **The Mexican calendar is the BMV's, not Banxico's.** Different lists, and

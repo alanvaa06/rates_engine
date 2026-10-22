@@ -68,7 +68,7 @@ of claim, and a reader deserves to know which one they are getting.
 | Hedge structures and the cost-versus-protection trade-off | `hedging/fx_structures.py` | CFA Level III Reading 19; *CFA L3 Derivatives — Forwards, Futures, and Options* | Read |
 | `σ²(RDC) = σ²(RFC) + σ²(RFX) + 2ρσσ` | `hedging/fx_structures.py` | *CFA L3 Asset Allocation — Constraints, Currency, and Benchmarks* | Read |
 | The Mexican holiday calendar, thirteen rules | `conventions/calendar.py` | QuantLib `ql/time/calendars/mexico.cpp`, **read directly** | Read — but it is the **BMV** calendar, not Banxico's |
-| TIIE day count, coupon period, benchmark distinction | `curves/mxn.py` | **Nothing reachable.** Recorded in `UNRESOLVED_MXN` | **Not established** |
+| TIIE day count, coupon period, benchmark distinction, TIIE 28 fixing lag | `conventions/indices.py` | **Nothing reachable.** Recorded in `UNRESOLVED_MXN` | **Not established** |
 
 ## What "not read" costs, concretely
 
@@ -147,7 +147,7 @@ return 403 at this environment's egress proxy, and a code search across
 QuantLib for TIIE returns zero hits. The TIIE day count, the 28-day coupon
 period, which conventions attach to TIIE 28 as against TIIE de Fondeo, and
 the SIE series identifiers are all assumptions. They are stored as data —
-`rates_engine.curves.mxn.UNRESOLVED_MXN` — so that every peso result names
+`rates_engine.conventions.indices.UNRESOLVED_MXN` — so that every peso result names
 them, carries a degradation that reaches `ASSUMED`, and can be made to
 refuse outright. Resolving them shortens a tuple; no code changes. See
 `docs/forge/research/003-mxn-conventions.md` for what was tried.
@@ -209,7 +209,7 @@ something it cannot reach by construction.
 | Treasury par yields are usable as a stand-in for OIS par | `curves/bootstrap.py` | Opt-in only; marks every node; a `Degradation` names the swap spread as an unquantified bias |
 | SABR's backbone exponent β is 0.5 unless the caller says otherwise | `models/sabr.py` | Carried in every `SABRParameters` and every calibration payload; the module says why it is fixed rather than fitted |
 | A term rate read off a futures-fitted curve carries no convexity adjustment | `curves/parametric.py` | `TERM_RATE_CAVEAT` plus a `Degradation` marking the result `assumed`; the evidence sets `convexity_adjustment_applied: false` |
-| Every MXN convention: TIIE day count, coupon period, benchmark distinction, SIE identifiers, and that the calendar is the BMV's | `curves/mxn.py` | `UNRESOLVED_MXN`, one `Degradation` each on every peso result; `strict_conventions=True` refuses |
+| Every MXN convention: TIIE day count, coupon period, benchmark distinction, TIIE 28 fixing lag, SIE identifiers, and that the calendar is the BMV's | `conventions/indices.py` | `UNRESOLVED_MXN`, one `Degradation` each on every peso result; `strict_conventions=True` refuses |
 | The USD/MXN pip is 1e-4 | `conventions/currency_pair.py` | Declared on `CurrencyPair` with no default, and serialised into every payload that reports forward points |
 | A cross-currency basis beyond ±500 bp is not a quote | `pricing/fx_forward.py` | `MAX_PLAUSIBLE_BASIS_BP`, a named constant; the refusal says the band is a plausibility check rather than a measurement |
 | The cross-currency basis enters as a flat zero-coupon spread on the quote-currency leg, not as the par spread a cross-currency swap quotes | `pricing/fx_forward.py` | `BASIS_LEG` names the leg; the module docstring names the spread as a zero spread; no instrument or curve here takes the par basis |

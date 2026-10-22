@@ -316,14 +316,19 @@ one. A product of your own prices with `pv` (and so every risk measure and
 hedge) once you `project.register` it; a swap-like one also needs
 `float_leg.register` for `par_rate`, `annuity` and swaptions.
 
-**A swap that has started needs its fixings.** Paid flows count for
-nothing; the floating period in progress is part history. Pass
-`fixings=MarketSnapshot(...)` (series named after the index) to `pv`,
-`par_rate` or `discounted_value`, or get `MissingFixingError`. A term
-fixing dated before `as_of` is required; one dated `as_of` is read if you
-pass it and forecast if you do not, which the price marks with the
-`curve_forward_for_todays_fixing:<series>` degradation. The fixings used
-are in the evidence as `realised_fixings`.
+**A trade that has started needs its fixings, everywhere.** `pv`,
+`par_rate`, every risk measure and `strip_hedge` take
+`fixings=MarketSnapshot(...)` (series named after the index), and
+`shock_table` reprices with the hedge's; the CLI and MCP read the
+`fixings` block of the config. Without them a seasoned trade is refused
+with `MissingFixingError`. Paid flows count for nothing. A fixing dated
+before `as_of` is required; one dated `as_of` is read if you pass it and
+forecast if you do not, which the price marks with the
+`curve_forward_for_todays_fixing:<series>` degradation. A forward before
+the curve's `as_of` is refused too. The fixing lag lives on
+`RateIndex.fixing_lag_days`, so an IRS, a FRA and a caplet on one period
+fix on one day. The fixings used are in the evidence as
+`realised_fixings`.
 
 **Calibrate to a swap with `SwapQuoteNode`, not `ParSwapNode`, when you have
 the swap.** `SwapQuoteNode(swap, quote)` fits the pricer's own par rate, so
