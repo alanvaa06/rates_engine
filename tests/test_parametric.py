@@ -655,8 +655,10 @@ class TestFOMCStepFitInProgress:
             fixings=self._snapshot(self._days()),
         )
         warnings = {w.code: w for w in fit.evidence.warnings}
-        assert "fixing_forecast_on_as_of" in warnings
-        assert "SR1-Oct26" in warnings["fixing_forecast_on_as_of"].message
+        code = "curve_forward_for_todays_fixing:SOFR"
+        assert code in warnings
+        assert "SR1-Oct26" in warnings[code].message
+        assert warnings[code].data_quality is DataQuality.PROXY
         assert fit.evidence.fields["forecast_days_on_as_of"]["SR1-Oct26"] == 1
 
     def test_the_as_of_fixing_is_read_when_present(self):
@@ -669,7 +671,8 @@ class TestFOMCStepFitInProgress:
         )
         assert fit.curve.segment_rates == pytest.approx(self.PATH, abs=1e-10)
         assert fit.evidence.fields["realised_days"]["SR1-Oct26"] == 15
-        assert "fixing_forecast_on_as_of" not in {w.code for w in fit.evidence.warnings}
+        codes = {w.code for w in fit.evidence.warnings}
+        assert "curve_forward_for_todays_fixing:SOFR" not in codes
 
     def test_a_missing_business_day_is_named(self):
         days = [d for d in self._days() if d != date(2026, 10, 7)]
