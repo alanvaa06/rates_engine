@@ -237,10 +237,19 @@ class TestSigmaUnits:
     def test_the_band_is_a_thousand_basis_points_a_year(self):
         assert MAX_PLAUSIBLE_SIGMA == 0.10
 
-    def test_the_band_applies_even_with_no_model(self):
-        """A sigma in the wrong units is a wrong input whatever it feeds."""
-        with pytest.raises(ImplausibleInputError):
-            convexity_adjustment(2.0, 2.25, model=ConvexityModel.NONE, sigma=1.0)
+    def test_model_none_ignores_a_sigma_it_never_uses(self):
+        """The CLI passes the config's sigma whatever the model, so a leftover
+        sigma beside ``model: none`` must not fail the bootstrap. The band
+        refused it here once; main returned 0.0, and so does this."""
+        for sigma in (1.0, 100.0, float("nan")):
+            result = convexity_adjustment(0.5, 0.75, model=ConvexityModel.NONE, sigma=sigma)
+            assert result.adjustment_bp == 0.0
+
+    def test_model_none_ignores_kappa_too(self):
+        result = convexity_adjustment(
+            0.5, 0.75, model=ConvexityModel.NONE, sigma=0.01, kappa=float("nan")
+        )
+        assert result.adjustment_bp == 0.0
 
     def test_a_non_finite_kappa_refuses(self):
         with pytest.raises(ImplausibleInputError, match="kappa"):

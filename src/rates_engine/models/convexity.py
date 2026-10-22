@@ -183,7 +183,8 @@ def convexity_adjustment(
         model: ``"none"``, ``"ho_lee"`` or ``"hull_white"``.
         sigma: Normal volatility as a decimal annual rate: 1% a year, 100 bp,
             is ``0.01``. Refused above :data:`MAX_PLAUSIBLE_SIGMA`, which is
-            where a sigma given in percent or in basis points lands.
+            where a sigma given in percent or in basis points lands, by the
+            two models that use it; ``"none"`` ignores it.
         kappa: Mean reversion for Hull-White, in inverse years. Required for
             that model, ignored by the others.
         sigma_source: ``"explicit"`` or ``"realized_sofr"``, recorded in the
@@ -196,8 +197,9 @@ def convexity_adjustment(
     Raises:
         UnsupportedConventionError: ``model`` is not implemented, or
             Hull-White was asked for without a ``kappa``.
-        ImplausibleInputError: Sigma is above :data:`MAX_PLAUSIBLE_SIGMA`, or
-            sigma, kappa or a time is NaN or infinite.
+        ImplausibleInputError: A time is NaN or infinite, or, for a model
+            that uses them, sigma is above :data:`MAX_PLAUSIBLE_SIGMA` or NaN,
+            or kappa is not finite.
         ValueError: Sigma or kappa is negative, or the period is not ordered.
     """
     if model not in _MODELS:
@@ -210,7 +212,11 @@ def convexity_adjustment(
             raise ImplausibleInputError(f"{name} is {value!r}; a time is a finite number of years")
     if sigma < 0.0:
         raise ValueError(f"sigma must be non-negative, got {sigma!r}")
-    if not sigma <= MAX_PLAUSIBLE_SIGMA:
+    # The band is a check on a number the model is about to use. Model
+    # ``none`` uses none, and the CLI passes the config's sigma whatever the
+    # model, so a leftover sigma beside ``model: none`` must not fail a
+    # bootstrap that never reads it.
+    if model != ConvexityModel.NONE and not sigma <= MAX_PLAUSIBLE_SIGMA:
         raise ImplausibleInputError(
             f"sigma {sigma!r} is outside the [0, {MAX_PLAUSIBLE_SIGMA}] band this build "
             f"accepts. Sigma is a decimal normal volatility a year: 1% (100 bp) is 0.01, so "
@@ -218,7 +224,7 @@ def convexity_adjustment(
             "points lands here; divide it by 100 or 10,000. Widen MAX_PLAUSIBLE_SIGMA "
             "deliberately if you mean it."
         )
-    if kappa is not None and not math.isfinite(kappa):
+    if model == ConvexityModel.HULL_WHITE and kappa is not None and not math.isfinite(kappa):
         raise ImplausibleInputError(f"kappa is {kappa!r}; mean reversion is a finite rate")
     if time_to_end < time_to_start:
         raise ValueError(
