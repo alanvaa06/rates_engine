@@ -18,17 +18,18 @@ arbitrage-free carry and how much is funding can read it off rather than
 recompute it.
 
 **From the spot date, not from the valuation date.** The quoted spot ``S``
-is the price for delivery on the spot date — two joint business days after
-the trade for USD/MXN, :meth:`~rates_engine.conventions.currency_pair.
-CurrencyPair.spot_date` — so parity carries each currency from *there* to
-delivery. Writing ``S * P_f(T) / P_d(T)`` instead, which this module did
-until the 2026-10-15 review, carries both currencies for the two extra days
-between the trade and the spot date: 76 to 78 pips too high on USD/MXN at
-every tenor from one week to a year, and 82 at three months when a Mexican
-holiday pushes the spot date to T+3. :func:`implied_basis` read that carry
+is the price for delivery on the spot date — two peso business days after
+the trade for USD/MXN, rolled to a day the Federal Reserve is open too
+(:meth:`~rates_engine.conventions.currency_pair.CurrencyPair.spot_date`) —
+so parity carries each currency from *there* to delivery. Writing
+``S * P_f(T) / P_d(T)`` instead, which this module did until the 2026-10-15
+review, carries both currencies for the two extra days between the trade
+and the spot date: 76 to 78 pips too high on USD/MXN at every tenor from
+one week to a year, and 82 at three months when a Mexican holiday pushes
+the spot date to T+3. :func:`implied_basis` read that carry
 as basis, which on a one-week forward with no basis in it was -125 bp. The
-reference is QuantLib's ``FxSwapRateHelper`` with two fixing days on
-``JointCalendar(UnitedStates, Mexico)``, and the tests pin its numbers.
+reference is QuantLib's ``FxSwapRateHelper`` with two fixing days, and the
+tests pin its numbers.
 
 A delivery on or before the spot date is refused. On the spot date it is a
 spot trade; before it, it is a short date (overnight, tom-next) priced off

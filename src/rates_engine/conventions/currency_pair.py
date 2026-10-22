@@ -26,17 +26,21 @@ tenor, and eighty-two when a Mexican holiday pushes the spot date out to
 T+3. The lag and the calendars are therefore properties of the pair, next
 to the pip, rather than something each pricer remembers.
 
-The calendar is the *joint* one: a day counts towards the lag only when it
-is a business day in every calendar of the pair. That is QuantLib's
-``JointCalendar(UnitedStates, Mexico)`` advanced by two days, which is what
-its ``FxSwapRateHelper`` uses with two fixing days. Two simplifications are
-recorded here rather than hidden. The US calendar is ``SIFMA_US``, the bond
-market's, because it is the only US calendar in this package; the banks'
-calendar (the Federal Reserve's) differs from it on Good Friday — where
-Mexico is closed anyway — and on holidays that fall on a Saturday, where
-SIFMA usually closes the Friday and the banks do not. And the market rule
-for a dollar pair is slightly looser than a joint calendar: a US holiday on
-T+1 alone does not push the spot date, because no dollars move that day.
+**Which days count.** Each currency settles on its payment system's
+calendar (:data:`~rates_engine.conventions.settlement.SETTLEMENT_CALENDARS`):
+the Federal Reserve's for dollars — not SIFMA's, which closes on Good Friday
+and on the Friday before a Saturday holiday while Fedwire is open — and BMV
+for pesos. For a dollar pair the market counts the lag on the *other*
+currency's calendar only, because no dollars move before the spot date, and
+then requires the spot date itself to be a business day in both, rolling
+forward until it is. So a US holiday on T+1 alone does not delay the spot
+date: USD/MXN struck on Wednesday 25 November 2026 settles on Friday the
+27th, Thanksgiving notwithstanding. A pair without dollars counts every day
+on both calendars. This is QuantLib's ``FxSwapRateHelper`` with ``Mexico()``
+as its calendar and ``UnitedStates(FederalReserve)`` as its trading
+calendar; the first version of this module used a joint SIFMA and BMV
+calendar for every day of the lag and was up to three days late around US
+holidays — about eighty pips on this pair.
 """
 
 from __future__ import annotations
@@ -45,25 +49,12 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Any
 
-from rates_engine.conventions.calendar import BMV, SIFMA_US, Calendar
+from rates_engine.conventions.calendar import Calendar
+from rates_engine.conventions.settlement import SETTLEMENT_CALENDARS
 from rates_engine.core.errors import UnsupportedConventionError
 from rates_engine.core.money import Currency
 
-__all__ = ["CurrencyPair", "USDMXN", "SETTLEMENT_CALENDARS"]
-
-SETTLEMENT_CALENDARS: dict[Currency, Calendar] = {
-    Currency.USD: SIFMA_US,
-    Currency.MXN: BMV,
-}
-"""The calendar each currency settles on, used when a pair names none.
-
-``SIFMA_US`` for dollars and ``BMV`` for pesos, because they are the two
-calendars this package has. Neither is the banking calendar FX actually
-settles on — the Federal Reserve's and Banxico's — and the module docstring
-says where they differ. A currency missing from this table makes
-:meth:`CurrencyPair.spot_date` refuse rather than settle on a calendar
-nobody chose.
-"""
+__all__ = ["CurrencyPair", "USDMXN"]
 
 
 @dataclass(frozen=True)
@@ -78,15 +69,16 @@ class CurrencyPair:
             and a forward reported in the wrong pip is off by a factor of
             ten or a hundred with nothing to show for it.
         spot_lag_days: Business days from the trade date to the spot date,
-            counted on the joint calendar. Two — the convention of almost
-            every pair, USD/MXN included; USD/CAD is the common exception
-            at one. Zero means the spot settles on the trade date, rolled
-            forward to a business day.
-        calendars: The settlement calendars, every one of which must be open
-            on a day for it to count. Empty — the default — means one per
-            currency from :data:`SETTLEMENT_CALENDARS`, and is replaced by
-            that tuple on construction, so a pair built either way compares
-            equal.
+            counted as the module docstring describes. Two — the convention
+            of almost every pair, USD/MXN included; USD/CAD is the common
+            exception at one. Zero means the spot settles on the trade date,
+            rolled forward to a day both currencies settle.
+        calendars: ``(base calendar, quote calendar)``, in that order, so
+            that the dollar's can be told apart. Empty — the default — means
+            the two from
+            :data:`~rates_engine.conventions.settlement.SETTLEMENT_CALENDARS`,
+            and is replaced by them on construction, so a pair built either
+            way compares equal.
     """
 
     base: Currency
@@ -112,6 +104,10 @@ class CurrencyPair:
                 f"{self.spot_lag_days!r}"
             )
         calendars = tuple(self.calendars)
+        if calendars and len(calendars) != 2:
+            raise ValueError(
+                f"calendars is (base calendar, quote calendar); got {len(calendars)} of them"
+            )
         if not calendars:
             missing = [c.value for c in (self.base, self.quote) if c not in SETTLEMENT_CALENDARS]
             if missing:
@@ -140,8 +136,22 @@ class CurrencyPair:
         """
         return rate_difference / self.pip
 
+    @property
+    def lag_calendars(self) -> tuple[Calendar, ...]:
+        """The calendars the spot lag is counted on.
+
+        The non-dollar currency's alone for a dollar pair, both otherwise;
+        see the module docstring.
+        """
+        base_calendar, quote_calendar = self.calendars
+        if self.base is Currency.USD:
+            return (quote_calendar,)
+        if self.quote is Currency.USD:
+            return (base_calendar,)
+        return self.calendars
+
     def is_settlement_day(self, day: date) -> bool:
-        """True when ``day`` is a business day in every calendar of the pair.
+        """True when ``day`` is a business day in both currencies' calendars.
 
         Args:
             day: The date to check.
@@ -154,12 +164,15 @@ class CurrencyPair:
     def spot_date(self, trade_date: date) -> date:
         """The date a spot trade struck on ``trade_date`` settles.
 
-        Counts :attr:`spot_lag_days` settlement days forward on the joint
-        calendar, so a holiday in either currency inside the lag pushes the
-        spot date out: USD/MXN struck on Monday 14 September 2026 settles on
-        Thursday the 17th, because the 16th is a Mexican holiday. A trade
-        date that is itself a holiday counts from the next settlement day,
-        which is how QuantLib's ``Calendar.advance`` counts.
+        Counts :attr:`spot_lag_days` business days forward on
+        :attr:`lag_calendars`, then rolls forward to the first day both
+        currencies settle. USD/MXN struck on Monday 14 September 2026 settles
+        on Thursday the 17th, because the 16th is a Mexican holiday and so
+        does not count; struck on Wednesday 25 November it settles on Friday
+        the 27th, because Thanksgiving on the 26th is a peso business day and
+        the 27th is open in both. The lag is counted from the trade date
+        even when the lag calendar is shut on it — a weekend, a peso holiday
+        — which is where this differs from QuantLib (see the comment below).
 
         Args:
             trade_date: The trade (valuation) date.
@@ -169,16 +182,25 @@ class CurrencyPair:
             zero, in which case it is ``trade_date`` rolled forward to a
             settlement day.
         """
+        counting = self.lag_calendars
+
+        def counts(day: date) -> bool:
+            return all(calendar.is_business_day(day) for calendar in counting)
+
+        # Counted from the trade date itself even when it is a holiday: a
+        # spot quoted on 16 September, a peso holiday on which USD/MXN still
+        # trades offshore, settles two peso business days later, on the 18th.
+        # QuantLib's FxSwapRateHelper first moves such a trade date to the
+        # next peso business day and so settles it on the 21st; on every
+        # business trade date the two agree.
         day = trade_date
-        if self.spot_lag_days == 0:
-            while not self.is_settlement_day(day):
-                day += timedelta(days=1)
-            return day
         remaining = self.spot_lag_days
         while remaining:
             day += timedelta(days=1)
-            if self.is_settlement_day(day):
+            if counts(day):
                 remaining -= 1
+        while not self.is_settlement_day(day):
+            day += timedelta(days=1)
         return day
 
     def to_dict(self) -> dict[str, Any]:
@@ -190,6 +212,7 @@ class CurrencyPair:
             "pip": self.pip,
             "spot_lag_days": self.spot_lag_days,
             "settlement_calendars": [calendar.name for calendar in self.calendars],
+            "spot_lag_calendars": [calendar.name for calendar in self.lag_calendars],
         }
 
 
@@ -199,7 +222,7 @@ USDMXN = CurrencyPair(Currency.USD, Currency.MXN, pip=1e-4, spot_lag_days=2)
 The pip size is the four-decimal quoting convention, which is what the pair
 trades on. It is declared here rather than assumed anywhere downstream, and
 it travels into every payload that reports forward points — PRD-003 AC-2.1
-asks for exactly that. The spot date is two business days after the trade
-on the joint ``SIFMA_US`` and ``BMV`` calendar; the module docstring says
-how that differs from the banking calendars the pair really settles on.
+asks for exactly that. The spot date is two peso business days after the
+trade, rolled to a day both the Federal Reserve and BMV are open; the module
+docstring has the rule and its source.
 """

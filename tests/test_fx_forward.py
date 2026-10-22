@@ -398,9 +398,11 @@ class TestTheForwardRunsFromTheSpotDate:
 
     Reference values from QuantLib 1.44, not from this package. Flat
     continuously compounded ACT/365F curves (`ql.FlatForward`), the spot date
-    from `ql.JointCalendar(ql.UnitedStates(ql.UnitedStates.FederalReserve),
-    ql.Mexico()).advance(as_of, 2, ql.Days)`, deliveries from advancing the
-    spot date by the tenor (Following), and
+    two `ql.Mexico()` business days after `as_of` and rolled to a day
+    `ql.UnitedStates(ql.UnitedStates.FederalReserve)` is open too (QuantLib's
+    FX rule, see `tests/test_fx_spot_date.py`; on these trade dates it is
+    also what `ql.JointCalendar` of the two gives), deliveries from advancing
+    the spot date by the tenor (Following), and
 
         F = S * [P_usd(T) / P_usd(spot)] / [P_mxn(T) / P_mxn(spot)]
 

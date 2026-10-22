@@ -216,8 +216,8 @@ class TestTheTwoCommandsAgreeOnTheForward:
     (`REVISION-rates_engine-2026-10-15-repro/risk-app/r16_basis_consistency.py`).
     The reference is QuantLib 1.44, not this package: flat continuously
     compounded ACT/365F curves at 9.5% MXN and 4.2% USD, the spot date
-    2026-09-18 from `ql.JointCalendar(ql.UnitedStates(ql.UnitedStates.
-    FederalReserve), ql.Mexico()).advance(2026-09-16, 2, ql.Days)`, and
+    2026-09-18 -- `ql.Mexico().advance(2026-09-16, 2, ql.Days)`, a day the
+    Federal Reserve is open too -- and
     `S [P_usd(T)/P_usd(spot)] / [P_mxn(T)/P_mxn(spot)] = 19.50128422562187`,
     with the documented zero-spread basis applied over the QuantLib
     `Actual365Fixed` span from spot to delivery, 0.9945205479452055.
