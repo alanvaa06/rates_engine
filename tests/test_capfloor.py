@@ -12,7 +12,7 @@ from conftest import AS_OF
 from rates_engine.conventions.option_kind import OptionKind
 from rates_engine.conventions.side import Side
 from rates_engine.core.errors import MissingFixingError, MissingForwardError
-from rates_engine.core.evidence import Provenance
+from rates_engine.core.evidence import DataQuality, Provenance
 from rates_engine.curves.discount import CurveSet, DiscountCurve
 from rates_engine.instruments.capfloor import TERM_RATE_FIXING_LAG_DAYS, CapFloor
 from rates_engine.instruments.swaps import IRSwap
@@ -460,6 +460,10 @@ class TestASeasonedCapOrFloor:
         assert today["fixing"] is None
         assert today["expiry_years"] == 0.0
         assert today["forward"] == pytest.approx(QL_TODAYS_FORECAST, rel=1e-13, abs=0.0)
+        # Not only a field: the substitution is a degradation of the result.
+        codes = [w.code for w in result.evidence.warnings]
+        assert codes.count("fixing_forecast_on_fixing_date") == 1
+        assert result.evidence.worst_quality is DataQuality.ASSUMED
 
     def test_a_fixing_on_the_valuation_date_is_used_when_supplied(self, option_curve_set):
         result = cap_floor_pv(
@@ -573,17 +577,31 @@ class TestASeasonedCapOrFloor:
         with pytest.raises(MissingFixingError):
             option_greeks(cap, option_curve_set, VOL)
 
-    def test_theta_does_not_trip_over_tomorrows_fixing(self, option_curve_set):
-        # The first period fixes on 2026-01-16, the day after the valuation
-        # date. Theta shortens every expiry by a day and re-classifies
-        # nothing, so it neither asks for tomorrow's fixing nor drops a period.
+    @pytest.mark.parametrize("strike", [0.035, 0.0404, 0.045])
+    def test_theta_the_day_before_the_fixing_is_intrinsic_minus_value(
+        self, option_curve_set, strike
+    ):
+        # One period, fixing on 2026-01-16, the day after the valuation date.
+        # Theta takes the last day of its time value, so in closed form it is
+        # the intrinsic value on the forward less the value: A max(F - K, 0)
+        # - A Bachelier(F, K, 1/365, sigma). It neither asks for tomorrow's
+        # fixing nor drops the period.
         cap = CapFloor(
-            effective=date(2026, 1, 21), maturity=date(2027, 1, 21), strike=0.042,
+            effective=date(2026, 1, 21), maturity=date(2026, 4, 21), strike=strike,
             notional=10_000_000.0,
         )
-        assert cap.caplets[0].fixing_date == date(2026, 1, 16)
+        (caplet,) = cap.caplets
+        assert caplet.fixing_date == date(2026, 1, 16)
+        forward = caplet_forward_rate(caplet, option_curve_set)
+        numeraire = caplet_numeraire(caplet, option_curve_set)
+        value = numeraire * bachelier.price(forward, strike, 1 / 365, VOL.as_normal_decimal())
+        expected = numeraire * max(forward - strike, 0.0) - value
         greeks = option_greeks(cap, option_curve_set, VOL)
-        assert greeks.theta < 0.0
+        assert greeks.value == pytest.approx(value, rel=1e-13, abs=0.0)
+        assert greeks.theta == pytest.approx(expected, rel=1e-12, abs=1e-9)
+        # Zero, not negative, at 3.5%: thirteen standard deviations in the
+        # money a day from fixing, there is no time value left to lose.
+        assert greeks.theta <= 0.0
 
 
 class TestALognormalCapHasTheVegaOfItsCaplets:
@@ -711,11 +729,63 @@ class TestACapWhoseFirstFixingIsToday:
         assert whole.vega == pytest.approx(rest.vega, rel=1e-12, abs=0.0)
         assert whole.theta < 0.0
 
-    def test_theta_still_asks_for_no_fixing_tomorrow(self, option_curve_set):
-        # Seen from tomorrow, today's fixing would be in the past and
-        # required; theta holds every period's status at the valuation date.
-        greeks = option_greeks(self._cap(), option_curve_set, VOL)
-        assert math.isfinite(greeks.theta)
+    @pytest.mark.parametrize("vol", [VOL, Volatility.lognormal_percent(25.0)])
+    def test_a_single_period_fixing_today_has_zero_theta_and_vega(self, option_curve_set, vol):
+        # Closed form: the value is intrinsic on the forward today and
+        # tomorrow alike, so theta is exactly zero, and so is vega. Seen from
+        # tomorrow, today's fixing would be in the past and required; theta
+        # holds every period's status at the valuation date and asks for
+        # nothing.
+        cap = replace(self._cap(), maturity=date(2026, 4, 20))
+        (caplet,) = cap.caplets
+        greeks = option_greeks(cap, option_curve_set, vol)
+        forward = caplet_forward_rate(caplet, option_curve_set)
+        assert greeks.value == caplet_numeraire(caplet, option_curve_set) * max(
+            forward - caplet.strike, 0.0
+        )
+        assert greeks.theta == 0.0
+        assert greeks.vega == 0.0
+
+    def test_a_misnamed_series_is_an_error_not_an_absent_fixing(self, option_curve_set):
+        # A snapshot holding "TERM_SOFR" rather than "TERM_SOFR_3M" used to be
+        # read as "today's fixing is not published yet": the cap priced at
+        # the curve forward, 11,018.00 where its 4.50% fixing gives 18,440.32,
+        # with no warning and observed quality.
+        misnamed = MarketSnapshot(
+            AS_OF,
+            {"TERM_SOFR": Series("TERM_SOFR", (AS_OF,), (0.045,), Provenance(source="test"))},
+        )
+        with pytest.raises(MissingFixingError, match="'TERM_SOFR_3M'"):
+            cap_floor_pv(self._cap(), option_curve_set, VOL, fixings=misnamed)
+
+    @pytest.mark.parametrize("fixings", [None, "empty_series"])
+    def test_the_curve_standing_in_for_the_fixing_is_a_degradation(
+        self, option_curve_set, fixings
+    ):
+        # Without fixings, or with the right series but not that day in it,
+        # the curve's forward stands in -- QuantLib's default -- and the
+        # result says so as a degradation, which its greeks inherit.
+        snapshot = None
+        if fixings == "empty_series":
+            snapshot = _fixings(date(2026, 1, 14))
+        result = cap_floor_pv(self._cap(), option_curve_set, VOL, fixings=snapshot)
+        warning = next(
+            w for w in result.evidence.warnings if w.code == "fixing_forecast_on_fixing_date"
+        )
+        assert "2026-01-15" in warning.message
+        assert warning.data_quality is DataQuality.ASSUMED
+        assert result.evidence.worst_quality is DataQuality.ASSUMED
+        greeks = option_greeks(self._cap(), option_curve_set, VOL, fixings=snapshot)
+        assert "fixing_forecast_on_fixing_date" in {w.code for w in greeks.evidence.warnings}
+
+    def test_a_supplied_fixing_carries_no_such_degradation(self, option_curve_set):
+        result = cap_floor_pv(
+            self._cap(), option_curve_set, VOL, fixings=_fixings(AS_OF, rate=0.045)
+        )
+        assert "fixing_forecast_on_fixing_date" not in {
+            w.code for w in result.evidence.warnings
+        }
+        assert result.evidence.worst_quality is DataQuality.OBSERVED
 
 
 QL_HIGH_VOL_CAP = {

@@ -48,8 +48,9 @@ from rates_engine.instruments.capfloor import CapFloor
 from rates_engine.instruments.swaption import Swaption
 from rates_engine.market.snapshot import MarketSnapshot
 from rates_engine.models import bachelier, black
-from rates_engine.pricing.collateral import valuation_warnings
+from rates_engine.pricing.collateral import merge_warnings, valuation_warnings
 from rates_engine.pricing.options import (
+    OptionPriceResult,
     PeriodStatus,
     cap_floor_periods,
     cap_floor_pv,
@@ -289,12 +290,16 @@ def option_greeks(
     valuation = as_of or curve_set.as_of
     shift = rate_bump_bp * 1e-4
 
-    def at(curves: CurveSet, vol: Volatility) -> float:
+    def priced(curves: CurveSet, vol: Volatility) -> OptionPriceResult:
         if isinstance(option, Swaption):
-            return swaption_pv(option, curves, vol, as_of=valuation).value
-        return cap_floor_pv(option, curves, vol, as_of=valuation, fixings=fixings).value
+            return swaption_pv(option, curves, vol, as_of=valuation)
+        return cap_floor_pv(option, curves, vol, as_of=valuation, fixings=fixings)
 
-    base = at(curve_set, volatility)
+    def at(curves: CurveSet, vol: Volatility) -> float:
+        return priced(curves, vol).value
+
+    base_result = priced(curve_set, volatility)
+    base = base_result.value
     up = at(shifted(curve_set, shift), volatility)
     down = at(shifted(curve_set, -shift), volatility)
     delta = (down - up) / 2.0 / rate_bump_bp
@@ -352,7 +357,11 @@ def option_greeks(
                 "base_value": base,
             },
             sources=source_evidence,
-            warnings=valuation_warnings(option, curve_set),
+            # The price's own degradations -- a forecast standing in for a
+            # fixing, say -- belong to every greek computed from it.
+            warnings=merge_warnings(
+                valuation_warnings(option, curve_set), base_result.evidence.warnings
+            ),
         ),
         delta=delta,
         gamma=gamma,
