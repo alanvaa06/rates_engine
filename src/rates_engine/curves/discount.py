@@ -25,7 +25,11 @@ from datetime import date
 from functools import cached_property
 
 from rates_engine.conventions.daycount import CURVE_TIME_BASIS, DayCount, year_fraction
-from rates_engine.core.errors import CurveArbitrageError, UnsupportedConventionError
+from rates_engine.core.errors import (
+    CurveArbitrageError,
+    MissingFixingError,
+    UnsupportedConventionError,
+)
 from rates_engine.core.evidence import Degradation
 from rates_engine.core.money import Currency, require_same_currency
 from rates_engine.curves.interpolation import MonotoneConvex
@@ -294,11 +298,25 @@ class DiscountCurve:
 
         Raises:
             UnsupportedConventionError: ``compounding`` is not implemented.
+            MissingFixingError: ``start`` is before :attr:`as_of`. The part
+                of the period before it is history, which no curve holds:
+                :meth:`df` reads one there, and the ratio it returned was
+                nobody's rate -- 2.61% for a quarter begun a month ago on a
+                flat 4% curve.
             ValueError: ``end`` is not after ``start``.
         """
         if compounding not in _COMPOUNDING:
             raise UnsupportedConventionError(
                 f"compounding {compounding!r} is not implemented; supported: {_COMPOUNDING}"
+            )
+        if start < self.as_of:
+            raise MissingFixingError(
+                f"a forward from {start} to {end} starts before this curve's valuation date "
+                f"{self.as_of}. The part before it is history -- published fixings -- and a "
+                "curve holds none: it reads its discount factors there as one, and the rate "
+                "that comes out is nobody's. Value a period that has started from its "
+                "fixings: fixings= on the pricers, risk measures and hedges, or a "
+                "RealizedStubNode for the realised part of a bootstrap."
             )
         tau = year_fraction(start, end, day_count)
         if tau <= 0.0:

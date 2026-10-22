@@ -160,3 +160,45 @@ class TestOneFixingLagOnTheIndex:
         explicit = CapFloor(effective=date(2026, 4, 20), maturity=date(2027, 4, 20),
                             strike=0.04, fixing_lag_days=2)
         assert cap == explicit and hash(cap) == hash(explicit)
+
+
+# ---------------------------------------------------------------------------
+# A forward that starts before the curve does is refused.
+# ---------------------------------------------------------------------------
+
+
+class TestAForwardBeforeTheValuationDateIsRefused:
+    """``DiscountCurve.df`` is one on or before ``as_of``, so such a forward is not anybody's rate.
+
+    The part before ``as_of`` is history, published fixings, which a curve
+    does not hold. The forward used to divide one by a discount factor and
+    return the result: from 2025-12-15 to 2026-03-16 on a flat 4% curve
+    that is 2.61% where the market rate is 4%, the cap error the review of
+    2026-10-15 found. The pricers no longer ask; this makes sure no caller
+    can.
+    """
+
+    def test_it_raises_and_names_the_way_round(self):
+        from rates_engine.core.errors import MissingFixingError
+
+        with pytest.raises(MissingFixingError) as caught:
+            _flat_curve().forward(date(2025, 12, 15), date(2026, 3, 16))
+        message = str(caught.value)
+        assert "2025-12-15" in message and "2026-01-15" in message
+        assert "fixings=" in message and "RealizedStubNode" in message
+
+    def test_a_forward_from_the_valuation_date_itself_is_the_curve_s(self):
+        end = date(2026, 4, 15)
+        expected = (1.0 / _df(end) - 1.0) / ((end - AS_OF).days / 360.0)
+        assert _flat_curve().forward(AS_OF, end) == pytest.approx(expected, rel=1e-13)
+
+    def test_a_futures_node_that_has_started_cannot_calibrate_a_curve(self):
+        # Its settlement compounds fixings from before as_of, which the
+        # bootstrap would have read as accruing from as_of. The realised
+        # part goes in a RealizedStubNode instead.
+        from rates_engine.core.errors import MissingFixingError
+        from rates_engine.curves.bootstrap import FuturesNode, bootstrap_discount_curve
+
+        started = FuturesNode(start=date(2025, 12, 17), end=date(2026, 3, 18), forward_rate=0.04)
+        with pytest.raises(MissingFixingError, match="RealizedStubNode"):
+            bootstrap_discount_curve(AS_OF, (started,))
