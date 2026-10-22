@@ -274,9 +274,10 @@ ends unadjusted, so interest accrued to a Saturday was paid on the Monday.
 `Schedule.generate(..., adjust_accrual_ends=False)` reproduces the old
 schedule.
 
-**Nothing here reads the network except `market.providers.fred`,** and that
-imports `urllib` inside the call. Importing `rates_engine` opens no socket and
-installs no warning filter; `tests/test_import_side_effects.py` enforces both.
+**Nothing here reads the network except `market.providers.fred` and
+`market.providers.banxico`,** and each imports `urllib` inside the call that
+uses it. Importing `rates_engine` opens no socket and installs no warning
+filter; `tests/test_import_side_effects.py` enforces both.
 
 ## Where things live
 
