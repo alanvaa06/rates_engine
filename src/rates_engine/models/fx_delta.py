@@ -321,7 +321,7 @@ def strike_from_delta(
     rule = _require(convention)
     if not 0.0 < target_delta < 1.0:
         raise ValueError(
-            f"target_delta is a magnitude in (0, 1) — 0.25 for a 25-delta put as well "
+            f"target_delta is a magnitude in (0, 1): 0.25 for a 25-delta put as well "
             f"as a 25-delta call; got {target_delta!r}"
         )
     if expiry <= 0.0 or volatility <= 0.0:
