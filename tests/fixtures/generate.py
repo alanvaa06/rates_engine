@@ -126,6 +126,42 @@ def write_treasuries() -> None:
 HOLIDAY_YEARS = range(2022, 2031)
 """The years the holiday dump covers."""
 
+_QUALITY_ORDER = ("observed", "synthetic", "proxy", "assumed")
+"""DataQuality's values, best first, so the worst of a file's ranges can be read off."""
+
+
+def quality_by_range(
+    first: date, last: date, verified_from: date, verified_through: date
+) -> tuple[str, list[dict[str, str]]]:
+    """Split ``[first, last]`` into the stretch checked against the record and the rest.
+
+    Only non-empty ranges are returned, in date order: an 'assumed' stretch
+    before ``verified_from``, the 'observed' one inside the record, an
+    'assumed' one after ``verified_through``. With the record covering the
+    whole file there is one range, and the file is 'observed'.
+
+    Args:
+        first: First date of the file.
+        last: Last date of the file.
+        verified_from: First date the calendar was checked against the record.
+        verified_through: Last date it was checked.
+
+    Returns:
+        The file's overall quality, the worst of its ranges, and the ranges.
+    """
+    bounds = (
+        (first, min(last, verified_from - timedelta(days=1)), "assumed"),
+        (max(first, verified_from), min(last, verified_through), "observed"),
+        (max(first, verified_through + timedelta(days=1)), last, "assumed"),
+    )
+    ranges = [
+        {"from": start.isoformat(), "to": end.isoformat(), "data_quality": quality}
+        for start, end, quality in bounds
+        if start <= end
+    ]
+    worst = max((r["data_quality"] for r in ranges), key=_QUALITY_ORDER.index)
+    return worst, ranges
+
 
 def write_holidays() -> None:
     """The SIFMA calendar this package implements, dumped for review."""
@@ -133,28 +169,23 @@ def write_holidays() -> None:
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         writer.writerow(["date", "year"])
+        # Closures only: holidays(year) leaves out a Saturday New Year's Day
+        # or Veterans Day, which closes nothing.
         for year in HOLIDAY_YEARS:
             for day in sorted(SIFMA_US.holidays(year)):
                 writer.writerow([day.isoformat(), year])
-    first, last = date(HOLIDAY_YEARS[0], 1, 1), date(HOLIDAY_YEARS[-1], 12, 31)
-    checked_to = min(last, SIFMA_US.VERIFIED_THROUGH)
+    # The file's quality is the worst of its ranges, as an evidence chain's
+    # worst_quality is everywhere else in the package.
+    worst, ranges = quality_by_range(
+        date(HOLIDAY_YEARS[0], 1, 1),
+        date(HOLIDAY_YEARS[-1], 12, 31),
+        SIFMA_US.VERIFIED_FROM,
+        SIFMA_US.VERIFIED_THROUGH,
+    )
     _provenance(
         path,
-        # The file's quality is the worst of its ranges, as an evidence
-        # chain's worst_quality is everywhere else in the package.
-        data_quality="assumed",
-        data_quality_by_range=[
-            {
-                "from": max(first, SIFMA_US.VERIFIED_FROM).isoformat(),
-                "to": checked_to.isoformat(),
-                "data_quality": "observed",
-            },
-            {
-                "from": (checked_to + timedelta(days=1)).isoformat(),
-                "to": last.isoformat(),
-                "data_quality": "assumed",
-            },
-        ],
+        data_quality=worst,
+        data_quality_by_range=ranges,
         criterion=(
             "A range is 'observed' when SIFMA_US agrees, on every weekday in it, with "
             "the New York Fed's SOFR publication record: a business day exactly where "

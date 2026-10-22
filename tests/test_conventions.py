@@ -585,3 +585,75 @@ class TestObservanceAcrossAYearBoundary:
     def test_an_ordinary_year_end_is_still_a_business_day(self):
         # 31 December 2026 is a Thursday and no holiday is observed on it.
         assert SIFMA_US.is_business_day(date(2026, 12, 31))
+
+
+def _generator():
+    """``tests/fixtures/generate.py`` as a module, without running it."""
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).parent / "fixtures" / "generate.py"
+    spec = importlib.util.spec_from_file_location("fixture_generator", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class TestHolidayFixtureProvenance:
+    """The quality ranges the holiday dump's provenance records.
+
+    The generator wrote the 'assumed' tail as running from the day after the
+    verified stretch to the file's end, so once the stretch passed the file's
+    last day the range came out inverted: with ``VERIFIED_THROUGH`` on
+    2031-03-01, from 2031-01-01 to 2030-12-31.
+    """
+
+    FIRST, LAST = date(2022, 1, 1), date(2030, 12, 31)
+
+    def test_today_the_record_covers_the_front_of_the_file(self):
+        worst, ranges = _generator().quality_by_range(
+            self.FIRST, self.LAST, date(2018, 4, 3), date(2026, 10, 14)
+        )
+        assert worst == "assumed"
+        assert ranges == [
+            {"from": "2022-01-01", "to": "2026-10-14", "data_quality": "observed"},
+            {"from": "2026-10-15", "to": "2030-12-31", "data_quality": "assumed"},
+        ]
+
+    def test_a_record_past_the_file_leaves_one_observed_range(self):
+        worst, ranges = _generator().quality_by_range(
+            self.FIRST, self.LAST, date(2018, 4, 3), date(2031, 3, 1)
+        )
+        assert worst == "observed"
+        assert ranges == [{"from": "2022-01-01", "to": "2030-12-31", "data_quality": "observed"}]
+
+    def test_a_record_starting_inside_the_file_marks_the_front_assumed(self):
+        worst, ranges = _generator().quality_by_range(
+            self.FIRST, self.LAST, date(2024, 1, 1), date(2025, 12, 31)
+        )
+        assert worst == "assumed"
+        assert [(r["from"], r["to"], r["data_quality"]) for r in ranges] == [
+            ("2022-01-01", "2023-12-31", "assumed"),
+            ("2024-01-01", "2025-12-31", "observed"),
+            ("2026-01-01", "2030-12-31", "assumed"),
+        ]
+
+    def test_no_range_is_ever_inverted(self):
+        generator = _generator()
+        for through in (date(2021, 6, 1), date(2026, 10, 14), date(2030, 12, 31), date(2040, 1, 1)):
+            _, ranges = generator.quality_by_range(self.FIRST, self.LAST, date(2018, 4, 3), through)
+            assert all(r["from"] <= r["to"] for r in ranges), through
+            assert ranges[0]["from"] == "2022-01-01" and ranges[-1]["to"] == "2030-12-31"
+
+    def test_the_committed_provenance_is_what_the_generator_writes(self, fixtures_dir):
+        import json
+
+        record = json.loads(
+            (fixtures_dir / "sifma_holidays.csv.provenance.json").read_text(encoding="utf-8")
+        )
+        worst, ranges = _generator().quality_by_range(
+            self.FIRST, self.LAST, SIFMA_US.VERIFIED_FROM, SIFMA_US.VERIFIED_THROUGH
+        )
+        assert record["data_quality"] == worst
+        assert record["data_quality_by_range"] == ranges
