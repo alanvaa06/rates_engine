@@ -94,7 +94,7 @@ __all__ = ["Priceable", "Swappable", "project", "float_leg", "fra_fair_rate", "i
 _TERM_SOFR_FIXING_LAG_DAYS = 2
 """Business days, on the index's calendar, from a Term SOFR fixing to the
 start of the period it sets: the ARRC's convention. Private and local for
-now: the lag is a property of the index, and alanvaa06/rates_engine#20
+now: the lag is a property of the index, and alanvaa06/rates_engine#21
 moves it to one ``fixing_lag_days`` on :class:`RateIndex` that every
 reader of a term fixing uses."""
 
