@@ -278,6 +278,18 @@ schedule.
 imports `urllib` inside the call. Importing `rates_engine` opens no socket and
 installs no warning filter; `tests/test_import_side_effects.py` enforces both.
 
+**`rateng viz` is not in `COMMANDS`, and `rateng-mcp` does not serve it.**
+A `Command` maps one config to one JSON payload and the MCP server mirrors
+that table byte for byte. `viz` takes two configs and writes HTML, so it
+hangs off the CLI parser directly and prints a `VizResult` receipt naming
+each panel's state instead of a payload. The page recomputes nothing: every
+chart reads fields of the payloads the other commands print. The one
+number they do not print, the instantaneous-forward gap between the two
+interpolations, comes from `curves.compare_interpolations`, and when
+monotone convex refuses nodes that log-linear accepted that refusal is
+reported in the panel rather than raised. No pip extra: the template is
+package data, and the page makes no network request.
+
 ## Where things live
 
 Packages sit on layers, lowest first; a package imports only from layers
@@ -302,9 +314,9 @@ Subpackage `__init__` files document their layer and re-export nothing, so
 | `pricing` | 4 | `linear` (`pv`, `par_rate`, `annuity`, `price_on_parametric`, and `discounted_value`, the bare float for callers that reprice many times), `options` (swaptions, caps and floors), `fx_forward` (the CIP forward and its basis), `collateral` (the discounting evidence and degradations every result carries), `projection` (`project`, `float_leg`: instruments to cashflows), `calibration` (`SwapQuoteNode`) |
 | `risk` | 5 | `bumps` (the one shift-and-reprice primitive, `BUMP_BP`, `tent_weights`), `sensitivities` (parallel `dv01`, key rate, duration conventions, convexity, and the stubs), `greeks` (option greeks) |
 | `hedging` | 6 | `futures_strip` (`strip_hedge`, `shock_table`), `fx_structures` (`compare_structures`), `program` (the hedging policy as data) |
-| `reporting` | 7 | JSON payloads and error payloads |
-| `app` | 8 | The use cases: `config` (loading, dates), `builders` (config blocks to domain objects), `commands` (one function per command and `COMMANDS`, the table every interface dispatches through) |
-| `cli` | 9 | `rateng bootstrap / price / hedge / describe / list-instruments / fx-forward / hedge-structures` |
+| `reporting` | 7 | JSON payloads and error payloads; `viz` (the payloads drawn on one HTML page, template shipped beside it) |
+| `app` | 8 | The use cases: `config` (loading, dates), `builders` (config blocks to domain objects), `commands` (one function per command and `COMMANDS`, the table every interface dispatches through; `viz`, which is not in the table) |
+| `cli` | 9 | `rateng bootstrap / price / hedge / describe / list-instruments / fx-forward / hedge-structures / viz` |
 | `mcp_server` | 9 | `rateng-mcp`: the same seven payloads over stdio, from the same table |
 
 ## The CLI in one line
@@ -317,6 +329,7 @@ rateng hedge --config c.json --json             # contracts per period plus the 
 rateng list-instruments --json                  # what this build prices, and what each needs
 rateng fx-forward --config fx.json --json       # CIP forward, basis reported separately
 rateng hedge-structures --config fx.json --json # eight structures, costed side by side
+rateng viz --config c.json --fx-config fx.json --out desk.html  # every payload above, drawn on one page
 ```
 
 The MCP server is the same seven handlers over stdio, so a tool's answer is

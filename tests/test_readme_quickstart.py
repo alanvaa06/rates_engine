@@ -94,13 +94,22 @@ def test_the_quickstart_prints_what_the_readme_claims(readme, tmp_path):
 
 
 def test_every_bash_command_in_the_readme_is_one_this_package_offers(readme):
-    # Read the command set from the CLI's own table rather than repeating it
+    # Read the command set from the CLI's own parser rather than repeating it
     # here, so adding a command cannot leave this test asserting the old one.
-    from rates_engine.app.commands import COMMANDS as _COMMANDS
+    # The parser, not COMMANDS: viz is a subcommand that is deliberately not
+    # in the table, and the README is allowed to show it.
+    import argparse
 
+    from rates_engine.cli import build_parser
+
+    subparsers = next(
+        action
+        for action in build_parser()._actions
+        if isinstance(action, argparse._SubParsersAction)
+    )
     commands = re.findall(r"^rateng ([\w-]+)", readme, flags=re.MULTILINE)
     assert commands, "the README shows no CLI usage"
-    assert set(commands) <= set(_COMMANDS)
+    assert set(commands) <= set(subparsers.choices)
 
 
 def test_the_readme_names_every_console_script(readme):
