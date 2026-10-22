@@ -16,6 +16,7 @@ from rates_engine.conventions.calendar import (
     HolidayCalendar,
     _nth_weekday,
 )
+from rates_engine.core.errors import ConventionError
 
 __all__ = ["imm_dates", "imm_date", "next_imm_on_or_after", "add_months", "Schedule"]
 
@@ -97,8 +98,9 @@ class Schedule:
     """Accrual periods and payment dates for one leg.
 
     Attributes:
-        accrual_start: Start of each period: the effective date, then each
-            previous period's end.
+        accrual_start: Start of each period: the effective date, adjusted by
+            the roll convention unless the schedule was generated with
+            ``adjust_accrual_ends=False``, then each previous period's end.
         accrual_end: End of each period, adjusted by the roll convention
             unless the schedule was generated with
             ``adjust_accrual_ends=False``.
@@ -144,15 +146,45 @@ class Schedule:
         roll dates themselves are still counted from the unadjusted maturity,
         so an adjustment never drifts into the next period.
 
+        **The effective date is adjusted too.** The first period starts on
+        ``effective`` rolled by ``convention``, as in QuantLib's ``Schedule``,
+        which adjusts its first date with the same convention as the rolls.
+        Until v0.4 it was used as given, so a swap struck to start on the
+        June 2030 IMM date -- Juneteenth, a SIFMA holiday -- accrued from the
+        holiday rather than from the Thursday after. This moves a number only
+        when ``effective`` is not a business day; on a business day the
+        adjustment returns it unchanged.
+
+        **The adjusted start can come before ``effective``.** Modified
+        Following rolls a month-end Saturday back to the Friday, and so does
+        Preceding any weekend: ``effective`` Saturday 31 January 2026 starts
+        accruing on Friday 30 January, as it does in QuantLib. A trade valued
+        on that Saturday has therefore already begun -- one day of its first
+        period is history -- and is a started trade, not a forward-starting
+        one. This function cannot say so, because it does not know the
+        valuation date; the instrument's ``span`` reports the adjusted start
+        so that whatever does know it can tell. Clamping the start to the
+        valuation date instead would drop a day of accrual the trade has.
+
+        **A first period that rolls onto the start is dropped.** When the
+        convention pulls the first roll date back onto the adjusted
+        effective date -- an effective date of Friday 29 May 2026 and a roll
+        on Sunday 31 May, which Modified Following returns to the Friday --
+        the period it would close has no days in it. Until v0.4 the schedule
+        kept it: an OIS carried an empty flow and an ``IRSwap`` could not be
+        priced at all. The roll date is removed, so the first period runs to
+        the next one, which is what QuantLib's ``Schedule`` does.
+
         Args:
-            effective: Start of the first accrual period.
-            maturity: End of the last accrual period.
+            effective: Start of the first accrual period, before adjustment.
+            maturity: End of the last accrual period, before adjustment.
             frequency_months: Months per period; 12 for annual, 3 for quarterly.
             calendar: Calendar the payment roll uses.
             convention: Roll rule for payment dates.
             payment_lag_days: Business days between accrual end and payment.
             adjust_accrual_ends: ``False`` reproduces the pre-v0.4 schedule,
-                with unadjusted period ends and only the payments rolled.
+                with an unadjusted effective date and period ends and only the
+                payments rolled.
 
         Returns:
             The schedule.
@@ -160,6 +192,10 @@ class Schedule:
         Raises:
             ValueError: ``maturity`` is not after ``effective``, or the
                 frequency is not positive.
+            ConventionError: ``maturity`` adjusts onto or before the adjusted
+                effective date -- Friday 29 May 2026 to Sunday 31 May under
+                Modified Following -- so the roll convention leaves the trade
+                no accrual period at all.
         """
         if maturity <= effective:
             raise ValueError(f"maturity {maturity} must be after effective {effective}")
@@ -172,9 +208,25 @@ class Schedule:
             ends.append(cursor)
             cursor = add_months(maturity, -frequency_months * (len(ends)))
         ends.reverse()
+        start = effective
         if adjust_accrual_ends:
+            start = calendar.adjust(effective, convention)
             ends = [calendar.adjust(end, convention) for end in ends]
-        starts = [effective, *ends[:-1]]
+            # Roll dates are strictly after the unadjusted effective date, but
+            # adjusting both can land the first on the second. Only the first
+            # can: the next one is a whole period later, and no adjustment
+            # moves a date by that much, so one test is enough.
+            if ends[0] <= start:
+                if len(ends) == 1:
+                    raise ConventionError(
+                        f"maturity {maturity} adjusts to {ends[0]} under "
+                        f"{convention.value}, which is not after the adjusted effective "
+                        f"date {start}, so the schedule has no accrual period. Move the "
+                        "maturity to a later date, or roll with a convention that keeps "
+                        "it after the start."
+                    )
+                ends = ends[1:]
+        starts = [start, *ends[:-1]]
 
         payments = tuple(
             calendar.adjust(
