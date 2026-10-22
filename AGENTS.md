@@ -76,8 +76,11 @@ contains. `future.year_fraction` is the *realised* accrual and is the wrong
 thing to size a hedge with — it is off by about one percent. `strip_hedge`
 sizes each contract at its own: `FuturesNode(contract="SR1")` or `"SR3"`,
 or `None` to read it off the period (a calendar month is SR1, an IMM
-quarter SR3). `contract_dv01` overrides every contract and is refused if it
-contradicts a declared one.
+quarter SR3). `contract_dv01` applies to every contract and is refused if
+it contradicts one the node declares or its period names; a period that is
+neither is sized as SR3 with a `futures_contract_assumed` degradation. On a
+strip that mixes SR1 and SR3, `total_contracts` and `contract_dv01` are
+`None`: read `total_contracts_by_contract`.
 
 **DV01 is per basis point, not per percent.** Every risk result carries a
 `unit` field for this reason. `money_duration` is the same quantity per unit
@@ -117,6 +120,8 @@ The lognormal floor is 5% rather than something smaller on purpose: swaption
 normal vols live at 60-150 bp, which as decimals are 0.006-0.015, so any
 floor below that lets the entire population of "normal passed as lognormal"
 through. `Volatility.unchecked()` exists for the genuinely extreme case.
+FX is the exception: `StructureQuote` takes a float FX vol in [0.2%, 500%],
+since FX has no normal-vol quote to confuse it with.
 
 **The model follows from the units, not from an argument.** `pricing.options`
 picks Bachelier for a normal volatility and Black for a lognormal one. Pass
@@ -139,10 +144,12 @@ nothing. `expansion_is_valid` asks the question without raising.
 **A caplet expires at its fixing, and a seasoned cap needs its fixings.**
 Term SOFR fixes two business days before its period; pass
 `fixings=MarketSnapshot(...)` (series `TERM_SOFR_3M`) to value periods
-already fixed. A period fixing on `as_of` uses that day's fixing if you
-pass it and the curve's forward if you do not, and a swaption expiring on
-`as_of` is worth its intrinsic value. `sabr.lognormal_vol` with a shift
-needs `shifted_black=True`.
+already fixed; a snapshot without that series is refused. A period fixing
+on `as_of` uses that day's fixing if you pass it and the curve's forward if
+you do not, marked `curve_forward_for_todays_fixing:<series>`. An event
+dated `as_of` has happened, as in QuantLib by default: a payment that day
+is not valued, and a swaption expiring that day is refused like an earlier
+expiry. `sabr.lognormal_vol` with a shift needs `shifted_black=True`.
 
 **A term rate off a futures-fitted curve is not a traded term rate.** It is
 the expected average overnight rate, with no convexity adjustment. The
@@ -158,7 +165,9 @@ both; on swaps paid with a lag they are not (up to 0.58 bp of zero rate on
 a 12-swap SOFR strip). They differ most in the instantaneous forward
 between nodes, which no instrument constrains.
 `curves.compare_interpolations` measures the gap rather than declaring a
-winner.
+winner. A monotone convex curve with a forward near zero has a node at
+zero between intervals of opposite sign, so a DV01 whose down-bump crosses
+zero differs from a small-bump DV01 by about 1e-5 relative.
 
 **A delta does not name a strike.** FX has four conventions — spot or
 forward, premium-adjusted or not — and they give four different strikes for
@@ -205,9 +214,10 @@ zero spread off one forward, and that is as far as this build goes. The
 piece it would plug into exists: `CurveSet` already projects on one curve
 and discounts on another of the same currency.
 
-**An FX forward runs from the spot date, not from `as_of`.** USD/MXN spot
-settles two business days later on the joint SIFMA_US + BMV calendar
-(`USDMXN.spot_date(as_of)`), and parity is
+**An FX forward runs from the spot date, not from `as_of`.** USD/MXN
+counts two peso business days and rolls to a day the Federal Reserve is
+open too (`USDMXN.spot_date(as_of)`); dollars settle on `FEDERAL_RESERVE`,
+not `SIFMA_US`. Parity is
 `S [P_f(T)/P_f(spot)] / [P_d(T)/P_d(spot)]`; measuring from `as_of` was 76
 to 78 pips too high. A delivery on or before the spot date raises. The
 CLI's `r_domestic`/`r_foreign` are continuously compounded ACT/365F
@@ -222,7 +232,8 @@ Year's Day is not moved to 31 December; SOFR is published that day), but
 an observance rule can push one across, so use `is_business_day`, which
 checks the neighbouring years; do not test membership of
 `holidays(day.year)` yourself. That exact shortcut was a bug in 0.1.0 and
-0.2.0.
+0.2.0. It lists only weekdays the market closes; a Saturday New Year's Day
+or Veterans Day is not in it.
 
 **The Mexican calendar is `BMV`, and that is not Banxico.** It is the stock
 exchange calendar, which is the one a reachable source documents. Banxico's
@@ -247,13 +258,16 @@ whose provenance says `data_quality="proxy"` raises
 `averaged` raise `MissingFixingError` for a business day after the
 valuation date, and `require` returns the series cut there. Load a history
 once and wrap it in a `MarketSnapshot` per backtest date; `snapshot.series`
-keeps what was loaded.
+keeps what was loaded. The fixing dated `as_of` is served, a one-day
+look-ahead for SOFR.
 
-**FRED quotes in percent; this package in decimals.** `fred.fetch_series`
-and `load_series_csv` on a FRED download divide the overnight rates, the
-SOFR averages and `DGS*` by 100, leave `SOFRINDEX` alone, and refuse any
-other series until you pass `percent=`. A `date,value` file is read as
-decimals.
+**Units are an argument.** `load_series_csv` reads named columns (and
+`date,value`) as decimals unless `percent=True`; a FRED download saved as
+is (`observation_date,<ID>`) is read in FRED's units, as
+`fred.fetch_series` reads it: the overnight rates, SOFR averages and
+`DGS*` are divided by 100, `SOFRINDEX` is not, anything else needs
+`percent=`. A rate file evidently in percent, read without `percent=`, is
+refused.
 
 **`Evidence` is nested, not flat.** `evidence.sources` holds the evidence of
 the inputs, so `hedge.evidence.sources[0].sources[0]` is the bootstrap. Read
@@ -270,11 +284,11 @@ Call `curve.require_monotone()` when you mean to assert it.
 extra. They are not quite interchangeable in one respect the code handles for
 you: YAML parses `2026-01-15` into a `date`, JSON leaves it a string.
 
-**A config key nobody reads is an error, not a no-op.** Commands refuse a
-key in a block they use that they neither read nor find in `describe`'s
-`config` schema, naming the path and the closest key; keys another command
-reads pass, `_` keys are comments; a missing required key is a
-`ConfigurationError` naming the path.
+**Every key in a config file must be documented.** `rateng describe
+--json` lists them under `config`; a key it does not list is refused by
+path with the closest match, whichever command reads the file, and `_`
+keys are comments. Adding a key is one entry in `app/config.py`'s
+`CONFIG_SCHEMA`.
 
 **The discounting evidence comes from the curve's currency.** Every price
 records `discounting: collateral_rate_ois_<index>`, where the index is
@@ -307,8 +321,9 @@ nothing; the floating period in progress is part history. Pass
 `fixings=MarketSnapshot(...)` (series named after the index) to `pv`,
 `par_rate` or `discounted_value`, or get `MissingFixingError`. A term
 fixing dated before `as_of` is required; one dated `as_of` is read if you
-pass it and forecast if you do not. The fixings used are in the evidence
-as `realised_fixings`.
+pass it and forecast if you do not, which the price marks with the
+`curve_forward_for_todays_fixing:<series>` degradation. The fixings used
+are in the evidence as `realised_fixings`.
 
 **Calibrate to a swap with `SwapQuoteNode`, not `ParSwapNode`, when you have
 the swap.** `SwapQuoteNode(swap, quote)` fits the pricer's own par rate, so
@@ -332,7 +347,14 @@ the adjusted end -- the SOFR OIS and 2006 ISDA convention. The effective
 date is rolled by the same convention, and a first roll date the
 convention pulls back onto it is dropped rather than left as a zero-day
 period, as QuantLib's `Schedule` does. v0.3 left period ends unadjusted,
-so interest accrued to a Saturday was paid on the Monday.
+so interest accrued to a Saturday was paid on the Monday. `span` reports
+those adjusted dates -- an `OISSwap` written from Saturday 30 May 2026
+spans from Friday the 29th -- so a hedge's coverage check and a swaption's
+exercise date are tested against the day the swap starts accruing. A
+rolled start can come before the stated effective date; valued in between,
+the swap has begun and `pv` asks for its fixings. A schedule the convention
+collapses to no period raises `ConventionError` when the instrument is
+built.
 `Schedule.generate(..., adjust_accrual_ends=False)` reproduces the old
 schedule.
 
@@ -355,7 +377,7 @@ Subpackage `__init__` files document their layer and re-export nothing, so
 | Package | Layer | Responsibility |
 | --- | --- | --- |
 | `core` | 0 | `errors` (every refusal, each with an exit code), `evidence`, `results` (`EngineResult`), `money` (`Currency`), `diagnostics` (reading an evidence chain) |
-| `conventions` | 1 | Day counts, the SIFMA and BMV calendars, rolls, IMM dates, schedules; `indices` (`RateIndex`, the collateral index of each currency, `UNRESOLVED_MXN`); the shared vocabulary `Side`, `OptionKind`, `CurrencyPair` |
+| `conventions` | 1 | Day counts, the SIFMA, Federal Reserve and BMV calendars (`settlement` holds the payment-system ones FX settles on), rolls, IMM dates, schedules; `indices` (`RateIndex`, the collateral index of each currency, `UNRESOLVED_MXN`); the shared vocabulary `Side`, `OptionKind`, `CurrencyPair` |
 | `market` | 2 | Snapshots, the SOFR compounding rules, realised sigma (`estimators`), the `file`, `fred` and `banxico` providers |
 | `models` | 2 | Closed forms: Black, Bachelier, Garman-Kohlhagen, SABR, the four FX delta conventions, Ho-Lee and Hull-White convexity |
 | `curves` | 3 | `DiscountCurve`, the bootstrap, the four views, the dual-curve solver, monotone convex, Nelson-Siegel, the FOMC step curve, and the MXN curve with its unresolved conventions |
