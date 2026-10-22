@@ -12,6 +12,7 @@ import math
 from datetime import date, timedelta
 
 import pytest
+from test_sifma_publication_record import NO_SOFR_PUBLISHED, RECORD_FIRST, RECORD_LAST
 
 from rates_engine.conventions.calendar import SIFMA_US
 from rates_engine.conventions.indices import (
@@ -33,6 +34,15 @@ from rates_engine.pricing.linear import par_rate, pv
 from rates_engine.risk.sensitivities import dv01
 
 AS_OF = date(2026, 1, 15)
+
+PUBLICATION_RECORDS = {
+    "SIFMA_US": (RECORD_FIRST, RECORD_LAST, frozenset(NO_SOFR_PUBLISHED)),
+}
+"""The publication record each verified calendar is checked against, by calendar name.
+
+The SIFMA one is the FRED transcription in ``tests/test_sifma_publication_record.py``:
+first day, last day, and the weekdays with no SOFR between them.
+"""
 
 
 def _curve(currency: Currency, rate: float = 0.05) -> DiscountCurve:
@@ -76,23 +86,46 @@ class TestTheRegistry:
         assert not TIIE_FONDEO.is_verified
         assert not TIIE_28.is_verified
 
-    def test_a_verified_index_fixes_on_a_calendar_that_was_checked(self):
+    def test_a_verified_index_fixes_on_a_calendar_that_agrees_with_a_record(self):
         """An index with no unresolved convention cannot sit on an unchecked calendar.
 
         Until v0.4 SOFR claimed ``is_verified`` while ``SIFMA_US`` recorded its
         Saturday rule as an unchecked assumption, and that rule was wrong.
-        The calendar now names the stretch it was checked over against the
-        publication record (``tests/test_sifma_publication_record.py`` ties the
-        stretch to the record), and every verified index has to fix on a
-        calendar that does.
+        Declaring a verified stretch is not enough to pass here: the calendar
+        must have a publication record in :data:`PUBLICATION_RECORDS`, the
+        record must cover the stretch, and the calendar must agree with it on
+        every weekday of the stretch. A calendar that names two dates and has
+        no record behind them fails.
         """
         for index in INDICES.values():
             if not index.is_verified:
                 continue
-            verified_from = getattr(index.calendar, "VERIFIED_FROM", None)
-            verified_through = getattr(index.calendar, "VERIFIED_THROUGH", None)
+            calendar = index.calendar
+            assert calendar.name in PUBLICATION_RECORDS, (index.name, calendar.name)
+            first, last, closed = PUBLICATION_RECORDS[calendar.name]
+            verified_from = getattr(calendar, "VERIFIED_FROM", None)
+            verified_through = getattr(calendar, "VERIFIED_THROUGH", None)
             assert verified_from is not None and verified_through is not None, index.name
-            assert verified_from < verified_through, index.name
+            assert first <= verified_from < verified_through <= last, index.name
+            day, disagreements = verified_from, []
+            while day <= verified_through:
+                if day.weekday() < 5 and calendar.is_business_day(day) == (day in closed):
+                    disagreements.append(day)
+                day += timedelta(days=1)
+            assert disagreements == [], (index.name, disagreements[:5])
+
+    def test_a_calendar_with_dates_but_no_record_does_not_pass(self, monkeypatch):
+        """The check above, run against a peso index made to claim verification."""
+        from dataclasses import replace
+
+        from rates_engine.conventions.calendar import BMV
+
+        monkeypatch.setattr(type(BMV), "VERIFIED_FROM", date(2018, 4, 3), raising=False)
+        monkeypatch.setattr(type(BMV), "VERIFIED_THROUGH", date(2026, 10, 14), raising=False)
+        claimed = replace(TIIE_FONDEO, unresolved=())
+        monkeypatch.setitem(INDICES, claimed.name, claimed)
+        with pytest.raises(AssertionError):
+            self.test_a_verified_index_fixes_on_a_calendar_that_agrees_with_a_record()
 
     def test_sofr_s_calendar_covers_its_whole_published_history_so_far(self):
         assert SOFR.calendar is SIFMA_US
