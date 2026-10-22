@@ -63,7 +63,8 @@ of claim, and a reader deserves to know which one they are getting.
 | Vanna-volga: price at ATM plus the vega, vanna and volga the flat price fails to hedge | `volatility/fx_smile.py` | Castagna and Mercurio, via *Forwards, Multi-Curve and Swaptions (Post-LIBOR)* | **Not read in Castagna-Mercurio** |
 | Piecewise vanna-volga with ten-delta pillars | `volatility/fx_smile.py` | A construction choice without a paper | Derived here |
 | The broker (market strangle) butterfly | `volatility/fx_smile.py` | Clark 2011, *Foreign Exchange Option Pricing*; Reiswich and Wystup 2010, *Journal of Derivatives* 18(2) | Secondary, **not read**; verified numerically against QuantLib 1.44 market strangles |
-| The FX forward measured from the spot date, `S [P_f(T)/P_f(spot)] / [P_d(T)/P_d(spot)]` | `pricing/fx_forward.py`, `conventions/currency_pair.py` | QuantLib `FxSwapRateHelper` (code) | Secondary; QuantLib 1.44 agrees to 1e-12 |
+| The FX forward measured from the spot date, `S [P_f(T)/P_f(spot)] / [P_d(T)/P_d(spot)]`; the spot lag counted on the peso calendar and rolled to a day both currencies settle | `pricing/fx_forward.py`, `conventions/currency_pair.py` | QuantLib `FxSwapRateHelper` (code) | Secondary; QuantLib 1.44 agrees to 1e-12, and on the spot date of all 504 peso business days of 2026-27 (`tests/test_fx_spot_date.py`) |
+| The dollar leg settles on the Federal Reserve calendar: no Saturday observance, no Good Friday | `conventions/settlement.py` | QuantLib `UnitedStates(FederalReserve)` (code) | Secondary; its holiday list agrees on every weekday 1978-2100 (`tests/test_fx_spot_date.py`) |
 | Hedge structures and the cost-versus-protection trade-off | `hedging/fx_structures.py` | CFA Level III Reading 19; *CFA L3 Derivatives — Forwards, Futures, and Options* | Read |
 | `σ²(RDC) = σ²(RFC) + σ²(RFX) + 2ρσσ` | `hedging/fx_structures.py` | *CFA L3 Asset Allocation — Constraints, Currency, and Benchmarks* | Read |
 | The Mexican holiday calendar, thirteen rules | `conventions/calendar.py` | QuantLib `ql/time/calendars/mexico.cpp`, **read directly** | Read — but it is the **BMV** calendar, not Banxico's |
@@ -116,9 +117,10 @@ on six shapes including a sawtooth that goes negative with the collar
 switched off. That the *uncollared* version fails is what shows the test has
 something to catch. Reproducing every node's discount factor to 1e-13 across
 all four regions bounds the transcription of the integrals. The collar is
-applied only against intervals whose discrete forward is non-negative, an
-extension of ours: the paper states it for positive inputs, and with a
-negative neighbour its range is empty.
+sign-aware, `[min(0, 2f), max(0, 2f)]` per neighbour — an extension of
+ours: the paper states it for positive inputs. It keeps each interval's
+sign and is continuous at zero; a node between a positive and a negative
+interval sits at zero.
 
 **Vanna-volga.** Transcribed from a secondary source, and the protection is
 the property the construction is defined by: it must reproduce the three

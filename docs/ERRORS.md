@@ -11,7 +11,7 @@ says which.
 
 | It means | Recoverable | Do this | Exit code | Examples |
 | --- | --- | --- | --- | --- |
-| **Your inputs cannot support the calculation** | Yes, by changing the input | Supply the missing data, name a convention that exists, or declare the proxy you meant to use. Retrying unchanged is pointless. | `1` | `MissingFixingError`, `UnsupportedConventionError`, `InsufficientDataError`, `ProxySourceNotDeclaredError`, `ImplausibleInputError`, `MissingDependencyError`, `IncompatibleDependencyError`, `ConfigurationError`, `DeltaConventionError` |
+| **Your inputs cannot support the calculation** | Yes, by changing the input | Supply the missing data, name a convention that exists, or declare the proxy you meant to use. Retrying unchanged is pointless. | `1` | `MissingFixingError`, `UnsupportedConventionError`, `InsufficientDataError`, `ProxySourceNotDeclaredError`, `ImplausibleInputError`, `MissingDependencyError`, `IncompatibleDependencyError`, `ConfigurationError`, `DeltaConventionError`, `ConventionError` |
 | **The calculation is impossible or undefined on inputs that are fine** | Sometimes: each heading below says, and the JSON field follows it | Ask a different question, or relax the thing the message names. | `2` | `CurveArbitrageError`, `CurveMismatchError`, `BootstrapResidualError`, `UnderdeterminedCurveError`, `NoTenorQuoteSourceError`, `IncompleteStripError`, `PolicyBreachError`, `UnresolvedConventionError`, `UndefinedDurationError`, `KeyTenorOutOfRangeError`, `CurrencyMismatchError`, `ShiftRequiredError`, `ExpansionBreakdownError`, `MissingForwardError`, `SliceNotQuotedError`, `CalibrationError` |
 
 Everything derives from `RatesEngineError`, so one `except` catches the lot:
@@ -64,7 +64,25 @@ period.
 
 ### `ConventionError`
 
-The parent. Catch it to cover any convention problem.
+**Exit code 1. Recoverable: change the terms.**
+
+The parent of `UnsupportedConventionError` and `UnresolvedConventionError`:
+catch it to cover any convention problem.
+
+It is also raised itself, when an instrument is built, if its roll
+convention leaves the schedule no accrual period: an `OISSwap`, `IRSwap` or
+`CapFloor` whose maturity adjusts onto or before its adjusted effective date.
+Friday 2026-05-29 to Sunday 2026-05-31 under Modified Following is the case:
+the Sunday rolls back to the Friday. Move the maturity, or roll with a
+convention that keeps it after the start (Following gives 2026-05-29 to
+2026-06-01).
+
+```
+ConventionError: maturity 2026-05-31 adjusts to 2026-05-29 under
+modified_following, which is not after the adjusted effective date
+2026-05-29, so the schedule has no accrual period. Move the maturity to a
+later date, or roll with a convention that keeps it after the start.
+```
 
 ---
 
@@ -94,12 +112,16 @@ it declined to carry. And a snapshot serves nothing dated after its
 `as_of`: a fixing, or a business day inside a compounding or averaging
 period, after the valuation date is refused, naming both dates, so that a
 backtest cannot read the future. `realized_sofr_sigma` refuses an `as_of`
-later than the snapshot's for the same reason.
+later than the snapshot's for the same reason. The fixing dated `as_of`
+itself is served; for SOFR, published the next business day, that is a
+one-day look-ahead, documented on `MarketSnapshot`.
 
 A trade that has started raises it when a fixing it needs was not passed.
-The rule is QuantLib's: a fixing dated before the valuation date is
-required, one dated on it is read if supplied and forecast off the curve if
-not, and anything later is forecast.
+The rule is QuantLib's default: a fixing dated before the valuation date
+is required, one dated on it is read if supplied and forecast off the curve
+if not, and anything later is forecast. A forecast in place of a fixing
+dated `as_of` is reported, as the degradation
+`curve_forward_for_todays_fixing:<series>` (below), not raised.
 
 - A swap or FRA needs the history of an overnight period once the period
   has begun, and the fixing of a term period once its fixing date is before
@@ -111,17 +133,19 @@ not, and anything later is forecast.
   the keyword.
 - A cap or floor period whose rate fixed before the valuation date is
   valued on its published fixing, so `cap_floor_pv`, `caplet_pv` and
-  `option_greeks` raise this when `fixings=` is absent or lacks that date;
-  the message names the series (`TERM_SOFR_3M`) and the date. A NaN fixing
-  never gets that far: `Series` refuses it with `ValueError`.
+  `option_greeks` raise this when `fixings=` is absent or lacks that date.
+  They also raise it when the snapshot has no series named after the
+  index, even for a period fixing on the valuation date. The message names
+  the series (`TERM_SOFR_3M`) and the date. A NaN fixing never gets that
+  far: `Series` refuses it with `ValueError`.
 - `caplet_forward_rate` raises it for a period that began before the
   projection curve's date: its rate is a fixing, not a forward.
-- `fit_fomc_step_curve` raises it when a contract's period started before
-  `as_of` and its fixings were not passed.
+- `fit_fomc_step_curve` raises it when a contract started before `as_of`
+  and its `fixings` snapshot is absent or lacks the `"SOFR"` series or a
+  business day of it.
 
 Recoverable in every case by passing them: `fixings=MarketSnapshot(...)`,
-with the series named after the index, or for `fit_fomc_step_curve` a
-mapping of date to published rate.
+with the series named after the index.
 
 ### `InsufficientDataError`
 
@@ -168,17 +192,24 @@ forward is wrong rather than that the market moved that far.
 
 The bands are plausibility checks, not measurements: the data that would
 calibrate them was not reachable. Each is therefore a named, documented
-constant — `MAX_PLAUSIBLE_BASIS_BP`, and the two below — that a caller can
-widen deliberately, rather than a magic number inside a comparison.
+constant — `MAX_PLAUSIBLE_BASIS_BP`, `MAX_PLAUSIBLE_DECIMAL_RATE` and the
+two below — that a caller can widen deliberately, rather than a magic
+number inside a comparison.
 
-Two more bands follow the same rule. `MAX_PLAUSIBLE_RATE` (±100% a year,
+Two more bands follow the same rule. `MAX_PLAUSIBLE_RATE` (+/-100% a year,
 continuously compounded): `StructureQuote` and the CLI's `fx` block refuse
 a rate written in percent, such as 9.5 for 9.5%. `MAX_PLAUSIBLE_SIGMA`
-(0.10, 1,000 bp a year) guards the convexity sigma: a sigma given in
-percent or basis points lands outside it.
+(0.10, 1,000 bp a year) guards the convexity sigma of `ho_lee` and
+`hull_white`: a sigma given in percent or basis points lands outside it.
 
-The error is also raised for a NaN or infinite input before anything is
-solved: by `bootstrap_discount_curve` (naming every instrument),
+Also raised by the file and FRED providers when units were not stated and
+a series known to be a rate reads above `MAX_PLAUSIBLE_DECIMAL_RATE` (30%)
+as a decimal: the file is in percent. Pass `percent=True`, or
+`percent=False` to keep the values.
+
+The error is also raised for a NaN, an infinite, or a too-large-to-price
+input (a finite quote whose residual overflows) before anything is solved:
+by `bootstrap_discount_curve` (naming every instrument),
 `solve_dual_curve`, `fit_fomc_step_curve` (prices and fixings) and
 `fit_nelson_siegel` (times and rates).
 
@@ -213,20 +244,30 @@ renamed `FastMCP` to `MCPServer` and the import looked in the 1.x place.
 
 **Exit code 1. Recoverable: pass the config, or fix the key the message names.**
 
-Raised when a command that reads a configuration has none, has a key it
-reached and neither reads nor finds in the schema `rateng describe --json`
-publishes under `config` (the message names the path, the closest accepted
-key and what the block accepts; keys another command reads pass, and keys
-starting with `_` are comments), or lacks a required key (the message names
-the path). Under `--json` the CLI also raises it for a command line its
+Raised when a command that reads a configuration has none; when the file
+has a key, anywhere in it, that the schema `rateng describe --json`
+publishes under `config` does not document (the message names the path
+and the closest accepted key; keys starting with `_` are comments); or when
+a block the command reads has a required key missing, or a `null` where the
+key's default is a value (the message names the path). The whole file is
+checked before anything is computed. Under `--json` the CLI also raises it
+for a command line its
 parser rejects, exit code 1; without `--json` argparse prints its usage and
 exits 2. The MCP tools take the config as an optional argument, so a call
 with none is this rather than a `KeyError`. `describe` and
 `list-instruments` need no config and do not open one.
 
-Also raised by the curve and hedge commands for a `curve.futures[n].contract`
-that is not `"SR1"` or `"SR3"`, and by `hedge` for a
-`hedge.require_full_coverage` that is not a JSON boolean.
+Also raised by the futures hedge, library and CLI alike, for inputs that
+contradict each other or cannot be told apart, each fixed by editing the
+input: a `FuturesNode.contract` (a CLI `curve.futures[n].contract`) that is
+not `"SR1"` or `"SR3"`; a declared contract its period contradicts (an
+SR1 on an IMM quarter, an SR3 on a calendar month); a `contract_dv01`
+(`hedge.contract_dv01`) that contradicts a contract the node declares or
+its period names -- 25.00 on a calendar month, which is an SR1 at 41.67;
+calibration instruments whose keys still collide after the node date is
+appended to repeated labels; a zero in `shock_table`'s `shocks_bp`
+(`hedge.shocks_bp[i]`); and a `hedge.require_full_coverage` that is not a
+JSON boolean.
 
 Also raised by `load_program` for a policy file this engine cannot read: an
 unknown key, a missing required one, a rebalance frequency that is not one
@@ -329,6 +370,9 @@ No instruments at all, or two instruments pinning the same node, which leaves
 some other node without a quote of its own. The message names the clashing
 labels or the nodes.
 
+`fit_fomc_step_curve` also raises it for a meeting on or before `as_of`, or
+a segment no contract prices a day of.
+
 ### `NoTenorQuoteSourceError`
 
 **Exit code 2. Not recoverable in v1.**
@@ -422,12 +466,9 @@ caller says it has already made that decision.
 
 The parent of both of the above.
 
-Not every hedging refusal is one of them. `strip_hedge` raises `ValueError`
-when futures labels still collide after the period end is appended, when a
-declared `contract` contradicts its period (an SR1 on an IMM quarter, an
-SR3 on a calendar month), or when `contract_dv01` contradicts a declared
-contract; `shock_table` raises `ValueError` for a zero shock. Over the CLI
-each is exit code 1.
+The futures hedge's refusals of contradictory inputs are
+`ConfigurationError`, above. `strip_hedge` raises a plain `ValueError` only
+when `instruments` holds no `FuturesNode` at all.
 
 ---
 
@@ -490,6 +531,14 @@ evidence chain:
 | --- | --- |
 | `treasury_par_proxy` | The long end rests on Treasury par yields standing in for OIS par. The swap spread they carry is negative and variable, and the bias is known to exist and is not quantified. |
 | `outside_quoted_strikes` | A cube volatility at a strike outside the quoted strikes of its smile: SABR extrapolated beyond its data. The reading has `reliable=False` and is `assumed`. |
+| `outside_quoted_smile` | An FX smile volatility at a strike beyond the outermost quoted pillars, held flat at the nearest one; vanna-volga is not arbitrage free there. `assumed`. |
+| `curve_forward_for_todays_fixing:<series>` | A fixing dated the valuation date was not among the fixings passed, so the curve's forward stands in for it, as QuantLib does by default. Raised by the linear pricers, the cap and floor pricers and `fit_fomc_step_curve`, one per series. `proxy`. Pass the fixing to price on the print. |
+| `sr1_notional_assumed` | The hedge holds SR1 contracts, sized at 41.67 USD per basis point from a 5,000,000 USD notional that has not been read from the CME contract spec. `assumed`. |
+| `futures_contract_assumed` | A futures period is neither a calendar month (SR1) nor one IMM date to the next (SR3), so the contract is sized as SR3. Declare `FuturesNode.contract`, or pass `contract_dv01`. `assumed`. |
+| `smile_forward_unverified` | The smile given to a hedge structure does not report the forward it was built on, so it could not be checked against the forward the legs are struck on, basis included. `assumed`. |
+| `nelson_siegel_tau_at_bound` | The fitted decay `tau` sits on a bound of `tau_bounds`: the range set it, not the data. Widen the bounds if the range was not a deliberate constraint. `assumed`. |
+| `term_rate_without_convexity` | A term rate read off a futures-fitted curve is the expected average overnight rate, with no convexity adjustment (`TERM_RATE_CAVEAT`). `assumed`. |
+| `unresolved_convention:<name>` | A convention this build assumes rather than knows: one per entry of `UNRESOLVED_MXN` on a peso curve, and one per unresolved convention of the instrument's index and of the collateral rate on a price (`mxn_collateral_rate` on any peso one). `assumed`; `bootstrap_mxn_curve(strict_conventions=True)` refuses with `UnresolvedConventionError` instead. |
 
 Read them with `rates_engine.core.diagnostics.all_warnings(result.evidence)`, or
 check `result.evidence.worst_quality`.
@@ -516,8 +565,11 @@ outside 0.1 to 1,000 basis points, or a lognormal one outside 5% to 500%. The
 lognormal floor is 5% rather than the 0.5% PRD-002 first proposed, because
 0.5% does not catch the mistake: swaption normal vols are 60 to 150 bp, which
 as decimals are 0.006 to 0.015, all of it above 0.005. A floor of 5% sits in
-the gap between the two populations. `StructureQuote` holds a single FX
-volatility to the lognormal band, so 11.5 for 11.5% raises it.
+the gap between the two populations. FX has its own band: `StructureQuote`
+holds a float FX volatility to 0.2%-500% (`MIN_PLAUSIBLE_FX_VOLATILITY`),
+so 11.5 for 11.5% raises it; pass
+`Volatility.unchecked(value, VolUnits.LOGNORMAL_DECIMAL)` for a market
+outside it.
 
 `Volatility.unchecked` skips the magnitude band — and only that band — for a
 genuinely extreme market or for testing the limits.
@@ -605,3 +657,4 @@ traceback goes to stderr. That includes a command line the parser rejects
 (`ConfigurationError`, exit code 1, usage on stderr). The MCP tools fail
 with the same document after the SDK's `Error executing tool <name>: `.
 `error.recoverable` repeats the heading of the exception's section.
+`--help` with `--json` puts a `Usage` document on stdout, exit code 0.
