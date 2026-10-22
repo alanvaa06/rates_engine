@@ -154,7 +154,9 @@ def describe(_config: dict[str, Any] | None) -> dict[str, Any]:
         ],
         "currencies": [c.value for c in Currency],
         "day_counts": ["ACT/360", "ACT/365F", "30/360"],
-        "calendars": ["SIFMA_US"],
+        # SIFMA for SOFR fixings and dollar rolls; the Federal Reserve's for the
+        # dollar leg of a USD/MXN spot settlement (conventions.settlement).
+        "calendars": ["SIFMA_US", "FEDERAL_RESERVE"],
         "rate_indices": sorted(INDICES),
         "interpolation": ["log_linear_df", "monotone_convex"],
         "convexity_models": ["none", "ho_lee", "hull_white"],

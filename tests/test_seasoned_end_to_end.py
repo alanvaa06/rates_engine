@@ -682,3 +682,14 @@ class TestAStartRolledBackOverAWeekend:
         # QuantLib's coupon rate for the stub is 0.039999999999995595 too.
         assert stub.rate == pytest.approx(0.04, abs=1e-14)
         assert stub.fixing is not None and stub.fixing.observed_to == date(2026, 2, 2)
+
+
+class TestDescribeNamesEveryDollarCalendar:
+    """``describe`` listed only SIFMA after #13 added the Federal Reserve's for USD/MXN settlement."""
+
+    def test_both_us_calendars_are_listed(self):
+        from rates_engine.app import commands
+
+        payload = commands.COMMANDS["describe"](None)
+        assert payload["calendars"] == ["SIFMA_US", "FEDERAL_RESERVE"]
+        assert payload["calendars_v3"] == ["BMV"]
