@@ -22,8 +22,9 @@ reports as complete.
 term rate is set before the period it covers -- Term SOFR two US Government
 Securities business days before, the ARRC convention -- and once it is set
 nothing about the period is optional. :attr:`Caplet.fixing_date` is that day,
-:data:`TERM_RATE_FIXING_LAG_DAYS` business days of the index's calendar
-before :attr:`Caplet.accrual_start`. Measuring expiry to the accrual start,
+the index's :attr:`~rates_engine.conventions.indices.RateIndex.fixing_lag_days`
+business days of its calendar before :attr:`Caplet.accrual_start`, unless the
+cap overrides it. Measuring expiry to the accrual start,
 as v0.3 did, gave each caplet two days of time value it does not have: 0.24%
 on a five-year cap against QuantLib with ``fixingDays = 2``.
 """
@@ -43,22 +44,13 @@ from rates_engine.conventions.schedule import Schedule
 from rates_engine.core.errors import UnsupportedConventionError
 from rates_engine.core.money import Currency
 
-__all__ = ["Caplet", "CapFloor", "TERM_RATE_FIXING_LAG_DAYS"]
-
-TERM_RATE_FIXING_LAG_DAYS = 2
-"""Business days from a term-rate fixing to the start of the period it sets.
-
-Term SOFR is set two US Government Securities business days before its
-interest period begins, which is the ARRC's convention for Term SOFR (and was
-LIBOR's spot lag before it). It lives here rather than on
-:class:`~rates_engine.conventions.indices.RateIndex`, which does not yet carry
-a fixing lag; it is applied on the index's own calendar. Every caplet this
-build can construct is on Term SOFR -- a cap needs a whole-month tenor -- so
-one constant covers them all.
-"""
+__all__ = ["Caplet", "CapFloor"]
 
 
-def _require_lag(lag: int) -> None:
+def _resolved_lag(lag: int | None, index: RateIndex) -> int:
+    """The lag a cap or caplet fixes with: its own override, else its index's."""
+    if lag is None:
+        return index.fixing_lag_days
     # A whole number of days, checked by type: 1.5 used to pass ``lag < 0``,
     # and add_business_days' countdown never reached zero -- it walked back
     # through the calendar until the year ran out. A bool is an int to
@@ -68,6 +60,7 @@ def _require_lag(lag: int) -> None:
             f"fixing_lag_days must be a whole number of business days, zero or more, "
             f"got {lag!r}"
         )
+    return lag
 
 
 @dataclass(frozen=True)
@@ -84,8 +77,11 @@ class Caplet:
         day_count: Accrual basis.
         index: The term rate observed; it fixes the currency.
         fixing_lag_days: Business days of the index's calendar from the
-            fixing back from :attr:`accrual_start`. Zero fixes on the start
-            date itself.
+            fixing back from :attr:`accrual_start`. ``None``, the default,
+            takes :attr:`RateIndex.fixing_lag_days
+            <rates_engine.conventions.indices.RateIndex.fixing_lag_days>`, so
+            a caplet fixes when an IRS or a FRA on the same period does; the
+            resolved number is stored. Zero fixes on the start date itself.
     """
 
     accrual_start: date
@@ -96,10 +92,12 @@ class Caplet:
     kind: OptionKind
     day_count: DayCount = DayCount.ACT_360
     index: RateIndex = TERM_SOFR_3M
-    fixing_lag_days: int = TERM_RATE_FIXING_LAG_DAYS
+    fixing_lag_days: int | None = None
 
     def __post_init__(self) -> None:
-        _require_lag(self.fixing_lag_days)
+        object.__setattr__(
+            self, "fixing_lag_days", _resolved_lag(self.fixing_lag_days, self.index)
+        )
 
     @property
     def year_fraction(self) -> float:
@@ -114,7 +112,14 @@ class Caplet:
         :attr:`accrual_start`, so the period from Tuesday 19 January 2027,
         the day after Martin Luther King Day, fixes on Thursday the 14th.
         """
-        return self.index.calendar.add_business_days(self.accrual_start, -self.fixing_lag_days)
+        return self.index.calendar.add_business_days(self.accrual_start, -self.lag_days)
+
+    @property
+    def lag_days(self) -> int:
+        """:attr:`fixing_lag_days` as resolved when the caplet was built: never ``None``."""
+        lag = self.fixing_lag_days
+        assert lag is not None  # resolved in __post_init__
+        return lag
 
     def time_to_expiry(self, as_of: date, *, day_count: DayCount = CURVE_TIME_BASIS) -> float:
         """Years from a valuation date to :attr:`fixing_date`, where the option ends.
@@ -177,9 +182,12 @@ class CapFloor:
         index: The term rate every caplet observes; ``None`` means Term SOFR
             of :attr:`frequency_months`.
         fixing_lag_days: Business days of the index's calendar from each
-            fixing to the start of its period: two for Term SOFR, the
-            default. Zero reproduces v0.3, which expired each caplet at the
-            start of its accrual.
+            fixing to the start of its period. ``None``, the default, takes
+            the index's :attr:`RateIndex.fixing_lag_days
+            <rates_engine.conventions.indices.RateIndex.fixing_lag_days>` --
+            two for Term SOFR -- and stores it; a number overrides it. Zero
+            reproduces v0.3, which expired each caplet at the start of its
+            accrual.
     """
 
     effective: date
@@ -194,11 +202,11 @@ class CapFloor:
     convention: BusinessDayConvention = BusinessDayConvention.MODIFIED_FOLLOWING
     include_first_period: bool = True
     index: RateIndex | None = None
-    fixing_lag_days: int = TERM_RATE_FIXING_LAG_DAYS
+    fixing_lag_days: int | None = None
 
     def __post_init__(self) -> None:
-        _require_lag(self.fixing_lag_days)
         index = self.rate_index
+        object.__setattr__(self, "fixing_lag_days", _resolved_lag(self.fixing_lag_days, index))
         if index.tenor.months is None:
             raise UnsupportedConventionError(
                 f"a CapFloor schedules its periods in whole months; {index.name} "

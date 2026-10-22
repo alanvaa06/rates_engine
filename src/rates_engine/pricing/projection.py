@@ -47,13 +47,14 @@ known on the trade date and is counted in full. Its floating coupon:
   ``as_of`` itself is used when ``fixings`` holds it and projected off the
   curve when it does not -- QuantLib's default, with
   ``enforcesTodaysHistoricFixings`` off -- so a swap struck at spot today
-  still prices without a snapshot; the evidence says which it was. Term
-  SOFR fixes two SIFMA business days before the accrual start, the ARRC's
-  convention (:data:`_TERM_SOFR_FIXING_LAG_DAYS`): the fixing published on
-  2025-10-20 sets the period that starts on the 22nd. TIIE 28 is read on
-  the accrual start itself, where this package has always projected it
-  from; its real lag is not established
-  (``docs/forge/research/003-mxn-conventions.md``) and is pending.
+  still prices without a snapshot; the evidence says which it was. The
+  fixing date is the index's
+  :attr:`~rates_engine.conventions.indices.RateIndex.fixing_lag_days`
+  business days of its calendar before the accrual start, the one lag the
+  caps read too. Term SOFR fixes two SIFMA business days before, the ARRC's
+  convention: the fixing published on 2025-10-20 sets the period that
+  starts on the 22nd. TIIE 28 is read on the accrual start itself, which is
+  the unresolved convention ``tiie_28_fixing_lag``.
 
 Both come from a :class:`~rates_engine.market.snapshot.MarketSnapshot`
 passed as ``fixings``, read by the series named after the index
@@ -73,13 +74,7 @@ from functools import singledispatch
 from typing import Any, Protocol, runtime_checkable
 
 from rates_engine.conventions.daycount import DayCount, year_fraction
-from rates_engine.conventions.indices import (
-    TERM_SOFR_1M,
-    TERM_SOFR_3M,
-    TERM_SOFR_6M,
-    TERM_SOFR_12M,
-    RateIndex,
-)
+from rates_engine.conventions.indices import RateIndex
 from rates_engine.conventions.side import fixed_leg_sign
 from rates_engine.core.errors import MissingFixingError, UnsupportedConventionError
 from rates_engine.core.money import Currency
@@ -89,27 +84,38 @@ from rates_engine.instruments.fra import FRA
 from rates_engine.instruments.swaps import IRSwap, OISSwap
 from rates_engine.market.snapshot import MarketSnapshot
 
-__all__ = ["Priceable", "Swappable", "project", "float_leg", "fra_fair_rate", "is_paid"]
+__all__ = [
+    "Priceable",
+    "Swappable",
+    "project",
+    "float_leg",
+    "fra_fair_rate",
+    "is_paid",
+    "may_have_history",
+]
 
-_TERM_SOFR_FIXING_LAG_DAYS = 2
-"""Business days, on the index's calendar, from a Term SOFR fixing to the
-start of the period it sets: the ARRC's convention. Private and local for
-now: the lag is a property of the index, and alanvaa06/rates_engine#20
-moves it to one ``fixing_lag_days`` on :class:`RateIndex` that every
-reader of a term fixing uses."""
+def may_have_history(index: RateIndex, accrual_start: date, as_of: date) -> bool:
+    """Whether a period of ``index`` starting on ``accrual_start`` can be decided by ``as_of``.
 
-_FIXING_SEARCH_HORIZON_DAYS = 21
-"""Calendar days after ``as_of`` beyond which a period cannot have fixed.
+    False only when the period starts so far after ``as_of`` that neither
+    its fixing (``fixing_lag_days`` business days back) nor an overnight
+    rate carried over a weekend can fall on or before it: more than
+    ``7 * (fixing_lag_days + 2)`` calendar days. A business day never spans
+    a week on SIFMA or BMV -- the longest closure either has had, SIFMA's
+    after 2001-09-11, ran four business days -- so the bound holds with a
+    week to spare. Asking first spares the business-day walk for every
+    later period of a long swap, which doubled the time to reprice a
+    thirty-year quarterly one.
 
-Two business days back never span three weeks on SIFMA or BMV: the longest
-run of closed days either has had is SIFMA's after 2001-09-11, four business
-days. Checking this first spares the business-day walk on every later
-period, which doubled the time to reprice a thirty-year quarterly swap
-(0.52 to 1.12 ms)."""
+    Args:
+        index: The rate the period floats on.
+        accrual_start: First day of the period.
+        as_of: The valuation date.
 
-_TERM_SOFR = frozenset(
-    index.name for index in (TERM_SOFR_1M, TERM_SOFR_3M, TERM_SOFR_6M, TERM_SOFR_12M)
-)
+    Returns:
+        False when nothing about the period can be history yet.
+    """
+    return (accrual_start - as_of).days <= 7 * (index.fixing_lag_days + 2)
 
 
 def is_paid(payment_date: date, as_of: date) -> bool:
@@ -254,22 +260,15 @@ def _in_progress(
 
 
 def _term_fixing_date(index: RateIndex, accrual_start: date) -> date:
-    """The date a term rate's period is fixed on.
-
-    Term SOFR: :data:`_TERM_SOFR_FIXING_LAG_DAYS` business days of its own
-    calendar before the accrual start. Any other term rate -- TIIE 28 --
-    the accrual start itself, which is where the forward has always been
-    taken from and which nothing here has verified against its
-    administrator.
-    """
-    if index.name in _TERM_SOFR:
-        return index.calendar.add_business_days(accrual_start, -_TERM_SOFR_FIXING_LAG_DAYS)
+    """The date a term rate's period is fixed on: ``fixing_lag_days`` business days back."""
+    if index.fixing_lag_days:
+        return index.calendar.add_business_days(accrual_start, -index.fixing_lag_days)
     return accrual_start
 
 
 def _fixing_rule(index: RateIndex) -> str:
-    if index.name in _TERM_SOFR:
-        return f"{_TERM_SOFR_FIXING_LAG_DAYS} business days before its accrual start"
+    if index.fixing_lag_days:
+        return f"{index.fixing_lag_days} business days before its accrual start"
     return "its accrual start"
 
 
@@ -340,7 +339,7 @@ def _term_history(
     valued, and refusing a swap struck at spot this morning would be a
     refusal of the ordinary case.
     """
-    if (start - as_of).days > _FIXING_SEARCH_HORIZON_DAYS:
+    if not may_have_history(index, start, as_of):
         return None, None
     fixing_date = _term_fixing_date(index, start)
     if fixing_date > as_of:

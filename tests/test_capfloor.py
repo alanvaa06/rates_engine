@@ -9,12 +9,13 @@ from datetime import date, timedelta
 import pytest
 from conftest import AS_OF
 
+from rates_engine.conventions.indices import TERM_SOFR_3M
 from rates_engine.conventions.option_kind import OptionKind
 from rates_engine.conventions.side import Side
 from rates_engine.core.errors import MissingFixingError, MissingForwardError
 from rates_engine.core.evidence import DataQuality, Provenance
 from rates_engine.curves.discount import CurveSet, DiscountCurve
-from rates_engine.instruments.capfloor import TERM_RATE_FIXING_LAG_DAYS, CapFloor
+from rates_engine.instruments.capfloor import CapFloor
 from rates_engine.instruments.swaps import IRSwap
 from rates_engine.market.snapshot import MarketSnapshot, Series
 from rates_engine.models import bachelier, black
@@ -229,7 +230,8 @@ class TestTheOptionExpiresAtTheFixing:
     def test_the_fixing_dates_are_quantlibs(self):
         cap = self._five_year("cap")
         assert tuple(c.fixing_date.isoformat() for c in cap.caplets[:6]) == QL_FIRST_FIXINGS
-        assert cap.fixing_lag_days == TERM_RATE_FIXING_LAG_DAYS == 2
+        # The lag is the index's, the one the linear pricer reads too.
+        assert cap.fixing_lag_days == TERM_SOFR_3M.fixing_lag_days == 2
 
     def test_the_fixing_rolls_back_over_a_holiday(self):
         # The period from 2027-01-19 starts the day after Martin Luther King
