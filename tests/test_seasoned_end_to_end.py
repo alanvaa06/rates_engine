@@ -90,7 +90,7 @@ def _fixings(*series: Series, as_of: date = AS_OF) -> MarketSnapshot:
 class TestOneFixingLagOnTheIndex:
     """The lag is a property of the index, read once by every product that fixes on it.
 
-    Before #20 the linear pricer kept a private constant for Term SOFR and
+    Before #21 the linear pricer kept a private constant for Term SOFR and
     the cap module another, applied to whatever index a cap named; the two
     could disagree, and an IRS and a caplet on one period could fix on
     different days.
@@ -260,7 +260,7 @@ def _inputs(evidence) -> list:
 class TestRiskTakesTheFixings:
     """Every bump-and-reprice measure prices the trade ``pv`` prices.
 
-    Before #20 none of them took ``fixings``: a seasoned swap was refused by
+    Before #21 none of them took ``fixings``: a seasoned swap was refused by
     every one, and a spot Term SOFR swap whose first period fixed on as_of
     had its DV01 measured on the forecast, not on the fixing ``pv`` read:
     -19,666.17 against -17,203.37 USD per basis point on the review's strip.
