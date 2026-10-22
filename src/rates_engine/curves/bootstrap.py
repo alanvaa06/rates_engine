@@ -17,6 +17,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date
+from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
 
 from scipy.optimize import brentq
@@ -24,6 +25,7 @@ from scipy.optimize import brentq
 from rates_engine.conventions.daycount import DayCount, year_fraction
 from rates_engine.core.errors import (
     BootstrapResidualError,
+    ConfigurationError,
     CurveArbitrageError,
     ProxySourceNotDeclaredError,
     UnderdeterminedCurveError,
@@ -36,6 +38,7 @@ from rates_engine.curves.discount import DiscountCurve
 __all__ = [
     "CalibrationInstrument",
     "RealizedStubNode",
+    "FuturesContract",
     "FuturesNode",
     "ParSwapNode",
     "BootstrapResult",
@@ -116,6 +119,24 @@ class RealizedStubNode:
         }
 
 
+class FuturesContract(StrEnum):
+    """The SOFR futures a :class:`FuturesNode` can quote, named once for the package.
+
+    The node checks a declared contract against these, the hedge keeps each
+    one's value per basis point, and the CLI reads a ``contract`` key against
+    them, so the names are written here and nowhere else. They compare equal
+    to their strings, so ``contract="SR1"`` and ``FuturesContract.SR1`` are
+    the same declaration.
+
+    Attributes:
+        SR1: One-month SOFR, settling on the calendar month's average.
+        SR3: Three-month SOFR, compounded from one IMM date to the next.
+    """
+
+    SR1 = "SR1"
+    SR3 = "SR3"
+
+
 @dataclass(frozen=True)
 class FuturesNode:
     """A futures contract's convexity-adjusted forward, pinning its period end.
@@ -127,13 +148,15 @@ class FuturesNode:
         label: Name for the evidence record.
         provenance: Where the settlement price came from.
         convexity: Model, sigma, kappa and adjustment in bp, for the evidence.
-        contract: Which SOFR future this is, ``"SR1"`` or ``"SR3"``, or
+        contract: Which SOFR future this is, a :class:`FuturesContract` or
+            its name, ``"SR1"`` or ``"SR3"``, stored as the member; or
             ``None`` to leave it to the period. The curve does not read it;
             :func:`~rates_engine.hedging.futures_strip.strip_hedge` does,
             because the two are worth different amounts per basis point (USD
             41.67 and USD 25.00) and a hedge sized at the wrong one buys the
             wrong number of contracts. Left as ``None``, a calendar-month
-            period is an SR1 and anything else is sized as an SR3.
+            period is an SR1, an IMM quarter an SR3, and anything else is
+            sized as an SR3 with a degradation saying it was assumed.
     """
 
     start: date
@@ -144,18 +167,22 @@ class FuturesNode:
         default_factory=lambda: Provenance(source="file", instrument_kind="futures_settlement")
     )
     convexity: dict[str, Any] = field(default_factory=dict)
-    contract: str | None = None
+    contract: FuturesContract | str | None = None
 
     def __post_init__(self) -> None:
-        # The names are checked here, where the node is built, rather than
-        # when a hedge first reads them: a misspelt contract would otherwise
-        # pass through every bootstrap unnoticed. What each one is worth is
-        # the hedging layer's business, which is why only the names live here.
-        if self.contract is not None and self.contract not in ("SR1", "SR3"):
-            raise ValueError(
-                f"{self.label}: contract must be 'SR1' or 'SR3', or None to read it from "
+        # The name is checked here, where the node is built, rather than when
+        # a hedge first reads it: a misspelt contract would otherwise pass
+        # through every bootstrap unnoticed. What each one is worth is the
+        # hedging layer's business, which is why only the names live here.
+        if self.contract is None:
+            return
+        names = [member.value for member in FuturesContract]
+        if self.contract not in names:
+            raise ConfigurationError(
+                f"{self.label}: contract must be one of {names}, or None to read it from "
                 f"the period; got {self.contract!r}"
             )
+        object.__setattr__(self, "contract", FuturesContract(self.contract))
 
     @property
     def node_date(self) -> date:
@@ -177,7 +204,7 @@ class FuturesNode:
             "end": self.end.isoformat(),
             "forward_rate": self.forward_rate,
             "convexity": dict(self.convexity) or None,
-            **({"contract": self.contract} if self.contract is not None else {}),
+            **({"contract": str(self.contract)} if self.contract is not None else {}),
         }
 
 

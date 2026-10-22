@@ -289,7 +289,8 @@ def hedge(config: dict[str, Any] | None) -> dict[str, Any]:
         The ``HedgeResult`` payload with a ``shock_table`` block.
 
     Raises:
-        ConfigurationError: ``hedge.require_full_coverage`` is not a boolean.
+        ConfigurationError: ``hedge.require_full_coverage`` is not a boolean,
+            or ``hedge.shocks_bp`` contains a zero shock.
     """
     config = require_config(config, "hedge")
     as_of = as_date(config["as_of"])
@@ -308,6 +309,15 @@ def hedge(config: dict[str, Any] | None) -> dict[str, Any]:
             f"hedge.require_full_coverage is {require_full_coverage!r}; it must be true or "
             "false (true, the default, refuses a strip with a gap in the swap's span)"
         )
+    # Checked here as well as in shock_table, and before the hedge is sized,
+    # so that the refusal names the key in the file that holds the zero.
+    shocks = tuple(float(s) for s in settings.get("shocks_bp", DEFAULT_SHOCKS_BP))
+    zeros = [index for index, shock in enumerate(shocks) if shock == 0.0]
+    if zeros:
+        raise ConfigurationError(
+            f"hedge.shocks_bp[{zeros[0]}] is 0. A zero shock moves nothing and its implied "
+            "money convexity, 2 x net / shock^2, is undefined; drop it from the grid"
+        )
     result = strip_hedge(
         swap,
         instruments,
@@ -316,7 +326,6 @@ def hedge(config: dict[str, Any] | None) -> dict[str, Any]:
         contract_dv01=float(contract_dv01) if contract_dv01 is not None else None,
         require_full_coverage=require_full_coverage,
     )
-    shocks = tuple(float(s) for s in settings.get("shocks_bp", DEFAULT_SHOCKS_BP))
     table = shock_table(result, shocks)
     return result_payload(result, shock_table=table.to_dict(), command="hedge")
 
