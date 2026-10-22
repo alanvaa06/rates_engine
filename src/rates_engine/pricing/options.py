@@ -27,7 +27,8 @@ it started has these kinds of period, by QuantLib's rule with its default
   when ``fixings`` holds it, and otherwise on the curve's forward with no
   time left -- the rate is being published that day, and the forward is
   the curve's estimate of it. The substitution is a ``Degradation``
-  (``fixing_forecast_on_fixing_date``, assumed), not only a field. A
+  (``curve_forward_for_todays_fixing:<series>``, proxy, the code the
+  linear pricers use), not only a field. A
   snapshot without the index's series at all is refused: that is a wrong
   snapshot, not a fixing not yet published;
 - the rest are options, to their fixing dates.
@@ -619,27 +620,36 @@ def _value_period(
     )
 
 
-FIXING_FORECAST_CODE = "fixing_forecast_on_fixing_date"
-"""The degradation a result carries when the curve's forward stood in for a fixing.
+FIXING_FORECAST_CODE = "curve_forward_for_todays_fixing"
+"""Prefix of the degradation a result carries when the curve's forward stood in for a fixing.
 
-Raised to ``assumed``: the number a period was valued on is the curve's
-estimate of a rate being published that day, not the rate.
+The code is ``curve_forward_for_todays_fixing:<series>``, one per series, and
+its quality ``proxy``: real data -- the curve's forward -- standing in for a
+different quantity, the rate being published that day. The linear pricers
+use the same code and quality, so a book of caps and swaps reports one
+thing.
 """
 
 
-def _forecast_degradation(forecast: list[CapletValuation], valuation: date) -> Degradation:
-    starts = ", ".join(p.caplet.accrual_start.isoformat() for p in forecast)
-    index = forecast[0].caplet.index
-    return Degradation(
-        code=FIXING_FORECAST_CODE,
-        message=(
-            f"{len(forecast)} period(s) starting {starts} fix on the valuation date "
-            f"{valuation} and their {index.label} fixing was not supplied, so each is "
-            "valued on the curve's forward with no time left -- the curve's estimate of a "
-            f"rate being published that day. Pass fixings= with the {valuation} fixing "
-            f"in a series {index.name!r} to value them on the published rate."
-        ),
-        data_quality=DataQuality.ASSUMED,
+def _forecast_degradations(
+    forecast: list[CapletValuation], valuation: date
+) -> tuple[Degradation, ...]:
+    by_series: dict[str, list[CapletValuation]] = {}
+    for period in forecast:
+        by_series.setdefault(period.caplet.index.name, []).append(period)
+    return tuple(
+        Degradation(
+            code=f"{FIXING_FORECAST_CODE}:{series_id}",
+            message=(
+                f"The {series_id} fixing dated {valuation}, the valuation date, was not "
+                "among the fixings passed, so the curve's forward stands in for it, as "
+                "QuantLib does by default, for the period(s) starting "
+                + ", ".join(p.caplet.accrual_start.isoformat() for p in periods)
+                + ". Pass it as fixings= to price on the print."
+            ),
+            data_quality=DataQuality.PROXY,
+        )
+        for series_id, periods in by_series.items()
     )
 
 
@@ -781,7 +791,7 @@ def cap_floor_pv(
     forecast = [p for p in periods if p.status is PeriodStatus.FIXES_TODAY]
     degradations: tuple[Degradation, ...] = ()
     if forecast:
-        degradations = (_forecast_degradation(forecast, valuation),)
+        degradations = _forecast_degradations(forecast, valuation)
     last = periods[-1]
     last_rate = last.forward if last.forward is not None else last.fixing
     assert last_rate is not None  # a valued period has one or the other

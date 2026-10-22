@@ -461,9 +461,10 @@ class TestASeasonedCapOrFloor:
         assert today["expiry_years"] == 0.0
         assert today["forward"] == pytest.approx(QL_TODAYS_FORECAST, rel=1e-13, abs=0.0)
         # Not only a field: the substitution is a degradation of the result.
+        # The same code and quality as a swap whose term fixing is forecast.
         codes = [w.code for w in result.evidence.warnings]
-        assert codes.count("fixing_forecast_on_fixing_date") == 1
-        assert result.evidence.worst_quality is DataQuality.ASSUMED
+        assert codes.count("curve_forward_for_todays_fixing:TERM_SOFR_3M") == 1
+        assert result.evidence.worst_quality is DataQuality.PROXY
 
     def test_a_fixing_on_the_valuation_date_is_used_when_supplied(self, option_curve_set):
         result = cap_floor_pv(
@@ -770,21 +771,24 @@ class TestACapWhoseFirstFixingIsToday:
             snapshot = _fixings(date(2026, 1, 14))
         result = cap_floor_pv(self._cap(), option_curve_set, VOL, fixings=snapshot)
         warning = next(
-            w for w in result.evidence.warnings if w.code == "fixing_forecast_on_fixing_date"
+            w for w in result.evidence.warnings
+            if w.code == "curve_forward_for_todays_fixing:TERM_SOFR_3M"
         )
         assert "2026-01-15" in warning.message
-        assert warning.data_quality is DataQuality.ASSUMED
-        assert result.evidence.worst_quality is DataQuality.ASSUMED
+        assert warning.data_quality is DataQuality.PROXY
+        assert result.evidence.worst_quality is DataQuality.PROXY
         greeks = option_greeks(self._cap(), option_curve_set, VOL, fixings=snapshot)
-        assert "fixing_forecast_on_fixing_date" in {w.code for w in greeks.evidence.warnings}
+        assert "curve_forward_for_todays_fixing:TERM_SOFR_3M" in {
+            w.code for w in greeks.evidence.warnings
+        }
 
     def test_a_supplied_fixing_carries_no_such_degradation(self, option_curve_set):
         result = cap_floor_pv(
             self._cap(), option_curve_set, VOL, fixings=_fixings(AS_OF, rate=0.045)
         )
-        assert "fixing_forecast_on_fixing_date" not in {
-            w.code for w in result.evidence.warnings
-        }
+        assert not any(
+            w.code.startswith("curve_forward_for_todays_fixing") for w in result.evidence.warnings
+        )
         assert result.evidence.worst_quality is DataQuality.OBSERVED
 
 
