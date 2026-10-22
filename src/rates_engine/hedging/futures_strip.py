@@ -55,7 +55,8 @@ from rates_engine.instruments.futures import (
     SR3_NOTIONAL,
     SOFRFuture1M,
 )
-from rates_engine.pricing.linear import discounted_value
+from rates_engine.market.snapshot import MarketSnapshot
+from rates_engine.pricing.linear import discounted_value, history_evidence
 from rates_engine.pricing.projection import Priceable
 from rates_engine.risk.bumps import shifted as shift_curves
 from rates_engine.risk.sensitivities import dv01
@@ -145,6 +146,9 @@ class HedgeResult(EngineResult):
             type, ``"SR1"`` and ``"SR3"``, or ``"caller"`` for contracts sized
             at a ``contract_dv01`` the caller gave for a period that names
             neither. Signed like :attr:`contracts`.
+        fixings: The published fixings the swap was valued with, for a swap
+            that has started; :func:`shock_table` reprices it with the same
+            ones. ``None`` for a swap with no history.
     """
 
     swap: Priceable
@@ -160,6 +164,7 @@ class HedgeResult(EngineResult):
     base_forwards: dict[str, float]
     contract_dv01_by_label: dict[str, float]
     total_contracts_by_contract: dict[str, float]
+    fixings: MarketSnapshot | None = None
 
     @property
     def hedge_ratio(self) -> float:
@@ -215,6 +220,7 @@ def strip_hedge(
     require_full_coverage: bool = True,
     swap_start: date | None = None,
     swap_end: date | None = None,
+    fixings: MarketSnapshot | None = None,
 ) -> HedgeResult:
     """Size a futures strip against a swap, one contract count per IMM period.
 
@@ -242,8 +248,12 @@ def strip_hedge(
             reports as complete.
         swap_start: Start of the span that must be covered. Defaults to the
             start of the swap's ``span``, its first accrual date as the
-            schedule adjusts it.
+            schedule adjusts it, or ``as_of`` for a swap that has started:
+            nothing before it has rate risk left.
         swap_end: End of that span. Defaults to the end of the swap's ``span``.
+        fixings: Published fixings for a swap whose floating coupon is
+            already decided, as for :func:`~rates_engine.pricing.linear.pv`.
+            Every reprice uses them, and so does :func:`shock_table`.
 
     Returns:
         The :class:`HedgeResult`.
@@ -257,6 +267,8 @@ def strip_hedge(
             period contradicts (an SR1 on an IMM quarter, an SR3 on a
             calendar month); or ``contract_dv01`` contradicts a contract that
             is declared or that the period names.
+        MissingFixingError: The swap's floating coupon is already decided
+            and ``fixings`` does not cover it.
         ValueError: There are no futures among ``instruments``.
     """
     futures = tuple(i for i in instruments if isinstance(i, FuturesNode))
@@ -264,7 +276,7 @@ def strip_hedge(
         raise ValueError("strip_hedge needs at least one FuturesNode among the instruments")
 
     default_start, default_end = swap.span
-    start = swap_start or default_start
+    start = swap_start or max(default_start, as_of)
     end = swap_end or default_end
     if require_full_coverage:
         _check_coverage(futures, start, end)
@@ -273,7 +285,7 @@ def strip_hedge(
     # is what a contract passed twice is, under its own name.
     base = bootstrap_discount_curve(as_of, instruments, long_end_source=long_end_source)
     curve_set = CurveSet(base.curve)
-    swap_dv01 = dv01(swap, curve_set, source_evidence=(base.evidence,)).value
+    swap_dv01 = dv01(swap, curve_set, source_evidence=(base.evidence,), fixings=fixings).value
 
     # Every dict below is keyed per contract, not per label. Two futures with
     # the same label -- the default "future", or "SR3" on every row of a CLI
@@ -287,8 +299,12 @@ def strip_hedge(
     contracts: dict[str, float] = {}
     periods: dict[str, tuple[date, date]] = {}
     for key, contract in zip(keys, futures, strict=True):
-        up = _reprice_with_quote_bump(swap, instruments, contract, +BASIS_POINT, as_of, long_end_source)
-        down = _reprice_with_quote_bump(swap, instruments, contract, -BASIS_POINT, as_of, long_end_source)
+        up = _reprice_with_quote_bump(
+            swap, instruments, contract, +BASIS_POINT, as_of, long_end_source, fixings
+        )
+        down = _reprice_with_quote_bump(
+            swap, instruments, contract, -BASIS_POINT, as_of, long_end_source, fixings
+        )
         delta = (down - up) / 2.0
         deltas[key] = delta
         contracts[key] = -delta / sizes[key]
@@ -312,7 +328,7 @@ def strip_hedge(
     total_by_contract = {name: sum(counts) for name, counts in counts_by_contract.items()}
     total = sum(contracts.values()) if single_size is not None else None
     quote_parallel_dv01 = _quote_parallel_dv01(
-        swap, instruments, futures, as_of, long_end_source
+        swap, instruments, futures, as_of, long_end_source, fixings
     )
     base_forwards = {
         key: base.curve.forward(contract.start, contract.end)
@@ -343,7 +359,7 @@ def strip_hedge(
                 "at 4%, and answer different questions; see rates_engine.key_rate_dv01."
             ),
         },
-        sources=(base.evidence,),
+        sources=_with_history(swap, curve_set, fixings, (base.evidence,)),
         warnings=_sizing_warnings(futures, keys, sizing),
     )
     return HedgeResult(
@@ -361,7 +377,19 @@ def strip_hedge(
         base_forwards=base_forwards,
         contract_dv01_by_label=sizes,
         total_contracts_by_contract=total_by_contract,
+        fixings=fixings,
     )
+
+
+def _with_history(
+    swap: Priceable,
+    curve_set: CurveSet,
+    fixings: MarketSnapshot | None,
+    sources: tuple[Evidence, ...],
+) -> tuple[Evidence, ...]:
+    """``sources`` and, for a swap with a decided coupon, what that coupon rests on."""
+    history = history_evidence(swap, curve_set, fixings=fixings)
+    return sources if history is None else (*sources, history)
 
 
 def _quote_parallel_dv01(
@@ -370,6 +398,7 @@ def _quote_parallel_dv01(
     futures: tuple[FuturesNode, ...],
     as_of: date,
     long_end_source: str | None,
+    fixings: MarketSnapshot | None,
 ) -> float:
     """The swap's DV01 to every futures quote moving together by one basis point.
 
@@ -387,7 +416,7 @@ def _quote_parallel_dv01(
             _with_quote_shift(i, shift) if id(i) in targets else i for i in instruments
         )
         curve = bootstrap_discount_curve(as_of, bumped, long_end_source=long_end_source).curve
-        return discounted_value(swap, CurveSet(curve))
+        return discounted_value(swap, CurveSet(curve), fixings=fixings)
 
     return (repriced(-BASIS_POINT) - repriced(+BASIS_POINT)) / 2.0
 
@@ -639,6 +668,7 @@ def _reprice_with_quote_bump(
     shift: float,
     as_of: date,
     long_end_source: str | None,
+    fixings: MarketSnapshot | None,
 ) -> float:
     """Reprice the swap with one futures quote moved and the curve rebuilt."""
     # Identity, as in _quote_parallel_dv01: two distinct contracts can compare
@@ -650,7 +680,7 @@ def _reprice_with_quote_bump(
         _with_quote_shift(i, shift) if id(i) == target_id else i for i in instruments
     )
     curve = bootstrap_discount_curve(as_of, bumped, long_end_source=long_end_source).curve
-    return discounted_value(swap, CurveSet(curve))
+    return discounted_value(swap, CurveSet(curve), fixings=fixings)
 
 
 @dataclass(frozen=True)
@@ -725,11 +755,13 @@ def shock_table(
             "the implied money convexity is 2 x net / shock^2, undefined at zero; drop "
             "it from the grid -- the unshocked position is the hedge itself"
         )
-    base_pv = discounted_value(hedge.swap, hedge.curve_set)
+    # A swap that has started is repriced with the fixings it was sized on:
+    # its history does not move with the shock.
+    base_pv = discounted_value(hedge.swap, hedge.curve_set, fixings=hedge.fixings)
     rows: list[dict[str, float]] = []
     for shock in grid:
         shifted = shift_curves(hedge.curve_set, shock * 1e-4)
-        swap_pnl = discounted_value(hedge.swap, shifted) - base_pv
+        swap_pnl = discounted_value(hedge.swap, shifted, fixings=hedge.fixings) - base_pv
         # A long futures position loses when rates rise, linearly in *its own*
         # forward rate. Using a nominal parallel basis point here instead would
         # leave a first-order residual in the net column and make the swap's
@@ -744,7 +776,7 @@ def shock_table(
             start, end = hedge.periods[label]
             move_bp = (shifted.discount.forward(start, end) - hedge.base_forwards[label]) * 1e4
             strip_pnl -= count * hedge.contract_dv01_by_label[label] * move_bp
-        post_dv01 = dv01(hedge.swap, shifted).value
+        post_dv01 = dv01(hedge.swap, shifted, fixings=hedge.fixings).value
         net = swap_pnl + strip_pnl
         rows.append(
             {

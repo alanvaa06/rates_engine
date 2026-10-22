@@ -42,6 +42,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
+from rates_engine.conventions.indices import RateIndex
 from rates_engine.conventions.side import Side
 from rates_engine.core.errors import CurrencyMismatchError
 from rates_engine.core.evidence import DataQuality, Degradation, Evidence, Provenance
@@ -57,7 +58,14 @@ from rates_engine.pricing.collateral import (
     merge_warnings,
     valuation_warnings,
 )
-from rates_engine.pricing.projection import Priceable, Swappable, float_leg, is_paid, project
+from rates_engine.pricing.projection import (
+    Priceable,
+    Swappable,
+    float_leg,
+    is_paid,
+    may_have_history,
+    project,
+)
 
 __all__ = [
     "PriceResult",
@@ -67,6 +75,7 @@ __all__ = [
     "annuity_value",
     "par_rate_value",
     "valuation_evidence",
+    "history_evidence",
     "par_rate",
     "annuity",
     "price_on_parametric",
@@ -305,6 +314,55 @@ def _history_used(
     if dated_today:
         fields["fixings_dated_as_of"] = dated_today
     return fields, tuple(inputs), tuple(forecast.values())
+
+
+def history_evidence(
+    instrument: Priceable,
+    curve_set: CurveSet,
+    *,
+    fixings: MarketSnapshot | None = None,
+) -> Evidence | None:
+    """What an instrument's decided floating coupons rest on, for a measure that reprices it.
+
+    A risk measure reprices on moved curves and keeps none of the flows, so
+    the fixings behind them -- and any forecast standing in for a fixing
+    dated ``as_of`` -- would be missing from its evidence. This is that part
+    of a price's evidence on its own, for the measure to chain in as a
+    source: ``realised_fixings`` and ``fixings_dated_as_of`` in the fields,
+    the fixings' provenance among the inputs, and the forecast's
+    degradation among the warnings, so ``worst_quality`` sees both. A
+    history does not move with the curve, so it is recorded once, at the
+    base curve.
+
+    Args:
+        instrument: Anything :func:`~rates_engine.pricing.projection.project` handles.
+        curve_set: The base curves.
+        fixings: Published fixings, as for :func:`pv`.
+
+    Returns:
+        The evidence record, or ``None`` when no coupon of the instrument is
+        decided yet -- found without projecting it when its index says the
+        first period starts too far after ``as_of`` to have fixed.
+
+    Raises:
+        MissingFixingError: A floating coupon is already decided and
+            ``fixings`` does not cover it.
+    """
+    index = getattr(instrument, "rate_index", None)
+    if isinstance(index, RateIndex) and not may_have_history(
+        index, instrument.span[0], curve_set.as_of
+    ):
+        return None
+    flows = _priced_flows(instrument, curve_set, fixings)
+    history, inputs, forecast = _history_used(flows, instrument, curve_set.as_of)
+    if not history:
+        return None
+    return Evidence(
+        produced_by="pricing.history",
+        inputs=inputs,
+        fields={"instrument": instrument.describe(), **history},
+        warnings=forecast,
+    )
 
 
 def valuation_evidence(

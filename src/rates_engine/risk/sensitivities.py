@@ -29,6 +29,13 @@ those are what the shock table reconciles against. Macaulay and modified
 duration need a single yield to maturity and therefore an instrument priced
 away from zero; they are stubs that say so and point at ``FixedRateBond`` in
 v1.1. Neither is ever served as effective duration under another name.
+
+**A trade that has started.** Every measure takes ``fixings``, the published
+fixings ``pv`` takes, and passes them to each reprice: the history of a
+coupon already decided does not move with the curve, only its forecast and
+its discounting do. Their record, and any forecast standing in for a fixing
+dated ``as_of``, is chained into the result's evidence once, from the base
+curve, by :func:`~rates_engine.pricing.linear.history_evidence`.
 """
 
 from __future__ import annotations
@@ -42,8 +49,14 @@ from rates_engine.core.errors import KeyTenorOutOfRangeError, UndefinedDurationE
 from rates_engine.core.evidence import Evidence
 from rates_engine.core.results import EngineResult
 from rates_engine.curves.discount import CurveSet
+from rates_engine.market.snapshot import MarketSnapshot
 from rates_engine.pricing.collateral import valuation_warnings
-from rates_engine.pricing.linear import PriceResult, discounted_value, valuation_evidence
+from rates_engine.pricing.linear import (
+    PriceResult,
+    discounted_value,
+    history_evidence,
+    valuation_evidence,
+)
 from rates_engine.pricing.projection import Priceable
 from rates_engine.risk.bumps import BUMP_BP, repriced, shift_from_bp, tent_shift
 
@@ -165,12 +178,24 @@ def _normalise_tenors(curve_set: CurveSet, key_tenors: tuple[float | date, ...])
     return years
 
 
+def _with_history(
+    instrument: Priceable,
+    curve_set: CurveSet,
+    fixings: MarketSnapshot | None,
+    source_evidence: tuple[Evidence, ...],
+) -> tuple[Evidence, ...]:
+    """``source_evidence`` and, when the trade has a decided coupon, what it rests on."""
+    history = history_evidence(instrument, curve_set, fixings=fixings)
+    return source_evidence if history is None else (*source_evidence, history)
+
+
 def dv01(
     instrument: Priceable,
     curve_set: CurveSet,
     *,
     bump_bp: float = BUMP_BP,
     source_evidence: tuple[Evidence, ...] = (),
+    fixings: MarketSnapshot | None = None,
 ) -> PriceResult:
     """Parallel DV01 in USD per basis point, by symmetric bump and full reprice.
 
@@ -184,6 +209,8 @@ def dv01(
         curve_set: Discount and projection curves.
         bump_bp: Shift size in basis points.
         source_evidence: Evidence of the curves.
+        fixings: Published fixings for a floating coupon already decided, as
+            for :func:`~rates_engine.pricing.linear.pv`.
 
     Returns:
         A :class:`PriceResult` with ``measure="dv01"`` and
@@ -191,10 +218,13 @@ def dv01(
 
     Raises:
         ValueError: ``bump_bp`` is not positive.
+        MissingFixingError: A floating coupon is already decided and
+            ``fixings`` does not cover it.
     """
     shift = shift_from_bp(bump_bp)
-    up = repriced(instrument, curve_set, shift)
-    down = repriced(instrument, curve_set, -shift)
+    sources = _with_history(instrument, curve_set, fixings, source_evidence)
+    up = repriced(instrument, curve_set, shift, fixings=fixings)
+    down = repriced(instrument, curve_set, -shift, fixings=fixings)
     value = (down - up) / 2.0 / bump_bp
     return PriceResult(
         evidence=valuation_evidence(
@@ -207,7 +237,7 @@ def dv01(
                 "bump_shape": "parallel",
                 "difference": "central",
             },
-            source_evidence,
+            sources,
         ),
         value=value,
         measure="dv01",
@@ -222,6 +252,7 @@ def key_rate_dv01(
     *,
     bump_bp: float = BUMP_BP,
     source_evidence: tuple[Evidence, ...] = (),
+    fixings: MarketSnapshot | None = None,
 ) -> KeyRateResult:
     """The instrument's DV01 attributed along the curve, in USD per basis point.
 
@@ -231,6 +262,8 @@ def key_rate_dv01(
         key_tenors: Key tenors, in years or as dates.
         bump_bp: Peak height of each tent shock, in basis points.
         source_evidence: Evidence of the curves, chained in.
+        fixings: Published fixings for a floating coupon already decided, as
+            for :func:`~rates_engine.pricing.linear.pv`.
 
     Returns:
         The :class:`KeyRateResult`. Its ``total`` equals the parallel DV01
@@ -243,10 +276,11 @@ def key_rate_dv01(
     """
     shift = shift_from_bp(bump_bp)
     years = _normalise_tenors(curve_set, key_tenors)
+    sources = _with_history(instrument, curve_set, fixings, source_evidence)
     values: dict[float, float] = {}
     for index, tenor in enumerate(years):
-        up = repriced(instrument, curve_set, tent_shift(index, years, shift))
-        down = repriced(instrument, curve_set, tent_shift(index, years, -shift))
+        up = repriced(instrument, curve_set, tent_shift(index, years, shift), fixings=fixings)
+        down = repriced(instrument, curve_set, tent_shift(index, years, -shift), fixings=fixings)
         values[tenor] = (down - up) / 2.0 / bump_bp
 
     total = sum(values.values())
@@ -265,7 +299,7 @@ def key_rate_dv01(
             "interpolation_caveat": INTERPOLATION_CAVEAT,
             "partition_of_unity": True,
         },
-        sources=source_evidence,
+        sources=sources,
         warnings=valuation_warnings(instrument, curve_set),
     )
     return KeyRateResult(
@@ -279,9 +313,14 @@ def key_rate_dv01(
     )
 
 
-def _require_normalisable(instrument: Priceable, curve_set: CurveSet, measure: str) -> float:
+def _require_normalisable(
+    instrument: Priceable,
+    curve_set: CurveSet,
+    measure: str,
+    fixings: MarketSnapshot | None = None,
+) -> float:
     """Return the price, or refuse because normalising by it is undefined."""
-    price = discounted_value(instrument, curve_set)
+    price = discounted_value(instrument, curve_set, fixings=fixings)
     notional = float(getattr(instrument, "notional", 1.0)) or 1.0
     if abs(price) <= ZERO_PRICE_TOLERANCE * abs(notional):
         raise UndefinedDurationError(
@@ -300,6 +339,7 @@ def key_rate_duration(
     *,
     bump_bp: float = BUMP_BP,
     source_evidence: tuple[Evidence, ...] = (),
+    fixings: MarketSnapshot | None = None,
 ) -> KeyRateResult:
     """The key-rate profile normalised by price, in years: ``KR DV01 / (PV x 1bp)``.
 
@@ -314,6 +354,8 @@ def key_rate_duration(
         key_tenors: Key tenors, in years or as dates.
         bump_bp: Peak height of each tent shock, in basis points.
         source_evidence: Evidence of the curves.
+        fixings: Published fixings for a floating coupon already decided, as
+            for :func:`~rates_engine.pricing.linear.pv`.
 
     Returns:
         The :class:`KeyRateResult` with ``measure="key_rate_duration"`` and
@@ -324,9 +366,14 @@ def key_rate_duration(
             does. Use :func:`key_rate_dv01` there.
         KeyTenorOutOfRangeError: A key tenor falls outside the curve's span.
     """
-    price = _require_normalisable(instrument, curve_set, "key_rate_duration")
+    price = _require_normalisable(instrument, curve_set, "key_rate_duration", fixings)
     raw = key_rate_dv01(
-        instrument, curve_set, key_tenors, bump_bp=bump_bp, source_evidence=source_evidence
+        instrument,
+        curve_set,
+        key_tenors,
+        bump_bp=bump_bp,
+        source_evidence=source_evidence,
+        fixings=fixings,
     )
     one_bp = shift_from_bp(1.0)
     scaled = {tenor: value / (price * one_bp) for tenor, value in raw.values.items()}
@@ -358,6 +405,7 @@ def pvbp(
     *,
     bump_bp: float = BUMP_BP,
     source_evidence: tuple[Evidence, ...] = (),
+    fixings: MarketSnapshot | None = None,
 ) -> RiskResult:
     """Price value of a basis point, in USD per basis point.
 
@@ -370,11 +418,15 @@ def pvbp(
         curve_set: Discount and projection curves.
         bump_bp: Shift size in basis points.
         source_evidence: Evidence of the curves.
+        fixings: Published fixings for a floating coupon already decided, as
+            for :func:`~rates_engine.pricing.linear.pv`.
 
     Returns:
         A :class:`RiskResult` whose unit carries the curve's currency.
     """
-    base = dv01(instrument, curve_set, bump_bp=bump_bp, source_evidence=source_evidence)
+    base = dv01(
+        instrument, curve_set, bump_bp=bump_bp, source_evidence=source_evidence, fixings=fixings
+    )
     return RiskResult(
         evidence=Evidence(
             produced_by="risk.pvbp",
@@ -394,6 +446,7 @@ def money_duration(
     *,
     bump_bp: float = BUMP_BP,
     source_evidence: tuple[Evidence, ...] = (),
+    fixings: MarketSnapshot | None = None,
 ) -> RiskResult:
     """Money duration: the derivative of price with respect to yield, in USD.
 
@@ -407,11 +460,15 @@ def money_duration(
         curve_set: Discount and projection curves.
         bump_bp: Shift size in basis points.
         source_evidence: Evidence of the curves.
+        fixings: Published fixings for a floating coupon already decided, as
+            for :func:`~rates_engine.pricing.linear.pv`.
 
     Returns:
         A :class:`RiskResult` whose unit carries the curve's currency.
     """
-    base = dv01(instrument, curve_set, bump_bp=bump_bp, source_evidence=source_evidence)
+    base = dv01(
+        instrument, curve_set, bump_bp=bump_bp, source_evidence=source_evidence, fixings=fixings
+    )
     return RiskResult(
         evidence=Evidence(
             produced_by="risk.money_duration",
@@ -431,6 +488,7 @@ def money_convexity(
     *,
     bump_bp: float = BUMP_BP,
     source_evidence: tuple[Evidence, ...] = (),
+    fixings: MarketSnapshot | None = None,
 ) -> RiskResult:
     """Money convexity: the second derivative of price with respect to yield.
 
@@ -445,17 +503,22 @@ def money_convexity(
         curve_set: Discount and projection curves.
         bump_bp: Shift size in basis points.
         source_evidence: Evidence of the curves.
+        fixings: Published fixings for a floating coupon already decided, as
+            for :func:`~rates_engine.pricing.linear.pv`.
 
     Returns:
         A :class:`RiskResult` whose unit carries the curve's currency.
 
     Raises:
         ValueError: ``bump_bp`` is not positive.
+        MissingFixingError: A floating coupon is already decided and
+            ``fixings`` does not cover it.
     """
     shift = shift_from_bp(bump_bp)
-    base = discounted_value(instrument, curve_set)
-    up = repriced(instrument, curve_set, shift)
-    down = repriced(instrument, curve_set, -shift)
+    sources = _with_history(instrument, curve_set, fixings, source_evidence)
+    base = discounted_value(instrument, curve_set, fixings=fixings)
+    up = repriced(instrument, curve_set, shift, fixings=fixings)
+    down = repriced(instrument, curve_set, -shift, fixings=fixings)
     value = (up + down - 2.0 * base) / (shift * shift)
     return RiskResult(
         evidence=Evidence(
@@ -468,7 +531,7 @@ def money_convexity(
                 "base_pv": base,
                 "defined_at_zero_price": True,
             },
-            sources=source_evidence,
+            sources=sources,
             warnings=valuation_warnings(instrument, curve_set),
         ),
         value=value,
@@ -484,6 +547,7 @@ def effective_duration(
     *,
     bump_bp: float = BUMP_BP,
     source_evidence: tuple[Evidence, ...] = (),
+    fixings: MarketSnapshot | None = None,
 ) -> RiskResult:
     """Effective duration: ``(PV- - PV+) / (2 * PV0 * dy)``, in years.
 
@@ -497,6 +561,8 @@ def effective_duration(
         curve_set: Discount and projection curves.
         bump_bp: Shift size in basis points.
         source_evidence: Evidence of the curves.
+        fixings: Published fixings for a floating coupon already decided, as
+            for :func:`~rates_engine.pricing.linear.pv`.
 
     Returns:
         A :class:`RiskResult` with ``unit="years"``.
@@ -506,9 +572,10 @@ def effective_duration(
         ValueError: ``bump_bp`` is not positive.
     """
     shift = shift_from_bp(bump_bp)
-    price = _require_normalisable(instrument, curve_set, "effective_duration")
-    up = repriced(instrument, curve_set, shift)
-    down = repriced(instrument, curve_set, -shift)
+    price = _require_normalisable(instrument, curve_set, "effective_duration", fixings)
+    sources = _with_history(instrument, curve_set, fixings, source_evidence)
+    up = repriced(instrument, curve_set, shift, fixings=fixings)
+    down = repriced(instrument, curve_set, -shift, fixings=fixings)
     value = (down - up) / (2.0 * price * shift)
     return RiskResult(
         evidence=Evidence(
@@ -525,7 +592,7 @@ def effective_duration(
                     "yield to maturity. Not modified duration."
                 ),
             },
-            sources=source_evidence,
+            sources=sources,
             warnings=valuation_warnings(instrument, curve_set),
         ),
         value=value,
@@ -541,6 +608,7 @@ def effective_convexity(
     *,
     bump_bp: float = BUMP_BP,
     source_evidence: tuple[Evidence, ...] = (),
+    fixings: MarketSnapshot | None = None,
 ) -> RiskResult:
     """Effective convexity: ``(PV+ + PV- - 2 PV0) / (PV0 * dy^2)``, in years squared.
 
@@ -549,6 +617,8 @@ def effective_convexity(
         curve_set: Discount and projection curves.
         bump_bp: Shift size in basis points.
         source_evidence: Evidence of the curves.
+        fixings: Published fixings for a floating coupon already decided, as
+            for :func:`~rates_engine.pricing.linear.pv`.
 
     Returns:
         A :class:`RiskResult` with ``unit="years_squared"``.
@@ -558,9 +628,9 @@ def effective_convexity(
             :func:`money_convexity` there.
         ValueError: ``bump_bp`` is not positive.
     """
-    price = _require_normalisable(instrument, curve_set, "effective_convexity")
+    price = _require_normalisable(instrument, curve_set, "effective_convexity", fixings)
     money = money_convexity(
-        instrument, curve_set, bump_bp=bump_bp, source_evidence=source_evidence
+        instrument, curve_set, bump_bp=bump_bp, source_evidence=source_evidence, fixings=fixings
     )
     return RiskResult(
         evidence=Evidence(

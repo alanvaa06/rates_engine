@@ -275,7 +275,8 @@ def _fixing_rule(index: RateIndex) -> str:
 def _how_to_pass(index: RateIndex) -> str:
     return (
         f"Pass the published fixings as fixings=MarketSnapshot(as_of=..., series={{"
-        f"{index.name!r}: Series(...)}}) to pv, par_rate, discounted_value or project"
+        f"{index.name!r}: Series(...)}}) to the call that needs them: pv, par_rate, "
+        "discounted_value, the risk measures, strip_hedge or project"
     )
 
 
