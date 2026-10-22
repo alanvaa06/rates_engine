@@ -73,7 +73,16 @@ class RatesEngineError(Exception):
 
 
 class ConventionError(RatesEngineError):
-    """A day count, calendar, roll or tenor this package does not implement."""
+    """The terms of a trade cannot be read under the conventions they name.
+
+    The parent of :class:`UnsupportedConventionError` (a day count, calendar,
+    roll or tenor this package does not implement) and
+    :class:`UnresolvedConventionError`. Raised itself when an instrument is
+    built whose roll convention leaves its schedule no accrual period: the
+    maturity adjusts onto or before the adjusted effective date (Friday
+    2026-05-29 to Sunday 2026-05-31 under Modified Following). Change the
+    maturity or the roll.
+    """
 
     exit_code = 1
 
