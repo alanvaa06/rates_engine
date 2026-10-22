@@ -14,9 +14,12 @@ left the trade. Until v0.4 every flow was discounted, and
 ``DiscountCurve.df`` is one on or before ``as_of``, so a swap struck two
 years ago carried its paid coupons at face value: on a three-year 4% payer
 over USD 100m valued eighteen months in, the fixed coupon paid six months
-earlier came back as -4.06m USD. The filter is here rather than
-only in the projections because this is the one place a flow meets the
-valuation date, so a product of the caller's own is covered too.
+earlier came back as -4.06m USD. Which flows are paid is
+:func:`~rates_engine.pricing.projection.is_paid`'s to say; the built-in
+projections ask it per period, and :func:`_live` asks it again of whatever
+a caller's own projection returns. The currency is checked on every flow
+before that cut and on the instrument itself, so a matured trade in the
+wrong currency is still refused.
 
 **A floating coupon already decided needs its fixings.** Every valuation
 here takes ``fixings``, a :class:`~rates_engine.market.snapshot.MarketSnapshot`
@@ -41,7 +44,7 @@ from typing import Any
 
 from rates_engine.conventions.side import Side
 from rates_engine.core.errors import CurrencyMismatchError
-from rates_engine.core.evidence import Evidence, Provenance
+from rates_engine.core.evidence import DataQuality, Degradation, Evidence, Provenance
 from rates_engine.core.money import require_same_currency
 from rates_engine.core.results import EngineResult
 from rates_engine.curves.discount import CurveSet
@@ -54,7 +57,7 @@ from rates_engine.pricing.collateral import (
     merge_warnings,
     valuation_warnings,
 )
-from rates_engine.pricing.projection import Priceable, Swappable, float_leg, project
+from rates_engine.pricing.projection import Priceable, Swappable, float_leg, is_paid, project
 
 __all__ = [
     "PriceResult",
@@ -159,27 +162,31 @@ class PriceResult(EngineResult):
         )
 
 
-def _unpaid(flows: tuple[Cashflow, ...], curve_set: CurveSet) -> tuple[Cashflow, ...]:
-    """The flows still to be paid: those strictly after the valuation date.
+def _require_currency(instrument: Priceable, curve_set: CurveSet) -> None:
+    """Refuse an instrument paid in another currency than the curve, whatever is left of it.
 
-    A flow paid *on* ``as_of`` counts as paid, which is QuantLib's default
-    and the only reading under which a price struck at the close of the day
-    does not change when the day's payments settle.
+    The built-in projections never produce a paid flow, so a check on flows
+    alone never sees a matured trade: a peso swap that finished last year,
+    priced on the dollar curve, came back as 0.0. A trade in the wrong
+    currency is wrong whatever part of it is left. The flows are checked
+    first, by :func:`_live`, because their refusal names the flow; this
+    covers the trade that has none left.
     """
-    as_of = curve_set.as_of
-    return tuple(flow for flow in flows if flow.payment_date > as_of)
+    require_same_currency(
+        instrument.currency,
+        curve_set.discount.currency,
+        operation=f"valuing a {type(instrument).__name__}",
+    )
 
 
-def _pv_of(flows: tuple[Cashflow, ...], curve_set: CurveSet) -> float:
-    """Present value of the unpaid flows, refusing any flow the curve cannot discount.
+def _live(flows: tuple[Cashflow, ...], curve_set: CurveSet) -> tuple[Cashflow, ...]:
+    """Every flow checked against the curve's currency, then the ones still to be paid.
 
-    The currency check is here rather than in ``Cashflow`` because this is
-    the one place a flow and a curve meet. Without it, pricing a peso swap
-    on the dollar curve returns a number and the evidence chain records
-    nothing. It runs on paid flows too: a trade in the wrong currency is
-    wrong whatever part of it is left.
+    The check is here rather than in ``Cashflow`` because this is where a
+    flow meets a curve, and it runs on paid flows too: a caller's own
+    projection can return a whole history. Which flows are paid is
+    :func:`~rates_engine.pricing.projection.is_paid`'s to say.
     """
-    total = 0.0
     as_of = curve_set.as_of
     for flow in flows:
         require_same_currency(
@@ -187,10 +194,24 @@ def _pv_of(flows: tuple[Cashflow, ...], curve_set: CurveSet) -> float:
             curve_set.discount.currency,
             operation=f"discounting a {flow.leg} cashflow paid {flow.payment_date}",
         )
-        if flow.payment_date <= as_of:
-            continue
+    return tuple(flow for flow in flows if not is_paid(flow.payment_date, as_of))
+
+
+def _pv_of(flows: tuple[Cashflow, ...], curve_set: CurveSet) -> float:
+    """Present value of flows :func:`_live` has already checked and cut."""
+    total = 0.0
+    for flow in flows:
         total += flow.amount * curve_set.discount.df(flow.payment_date)
     return total
+
+
+def _priced_flows(
+    instrument: Priceable, curve_set: CurveSet, fixings: MarketSnapshot | None
+) -> tuple[Cashflow, ...]:
+    """The flows a value counts: projected, checked for currency and cut at ``as_of``."""
+    live = _live(project(instrument, curve_set, **_passing(fixings)), curve_set)
+    _require_currency(instrument, curve_set)
+    return live
 
 
 def _passing(fixings: MarketSnapshot | None) -> dict[str, MarketSnapshot]:
@@ -215,7 +236,7 @@ def _period(flow: Cashflow) -> dict[str, Any]:
 
 def _history_used(
     flows: Iterable[Cashflow], instrument: object, as_of: date
-) -> tuple[dict[str, Any], tuple[Provenance, ...]]:
+) -> tuple[dict[str, Any], tuple[Provenance, ...], tuple[Degradation, ...]]:
     """What the flows' floating amounts rest on, for the evidence, and the fixings' provenance.
 
     ``realised_fixings``: one record per flow paid partly or wholly on
@@ -231,10 +252,16 @@ def _history_used(
 
     Each field is left out when it would be empty, so the evidence of a
     trade with no history is exactly what it always was.
+
+    Every forecast that stands in for a fixing dated ``as_of`` is also a
+    ``Degradation``, one per series, at ``proxy``: the curve's expectation is
+    real data standing in for a different quantity, the print, with a bias
+    nobody has measured.
     """
     realised: list[dict[str, Any]] = []
     dated_today: list[dict[str, Any]] = []
     inputs: dict[Provenance, None] = {}
+    forecast: dict[str, Degradation] = {}
     index = getattr(instrument, "rate_index", None)
     for flow in flows:
         if flow.fixing is not None:
@@ -250,20 +277,34 @@ def _history_used(
                     }
                 )
         elif flow.projected_fixing_date is not None:
+            series_id = index.name if index is not None else "unknown"
             dated_today.append(
                 {
                     **_period(flow),
-                    "series_id": index.name if index is not None else None,
+                    "series_id": series_id,
                     "fixing_date": flow.projected_fixing_date.isoformat(),
                     "source": "curve",
                 }
+            )
+            forecast.setdefault(
+                series_id,
+                Degradation(
+                    code=f"curve_forward_for_todays_fixing:{series_id}",
+                    message=(
+                        f"The {series_id} fixing dated {flow.projected_fixing_date}, the "
+                        "valuation date, was not among the fixings passed, so the curve's "
+                        "forward stands in for it, as QuantLib does by default. Pass it as "
+                        "fixings= to price on the print."
+                    ),
+                    data_quality=DataQuality.PROXY,
+                ),
             )
     fields: dict[str, Any] = {}
     if realised:
         fields["realised_fixings"] = realised
     if dated_today:
         fields["fixings_dated_as_of"] = dated_today
-    return fields, tuple(inputs)
+    return fields, tuple(inputs), tuple(forecast.values())
 
 
 def valuation_evidence(
@@ -300,7 +341,7 @@ def valuation_evidence(
     Returns:
         The evidence record.
     """
-    history, inputs = _history_used(realised, instrument, curve_set.as_of)
+    history, inputs, forecast = _history_used(realised, instrument, curve_set.as_of)
     return Evidence(
         produced_by=produced_by,
         inputs=inputs,
@@ -318,8 +359,8 @@ def valuation_evidence(
         # The curve's own degradations, so a price on a curve whose
         # conventions are assumed inherits that without the caller having
         # to remember to pass source_evidence. That forgetting is what made
-        # the marking decorative.
-        warnings=valuation_warnings(instrument, curve_set),
+        # the marking decorative. Then any fixing the curve stood in for.
+        warnings=merge_warnings(valuation_warnings(instrument, curve_set), forecast),
     )
 
 
@@ -350,7 +391,7 @@ def discounted_value(
         MissingFixingError: A floating coupon is already decided and ``fixings``
             does not cover its history.
     """
-    return _pv_of(project(instrument, curve_set, **_passing(fixings)), curve_set)
+    return _pv_of(_priced_flows(instrument, curve_set, fixings), curve_set)
 
 
 def annuity_value(swap: Swappable, curve_set: CurveSet) -> float:
@@ -364,7 +405,9 @@ def annuity_value(swap: Swappable, curve_set: CurveSet) -> float:
         The annuity in years of discounted accrual.
     """
     unit_swap = swap.with_terms(fixed_rate=1.0, side=Side.RECEIVER)
-    return _pv_of(unit_swap.fixed_cashflows(), curve_set) / swap.notional
+    live = _live(unit_swap.fixed_cashflows(), curve_set)
+    _require_currency(swap, curve_set)
+    return _pv_of(live, curve_set) / swap.notional
 
 
 def _float_leg(
@@ -372,7 +415,9 @@ def _float_leg(
 ) -> tuple[Cashflow, ...]:
     """The payer's floating flows still to be paid, which a par rate prices."""
     payer = swap.with_terms(side=Side.PAYER)
-    return _unpaid(float_leg(payer, curve_set, **_passing(fixings)), curve_set)
+    live = _live(float_leg(payer, curve_set, **_passing(fixings)), curve_set)
+    _require_currency(swap, curve_set)
+    return live
 
 
 def par_rate_value(
@@ -448,7 +493,7 @@ def pv(
             is absent, lacks the index's series, or lacks a business day of
             its history. The message names the period and the series.
     """
-    flows = _unpaid(project(instrument, curve_set, **_passing(fixings)), curve_set)
+    flows = _priced_flows(instrument, curve_set, fixings)
     value = _pv_of(flows, curve_set)
     return PriceResult(
         evidence=valuation_evidence(
@@ -640,11 +685,11 @@ def price_on_parametric(
         )
     model = str(fields.get("model", type(fit).__name__))
 
-    parametric_flows = _unpaid(project(instrument, parametric, **_passing(fixings)), parametric)
+    parametric_flows = _priced_flows(instrument, parametric, fixings)
     parametric_pv = _pv_of(parametric_flows, parametric)
-    bootstrap_pv = _pv_of(project(instrument, bootstrapped, **_passing(fixings)), bootstrapped)
+    bootstrap_pv = _pv_of(_priced_flows(instrument, bootstrapped, fixings), bootstrapped)
     # The history is the same on both curves; record it once.
-    history, inputs = _history_used(parametric_flows, instrument, parametric.as_of)
+    history, inputs, forecast = _history_used(parametric_flows, instrument, parametric.as_of)
     difference = parametric_pv - bootstrap_pv
     notional = instrument.describe().get("notional")
     per_bp = (
@@ -674,7 +719,9 @@ def price_on_parametric(
             **history,
         },
         sources=(fit.evidence,),
-        warnings=merge_warnings(collateral_warnings(currency), instrument_warnings(instrument)),
+        warnings=merge_warnings(
+            collateral_warnings(currency), instrument_warnings(instrument), forecast
+        ),
     )
     return ParametricComparison(
         evidence=evidence,

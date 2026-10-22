@@ -28,9 +28,9 @@ currency from the curve.
 
 **History.** A period paid on or before the curve set's ``as_of`` is not
 projected at all: it has been paid, and nothing about it is worth anything
-today. The pricer drops such flows again whatever projected them, so a
-product of the caller's own that returns its whole history is still
-valued correctly.
+today. :func:`is_paid` is the one statement of that rule; the pricer asks
+it again of whatever a caller's own projection returns, so a product that
+returns its whole history is still valued correctly.
 
 A period paid after ``as_of`` whose coupon is already partly or wholly
 decided is history, and no curve can say what it was. Its fixed coupon was
@@ -89,20 +89,47 @@ from rates_engine.instruments.fra import FRA
 from rates_engine.instruments.swaps import IRSwap, OISSwap
 from rates_engine.market.snapshot import MarketSnapshot
 
-__all__ = ["Priceable", "Swappable", "project", "float_leg", "fra_fair_rate"]
+__all__ = ["Priceable", "Swappable", "project", "float_leg", "fra_fair_rate", "is_paid"]
 
 _TERM_SOFR_FIXING_LAG_DAYS = 2
 """Business days, on the index's calendar, from a Term SOFR fixing to the
-start of the period it sets: the ARRC's convention, and the same one
-``instruments/capfloor.py`` applies to caplets as ``TERM_RATE_FIXING_LAG_DAYS``.
-Repeated here rather than imported so that the linear pricer does not
-depend on the option products. It belongs on :class:`RateIndex`, as a
-property of the index rather than of each module that reads it; moving it
-there is a follow-up."""
+start of the period it sets: the ARRC's convention. Private and local for
+now: the lag is a property of the index, and alanvaa06/rates_engine#20
+moves it to one ``fixing_lag_days`` on :class:`RateIndex` that every
+reader of a term fixing uses."""
+
+_FIXING_SEARCH_HORIZON_DAYS = 21
+"""Calendar days after ``as_of`` beyond which a period cannot have fixed.
+
+Two business days back never span three weeks on SIFMA or BMV: the longest
+run of closed days either has had is SIFMA's after 2001-09-11, four business
+days. Checking this first spares the business-day walk on every later
+period, which doubled the time to reprice a thirty-year quarterly swap
+(0.52 to 1.12 ms)."""
 
 _TERM_SOFR = frozenset(
     index.name for index in (TERM_SOFR_1M, TERM_SOFR_3M, TERM_SOFR_6M, TERM_SOFR_12M)
 )
+
+
+def is_paid(payment_date: date, as_of: date) -> bool:
+    """Whether a flow paid on ``payment_date`` has left the trade by ``as_of``.
+
+    The one statement of this package's convention, QuantLib's default
+    (``includeReferenceDateEvents`` false): a payment on the valuation date
+    has happened, so a price struck at the close does not change when the
+    day's payments settle. Every cutoff in the pricers asks this function,
+    so the convention changes in one place.
+
+    Args:
+        payment_date: The date the flow is paid.
+        as_of: The valuation date.
+
+    Returns:
+        True when the flow is paid on or before ``as_of`` and so is worth
+        nothing today.
+    """
+    return payment_date <= as_of
 
 
 @runtime_checkable
@@ -313,6 +340,8 @@ def _term_history(
     valued, and refusing a swap struck at spot this morning would be a
     refusal of the ordinary case.
     """
+    if (start - as_of).days > _FIXING_SEARCH_HORIZON_DAYS:
+        return None, None
     fixing_date = _term_fixing_date(index, start)
     if fixing_date > as_of:
         return None, None
@@ -376,7 +405,7 @@ def _ois_float(
     for start, end, pay in zip(
         schedule.accrual_start, schedule.accrual_end, schedule.payment, strict=True
     ):
-        if pay <= as_of:
+        if is_paid(pay, as_of):
             continue
         tau = year_fraction(start, end, day_count)
         realised: RealisedFixing | None = None
@@ -431,7 +460,7 @@ def _irs_float(
     for start, end, pay in zip(
         schedule.accrual_start, schedule.accrual_end, schedule.payment, strict=True
     ):
-        if pay <= as_of:
+        if is_paid(pay, as_of):
             continue
         tau = year_fraction(start, end, swap.float_day_count)
         realised, projected_on = _term_history(
@@ -465,7 +494,7 @@ def _unpaid_fixed(swap: OISSwap | IRSwap, curve_set: CurveSet) -> tuple[Cashflow
     needs nothing but its own terms.
     """
     as_of = curve_set.as_of
-    return tuple(flow for flow in swap.fixed_cashflows() if flow.payment_date > as_of)
+    return tuple(flow for flow in swap.fixed_cashflows() if not is_paid(flow.payment_date, as_of))
 
 
 @project.register
@@ -528,7 +557,7 @@ def fra_fair_rate(
 def _project_fra(
     fra: FRA, curve_set: CurveSet, *, fixings: MarketSnapshot | None = None
 ) -> tuple[Cashflow, ...]:
-    if fra.end <= curve_set.as_of:
+    if is_paid(fra.end, curve_set.as_of):
         return ()
     sign = -fixed_leg_sign(fra.side)
     settled, realised, projected_on = _fra_rate(fra, curve_set, fixings)

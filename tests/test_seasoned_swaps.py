@@ -36,7 +36,11 @@ from rates_engine.conventions.indices import (
 )
 from rates_engine.conventions.schedule import add_months
 from rates_engine.conventions.side import Side
-from rates_engine.core.errors import MissingFixingError, UnsupportedConventionError
+from rates_engine.core.errors import (
+    CurrencyMismatchError,
+    MissingFixingError,
+    UnsupportedConventionError,
+)
 from rates_engine.core.evidence import DataQuality, Provenance
 from rates_engine.core.money import Currency
 from rates_engine.curves.bootstrap import bootstrap_discount_curve
@@ -46,7 +50,7 @@ from rates_engine.instruments.swaps import IRSwap, OISSwap
 from rates_engine.market.snapshot import MarketSnapshot, Series
 from rates_engine.pricing.calibration import SwapQuoteNode
 from rates_engine.pricing.linear import annuity, discounted_value, par_rate, par_rate_value, pv
-from rates_engine.pricing.projection import fra_fair_rate
+from rates_engine.pricing.projection import fra_fair_rate, is_paid
 
 AS_OF = date(2026, 1, 15)
 
@@ -485,6 +489,30 @@ class TestFlowsAlreadyPaidAreWorthNothing:
         expected = 365 / 360 * _df(date(2026, 7, 17)) + 365 / 360 * _df(date(2027, 7, 19))
         assert annuity(swap, CurveSet(_flat_curve())).value == pytest.approx(expected, rel=1e-12)
 
+    def test_one_rule_says_what_has_been_paid(self):
+        # QuantLib's default, includeReferenceDateEvents false: a payment on
+        # the valuation date has happened. Every cutoff in the pricer asks
+        # this one function, so changing the convention is one edit.
+        assert is_paid(AS_OF, AS_OF)
+        assert is_paid(AS_OF - timedelta(days=1), AS_OF)
+        assert not is_paid(AS_OF + timedelta(days=1), AS_OF)
+
+    @pytest.mark.parametrize("measure", [pv, discounted_value, annuity, par_rate])
+    def test_a_matured_trade_in_the_wrong_currency_is_still_refused(self, measure):
+        # Paid 2025-01-20, so nothing is left to discount, but a peso swap on
+        # the dollar curve is a mistake in the call, not a price of zero. Before
+        # the check moved ahead of the cutoff, pv returned 0.0 here while
+        # annuity raised; main raised for both.
+        peso = OISSwap(effective=date(2023, 1, 16), maturity=date(2025, 1, 16), fixed_rate=0.04,
+                       index=TIIE_FONDEO)
+        with pytest.raises(CurrencyMismatchError, match="MXN"):
+            measure(peso, CurveSet(_flat_curve()))
+
+    def test_a_matured_peso_fra_on_the_dollar_curve_is_refused(self):
+        fra = FRA(start=date(2025, 6, 2), end=date(2025, 6, 30), rate=0.075, index=TIIE_28)
+        with pytest.raises(CurrencyMismatchError, match="MXN"):
+            pv(fra, CurveSet(_flat_curve()))
+
     def test_the_pricer_drops_a_paid_flow_whatever_projected_it(self):
         # A product of the caller's own, registered the documented way, that
         # returns its whole history. The pricer is the one place a flow
@@ -851,6 +879,78 @@ class TestTermSOFRFixesTwoBusinessDaysBeforeItsPeriod:
         expected = 1_000_000_000.0 * (0.0745 - 0.075) * 28 / 360 * _df(date(2026, 2, 12), 0.07)
         assert pv(fra, curve_set, fixings=snapshot).value == pytest.approx(expected, rel=1e-12)
         assert fra_fair_rate(fra, curve_set, fixings=snapshot) == 0.0745
+
+
+class TestAForecastStandingInForAFixingIsADegradation:
+    """When the curve's forward replaces a fixing dated as_of, the price says so in its warnings.
+
+    The convention every branch follows: a fixing dated the valuation date is
+    read when supplied and forecast when not, and the forecast is reported
+    as a ``Degradation``, not only as a field, so ``worst_quality`` drops to
+    ``proxy``: the curve's expectation is real data standing in for a
+    different quantity, the print.
+    """
+
+    SPOT_IRS = IRSwap(effective=date(2026, 1, 20), maturity=date(2027, 1, 20), fixed_rate=0.04,
+                      notional=NOTIONAL)
+
+    def test_a_spot_swap_priced_without_todays_print_is_degraded(self):
+        result = pv(self.SPOT_IRS, CurveSet(_flat_curve()))
+        (warning,) = [w for w in result.evidence.warnings if w.code.startswith("curve_forward")]
+        assert warning.code == "curve_forward_for_todays_fixing:TERM_SOFR_3M"
+        assert warning.data_quality is DataQuality.PROXY
+        assert "2026-01-15" in warning.message and "fixings=" in warning.message
+        assert result.evidence.worst_quality is DataQuality.PROXY
+
+    def test_with_the_print_there_is_nothing_to_report(self):
+        snapshot = _fixings(_term("TERM_SOFR_3M", {AS_OF: 0.0405}))
+        result = pv(self.SPOT_IRS, CurveSet(_flat_curve()), fixings=snapshot)
+        assert not [w for w in result.evidence.warnings if w.code.startswith("curve_forward")]
+        assert result.evidence.worst_quality is DataQuality.OBSERVED
+
+    def test_the_par_rate_and_a_tiie_28_fra_carry_it_too(self):
+        par = par_rate(self.SPOT_IRS, CurveSet(_flat_curve()))
+        assert "curve_forward_for_todays_fixing:TERM_SOFR_3M" in {
+            w.code for w in par.evidence.warnings
+        }
+        fra = FRA(start=AS_OF, end=date(2026, 2, 12), rate=0.075, notional=1_000_000_000.0,
+                  index=TIIE_28)
+        result = pv(fra, CurveSet(_flat_curve(0.07, Currency.MXN)))
+        assert "curve_forward_for_todays_fixing:TIIE_28" in {
+            w.code for w in result.evidence.warnings
+        }
+
+    def test_a_trade_that_has_not_fixed_carries_no_such_warning(self):
+        # Fixes 2026-01-16, after as_of: a forecast is what it should be.
+        fra = FRA(start=date(2026, 1, 21), end=date(2026, 4, 21), rate=0.04, notional=NOTIONAL)
+        result = pv(fra, CurveSet(_flat_curve()))
+        assert result.evidence.warnings == ()
+        assert result.evidence.worst_quality is DataQuality.OBSERVED
+
+
+class TestTheFixingDateIsLookedUpOnlyNearTheValuationDate:
+    """A period starting weeks after as_of cannot have fixed, so its fixing date is not computed.
+
+    Counting business days back for every period of every reprice doubled
+    a thirty-year quarterly swap's price time (0.52 to 1.12 ms); only the
+    few periods near the valuation date need the walk.
+    """
+
+    def test_a_thirty_year_swap_walks_the_calendar_for_its_first_periods_only(self, monkeypatch):
+        calls: list[date] = []
+        walk = SIFMA_US.add_business_days
+
+        def counting(day: date, count: int) -> date:
+            calls.append(day)
+            return walk(day, count)
+
+        monkeypatch.setattr(SIFMA_US, "add_business_days", counting)
+        irs = IRSwap(effective=date(2026, 1, 20), maturity=date(2056, 1, 20), fixed_rate=0.04,
+                     notional=NOTIONAL)
+        pv(irs, CurveSet(_flat_curve()))
+        lookups = [day for day in calls if day == date(2026, 1, 20)]
+        assert lookups  # the spot period, which did fix on as_of, was looked up
+        assert all(day <= AS_OF + timedelta(days=21) for day in calls)
 
 
 #: The OIS strip of the review's repro scripts (``curves/common.py``), the
