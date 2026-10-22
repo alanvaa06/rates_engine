@@ -716,3 +716,60 @@ class TestACapWhoseFirstFixingIsToday:
         # required; theta holds every period's status at the valuation date.
         greeks = option_greeks(self._cap(), option_curve_set, VOL)
         assert math.isfinite(greeks.theta)
+
+
+QL_HIGH_VOL_CAP = {
+    # QuantLib 1.44, independent of this package: a quarterly Term SOFR 3M
+    # cap from 2026-04-15 (fixingDays = 2, GovernmentBond calendar), notional
+    # 10M, struck at the curve's level, on FlatForward(rate, continuous,
+    # ACT/365F) as of 2026-01-15, BlackCapFloorEngine at the lognormal vol.
+    # The vega is summed over QuantLib's own caplets: per caplet, the
+    # Bachelier volatility that reproduces its Black price
+    # (bachelierBlackFormulaImpliedVol), and its numeraire times the
+    # Bachelier price one basis point higher less the price at it. Value is
+    # the cap's NPV. Script: work-fix-options-vol/ql_vega_high.py.
+    # (rate, years, sigma): (vega per bp, NPV)
+    (0.01, 30, 0.90): (37248.772707535376, 2143926.6451400053),
+    (0.01, 20, 1.10): (21546.88293612977, 1509667.6731859013),
+    (0.04, 20, 1.30): (15199.640771535185, 4668990.826207118),
+}
+
+
+class TestVegaAtHighVolatilityAndLongExpiry:
+    """A lognormal vega at high vol and long expiry is a number.
+
+    The bumped Bachelier price used to be inverted back to a Black
+    volatility, and on long-dated caps it passed Black's ceiling well inside
+    the accepted band: a 30-year cap at 90% raised ValueError and took delta,
+    gamma and theta down with it. The bumped value is Bachelier's in closed
+    form; no inversion back is needed.
+    """
+
+    @staticmethod
+    def _flat(rate: float) -> CurveSet:
+        nodes = tuple(AS_OF + timedelta(days=365 * k) for k in range(1, 46))
+        return CurveSet(
+            DiscountCurve(AS_OF, nodes, tuple(math.exp(-rate * k) for k in range(1, 46)))
+        )
+
+    @pytest.mark.parametrize("rate,years,sigma", list(QL_HIGH_VOL_CAP))
+    def test_it_matches_quantlib_and_keeps_the_other_greeks(self, rate, years, sigma):
+        curves = self._flat(rate)
+        cap = CapFloor(date(2026, 4, 15), date(2026 + years, 4, 15), rate, 10_000_000.0, "cap", 3)
+        quoted = Volatility(sigma, VolUnits.LOGNORMAL_DECIMAL)
+        vega, npv = QL_HIGH_VOL_CAP[(rate, years, sigma)]
+        assert cap_floor_pv(cap, curves, quoted).value == pytest.approx(npv, rel=1e-13, abs=0.0)
+        greeks = option_greeks(cap, curves, quoted)
+        assert greeks.vega == pytest.approx(vega, rel=1e-9, abs=0.0)
+        assert all(math.isfinite(g) for g in (greeks.delta, greeks.gamma, greeks.theta))
+
+    def test_a_deep_out_of_the_money_caplet_has_no_negative_vega(self, option_curve_set):
+        # Its Black price is below the inversion's tolerance, so its normal
+        # vol inverts to zero; the vega is a difference of two Bachelier
+        # prices, monotone in the volatility, and cannot come out negative.
+        cap = CapFloor(
+            effective=date(2026, 2, 17), maturity=date(2026, 5, 18), strike=0.08,
+            notional=10_000_000.0,
+        )
+        vega = option_greeks(cap, option_curve_set, Volatility.lognormal_percent(20.0)).vega
+        assert 0.0 <= vega < 1e-20

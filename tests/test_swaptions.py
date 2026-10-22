@@ -617,6 +617,55 @@ class TestGreeks:
         ).vega
         assert under_black == pytest.approx(under_bachelier, rel=1e-8, abs=0.0)
 
+    def test_a_long_dated_swaption_at_a_high_lognormal_vol_has_a_vega(self):
+        # A 10y20y at 200% lognormal used to raise: the bumped Bachelier price
+        # was past what any Black volatility reaches. QuantLib 1.44
+        # reference, independent of this package: ATM payer on a VanillaSwap
+        # 2036-01-15 to 2056-01-15 (fixed annual ACT/360, Term SOFR 3M),
+        # notional 10M, on FlatForward(4%, continuous, ACT/365F) as of
+        # 2026-01-15; annuity from fixedLegBPS, sigma_N from
+        # bachelierBlackFormulaImpliedVol of the Black price, vega =
+        # annuity * [Bachelier(sigma_N + 1 bp) - Bachelier(sigma_N)].
+        # Script: work-fix-options-vol/ql_vega_high.py.
+        from datetime import date, timedelta
+
+        from rates_engine.curves.discount import CurveSet, DiscountCurve
+        from rates_engine.instruments.swaps import IRSwap
+
+        as_of = date(2026, 1, 15)
+        nodes = tuple(as_of + timedelta(days=365 * k) for k in range(1, 36))
+        curves = CurveSet(
+            DiscountCurve(as_of, nodes, tuple(math.exp(-0.04 * k) for k in range(1, 36)))
+        )
+        swap = IRSwap(
+            date(2036, 1, 15), date(2056, 1, 15), 0.04, 1e7,
+            fixed_frequency_months=12, float_frequency_months=3,
+        )
+        atm = forward_swap_rate(Swaption(date(2036, 1, 15), swap, 0.04, Side.PAYER, 1e7), curves)
+        swaption = Swaption(date(2036, 1, 15), swap, atm, Side.PAYER, 1e7)
+        quoted = Volatility(2.0, VolUnits.LOGNORMAL_DECIMAL)
+        assert swaption_pv(swaption, curves, quoted).value == pytest.approx(
+            3687324.264956336, rel=1e-13, abs=0.0
+        )
+        greeks = option_greeks(swaption, curves, quoted)
+        assert greeks.vega == pytest.approx(11577.763622012644, rel=1e-9, abs=0.0)
+        assert all(math.isfinite(g) for g in (greeks.delta, greeks.gamma, greeks.theta))
+
+    def test_a_deep_out_of_the_money_swaption_has_no_negative_vega(
+        self, underlying_swap, option_curve_set
+    ):
+        # A one-month payer struck at 8% on a 4% forward at 20% lognormal:
+        # its price inverts to a zero normal vol, and the Black round trip
+        # used to put the vega at -4e-30. Bachelier is monotone in sigma.
+        from datetime import date
+
+        from rates_engine.instruments.swaps import OISSwap
+
+        swap = OISSwap(date(2026, 2, 17), date(2036, 2, 17), 0.04, 1e7)
+        swaption = Swaption(date(2026, 2, 13), swap, 0.08, Side.PAYER, 1e7)
+        vega = option_greeks(swaption, option_curve_set, Volatility.lognormal_percent(20.0)).vega
+        assert 0.0 <= vega < 1e-20
+
     def test_a_non_positive_bump_refuses(self, atm_swaption, option_curve_set):
         with pytest.raises(ValueError, match="bumps must be positive"):
             option_greeks(
