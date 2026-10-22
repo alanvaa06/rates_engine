@@ -522,8 +522,9 @@ class FOMCStepCurve:
         """Sample the step path onto a discount curve.
 
         Each node's factor is ``1 / prod(1 + r_i d_i / 360)`` from ``as_of``,
-        the same rule :meth:`compounded` applies, with the business day open
-        at a node accruing only the calendar days up to it.
+        the same rule :meth:`compounded` applies and from the same terms,
+        :func:`_rate_days`, laid out once to the last node. The business day
+        open at a node accrues only the calendar days up to it.
 
         Args:
             nodes: Dates to sample at, all after ``as_of``.
@@ -534,19 +535,21 @@ class FOMCStepCurve:
             The discount curve implied by compounding the path.
         """
         factors: list[float] = []
-        closed = 1.0
-        anchor = self.as_of
-        if not calendar.is_business_day(anchor):
-            anchor = calendar.previous_business_day(anchor)
-        covered, day = 0, self.as_of
+        terms = _rate_days(self.as_of, nodes[-1], calendar) if nodes else []
+        closed, term, opened = 1.0, 0, self.as_of
         for node in nodes:
-            while day < node:
-                if day != anchor and calendar.is_business_day(day):
-                    closed *= 1.0 + self.rate_on(anchor) * covered / 360.0
-                    anchor, covered = day, 0
-                covered += 1
-                day += timedelta(days=1)
-            factors.append(1.0 / (closed * (1.0 + self.rate_on(anchor) * covered / 360.0)))
+            # Close every term that ends on or before the node; the one left
+            # open accrues the days from its start up to the node.
+            while term < len(terms) and opened + timedelta(days=terms[term][1]) <= node:
+                anchor, covered = terms[term]
+                closed *= 1.0 + self.rate_on(anchor) * covered / 360.0
+                opened += timedelta(days=covered)
+                term += 1
+            partial = (node - opened).days
+            open_factor = (
+                1.0 + self.rate_on(terms[term][0]) * partial / 360.0 if partial > 0 else 1.0
+            )
+            factors.append(1.0 / (closed * open_factor))
         return DiscountCurve(self.as_of, nodes, tuple(factors), currency=currency)
 
     def to_dict(self) -> dict[str, Any]:

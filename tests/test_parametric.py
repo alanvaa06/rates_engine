@@ -396,6 +396,24 @@ class TestFOMCStepCurveTheFunction:
             expected *= 1.0 + 0.043 * days / 360.0
         assert sampled.df(node) == pytest.approx(1.0 / expected, rel=1e-15)
 
+    def test_the_sampled_curve_and_compounded_agree_at_every_node(self):
+        """One set of terms for both, so a later fix to one reaches the other.
+        Nodes on weekdays, a weekend and across meetings."""
+        curve = FOMCStepCurve(
+            AS_OF, (date(2026, 11, 5), date(2026, 12, 17)), (0.043, 0.0405, 0.038)
+        )
+        nodes = (
+            date(2026, 10, 3),   # a Saturday
+            date(2026, 10, 30),
+            date(2026, 11, 5),   # the meeting itself
+            date(2026, 11, 29),  # a Sunday
+            date(2027, 1, 20),
+        )
+        sampled = curve.discount_curve(nodes)
+        for node in nodes:
+            growth = 1.0 + curve.compounded(AS_OF, node) * (node - AS_OF).days / 360.0
+            assert sampled.df(node) == pytest.approx(1.0 / growth, rel=1e-14)
+
     def test_compounding_follows_the_cme_and_new_york_fed_formula(self):
         """``prod(1 + r_i d_i / 360)`` over business days, ``d_i`` the calendar
         days rate ``r_i`` applies for -- three for a Friday. The window holds
