@@ -484,7 +484,7 @@ def zero_cost_collar_strike(
                 f"no put strike up to {high:.4f} raises the {target:.6f} needed to pay "
                 f"for the {protective_kind.value} at {protective_strike:.4f}. The "
                 "protection asked for is worth more than the whole opposite wing, so "
-                "there is no zero-cost collar here — widen the protective strike."
+                "there is no zero-cost collar here; widen the protective strike."
             )
         for _ in range(400):
             mid = 0.5 * (low + high)
@@ -499,7 +499,7 @@ def zero_cost_collar_strike(
         raise ImplausibleInputError(
             f"no call strike down to {low:.4f} raises the {target:.6f} needed to pay "
             f"for the {protective_kind.value} at {protective_strike:.4f}. There is no "
-            "zero-cost collar here — widen the protective strike."
+            "zero-cost collar here; widen the protective strike."
         )
     for _ in range(400):
         mid = 0.5 * (low + high)

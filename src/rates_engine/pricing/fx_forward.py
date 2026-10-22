@@ -269,7 +269,7 @@ def require_plausible_rate(rate: float, name: str) -> None:
     """
     if not math.isfinite(rate) or abs(rate) > MAX_PLAUSIBLE_RATE:
         raise ImplausibleInputError(
-            f"{name} = {rate!r} is outside the ±{MAX_PLAUSIBLE_RATE:.0%} a year this "
+            f"{name} = {rate!r} is outside the +/-{MAX_PLAUSIBLE_RATE:.0%} a year this "
             "build will accept. Rates here are continuously compounded decimals on "
             "ACT/365F, so 9.5% is 0.095, not 9.5. The band is a plausibility check "
             "rather than a measurement; widen MAX_PLAUSIBLE_RATE deliberately if you "
@@ -293,9 +293,9 @@ def require_plausible_basis(basis_bp: float) -> None:
     if not math.isfinite(basis_bp) or abs(basis_bp) > MAX_PLAUSIBLE_BASIS_BP:
         raise ImplausibleInputError(
             f"a cross-currency basis of {basis_bp:.1f} bp is outside the "
-            f"±{MAX_PLAUSIBLE_BASIS_BP:.0f} bp band this build will accept. That is a "
+            f"+/-{MAX_PLAUSIBLE_BASIS_BP:.0f} bp band this build will accept. That is a "
             "currency crisis rather than a quote, and the band is a plausibility "
-            "check rather than a measurement — no basis time series was reachable "
+            "check rather than a measurement: no basis time series was reachable "
             "when it was set. Widen MAX_PLAUSIBLE_BASIS_BP deliberately if you mean it."
         )
 
