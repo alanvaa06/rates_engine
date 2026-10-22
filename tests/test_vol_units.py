@@ -109,6 +109,21 @@ class TestDegenerateAndEscape:
         with pytest.raises(ValueError, match="non-negative"):
             Volatility.unchecked(-1.0, VolUnits.NORMAL_BP)
 
+    @pytest.mark.parametrize("units", list(VolUnits))
+    def test_nan_is_refused_in_every_unit(self, units):
+        # NaN compares false with everything, so each band check let it
+        # through and the pricer returned NaN for the option.
+        with pytest.raises(ValueError, match="finite"):
+            Volatility(float("nan"), units)
+
+    @pytest.mark.parametrize("units", list(VolUnits))
+    def test_unchecked_refuses_nan_and_infinity(self, units):
+        # unchecked skips the magnitude band, which is all that stopped an
+        # infinity; it must not skip the check that a number is a number.
+        for value in (float("nan"), float("inf")):
+            with pytest.raises(ValueError, match="finite"):
+                Volatility.unchecked(value, units)
+
 
 class TestAtMoneyEquivalence:
     """PRD-002 AC-1.3's cross-check, and the honesty about what it is."""
