@@ -248,10 +248,38 @@ class TestParserFailuresKeepTheContract:
         assert done.stdout == ""
         assert "the following arguments are required: --config" in done.stderr
 
-    def test_help_is_still_help_with_json(self):
-        done = _run("describe", "--json", "--help")
+    @pytest.mark.parametrize(
+        ("argv", "command", "in_usage"),
+        [(["price", "--help", "--json"], "price", "--config CONFIG"),
+         (["--json", "--help"], None, "{describe,")],
+    )
+    def test_help_with_json_is_a_usage_document(self, argv, command, in_usage):
+        # argparse printed the help text on stdout and exited 0, so stdout
+        # was not a JSON document (Alan's review of #17, point 4). The text
+        # goes to stderr, as narration, and stdout carries it as a document.
+        done = _run(*argv)
+        assert done.returncode == 0
+        assert done.stdout.count("\n") == 1
+        payload = json.loads(done.stdout)
+        assert payload["result_type"] == "Usage"
+        assert payload["schema_version"] == "1.0"
+        assert payload["help"] in done.stderr
+        assert payload["command"] == command
+        assert in_usage in payload["usage"]
+
+    def test_without_json_help_is_still_help(self):
+        done = _run("describe", "--help")
         assert done.returncode == 0
         assert done.stdout.startswith("usage: rateng describe")
+
+    def test_a_value_glued_onto_json_is_one_document(self, config_path):
+        # `--json=1` was exit 2 with an empty stdout: argparse rejects a value
+        # for a flag, and the check for --json did not recognise the spelling.
+        done = _run("price", "--config", str(config_path), "--json=1")
+        assert done.returncode == 1
+        error = json.loads(done.stdout)["error"]
+        assert error["type"] == "ConfigurationError"
+        assert "ignored explicit argument '1'" in error["message"]
 
 
 class TestConfiglessCommandsDoNotOpenTheConfig:
