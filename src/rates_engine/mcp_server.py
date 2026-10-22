@@ -31,11 +31,7 @@ from collections.abc import Callable
 from typing import Any
 
 from rates_engine.app.commands import COMMANDS
-from rates_engine.core.errors import (
-    IncompatibleDependencyError,
-    MissingDependencyError,
-    RatesEngineError,
-)
+from rates_engine.core.errors import IncompatibleDependencyError, MissingDependencyError
 from rates_engine.reporting.payloads import dumps, error_payload
 
 __all__ = ["TOOLS", "TOOL_DESCRIPTIONS", "call_tool", "build_server", "main"]
@@ -84,6 +80,9 @@ def call_tool(name: str, config: dict[str, Any] | None = None) -> str:
         RatesEngineError: The engine refused. Propagated rather than
             flattened, so :func:`build_server` can map it onto a tool error
             that still names the exception (AC-6.2).
+        Exception: Anything else the command raised, propagated the same way
+            and mapped the same way: the agent gets the document the CLI
+            prints, whatever the type.
     """
     if name not in TOOLS:
         raise KeyError(f"no tool named {name!r}; this server exposes {sorted(TOOLS)}")
@@ -91,7 +90,7 @@ def call_tool(name: str, config: dict[str, Any] | None = None) -> str:
 
 
 def _failure(exc: BaseException) -> str:
-    """The error document, for a transport that wants one rather than a raise."""
+    """The error document ``rateng <name> --json`` prints for ``exc``, byte for byte."""
     return dumps(error_payload(exc))
 
 
@@ -139,13 +138,18 @@ def build_server() -> Any:
         def _tool(config: dict[str, Any] | None = None) -> str:
             try:
                 return call_tool(name, config)
-            except RatesEngineError as exc:
-                # AC-6.2: the named exception reaches the caller with its own
-                # message. It has to be the SDK's ToolError specifically —
-                # any other exception is flattened into "Error executing tool
+            except Exception as exc:
+                # AC-6.2: the exception reaches the caller with its type and
+                # message. It has to leave as the SDK's ToolError specifically
+                # — anything else is flattened into "Error executing tool
                 # <name>" with the message dropped, which is the mute wrapper
-                # the criterion exists to forbid.
-                raise ToolError(f"{type(exc).__name__}: {exc}") from exc
+                # the criterion exists to forbid. That used to be done for
+                # RatesEngineError only, so a missing key, a day-first date or
+                # side "PAYER" reached the agent as that bare sentence while
+                # the CLI printed the reason. The text is the CLI's own error
+                # document — type, message, exit_code, recoverable — so the
+                # two interfaces fail alike as well as succeed alike.
+                raise ToolError(_failure(exc)) from exc
 
     for name in TOOLS:
         register(name)

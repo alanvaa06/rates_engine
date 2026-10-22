@@ -12,7 +12,7 @@ import math
 from datetime import date, timedelta
 from typing import Any, NamedTuple
 
-from rates_engine.app.config import as_date
+from rates_engine.app.config import as_date, key_refusal
 from rates_engine.conventions.daycount import CURVE_TIME_BASIS, year_fraction
 from rates_engine.conventions.indices import SOFR, index_named
 from rates_engine.conventions.side import Side
@@ -132,19 +132,18 @@ def _par_swap_quote(entry: dict[str, Any], number: int) -> SwapQuoteNode:
     assumed each period is paid the day it ends, which misprices a SOFR OIS
     (paid two business days later) by several basis points at the front; it
     is refused with the migration spelled out rather than accepted.
+
+    Through a command the entry has already passed
+    :func:`~rates_engine.app.config.require_config`, which refuses both
+    problems first. The check stays for a caller of :func:`calibration_nodes`
+    that went round it, in the same words.
     """
-    legacy = [key for key in _LEGACY_PAR_SWAP_KEYS if key in entry]
-    if legacy:
+    legacy = tuple(key for key in _LEGACY_PAR_SWAP_KEYS if key in entry)
+    missing = tuple(key for key in _PAR_SWAP_REQUIRED if key not in entry)
+    if legacy or missing:
         raise ConfigurationError(
-            f"curve.par_swaps[{number}] uses the v0.3 keys {legacy}. A par quote is now "
-            "given as the swap it quotes: effective, maturity and rate, with optional "
-            "frequency_months (12), payment_lag_days (2) and label. The dates and year "
-            "fractions are generated from those terms, payment lag included; the old "
-            "shape ignored the lag and mispriced a SOFR OIS by several basis points."
+            key_refusal(f"curve.par_swaps[{number}]", refused=legacy, missing=missing)
         )
-    missing = [key for key in _PAR_SWAP_REQUIRED if key not in entry]
-    if missing:
-        raise ConfigurationError(f"curve.par_swaps[{number}] is missing {missing}")
     rate = float(entry["rate"])
     swap = OISSwap(
         effective=as_date(entry["effective"]),

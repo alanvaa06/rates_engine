@@ -5,16 +5,24 @@ in, a JSON-ready payload out -- which is what lets the CLI and the MCP server
 expose :data:`COMMANDS` unchanged. A failure raises the named refusal from
 :mod:`rates_engine.core.errors`; turning it into an exit code or a tool error
 is the adapter's job, not this module's.
+
+**The config is checked before anything is computed.** Every function that
+reads a config starts with :func:`~rates_engine.app.config.require_config`,
+which checks the whole document against
+:data:`~rates_engine.app.config.CONFIG_SCHEMA` and hands back a clean copy, so
+the check holds however the function is reached: through :data:`COMMANDS`,
+or called directly.
 """
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Callable
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from rates_engine.app.builders import calibration_nodes, flat_curve, fx_inputs, ois_swap
-from rates_engine.app.config import as_date, require_config
+from rates_engine.app.config import CONFIG_SCHEMA, as_date, require_config
 from rates_engine.conventions.currency_pair import USDMXN
 from rates_engine.conventions.indices import INDICES, UNRESOLVED_MXN
 from rates_engine.core.errors import ConfigurationError, UndefinedDurationError
@@ -55,6 +63,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "COMMANDS",
+    "CONFIG_FREE",
     "Command",
     "describe",
     "list_instruments",
@@ -189,6 +198,19 @@ def describe(_config: dict[str, Any] | None) -> dict[str, Any]:
         "exceptions": sorted(EXCEPTION_NAMES),
         "exit_codes": {"0": "ok", "1": "inputs unusable", "2": "calculation impossible"},
         "key_rate_caveat": INTERPOLATION_CAVEAT,
+        "config": {
+            "format": "JSON; YAML with the config extra",
+            "commands_without_config": sorted(CONFIG_FREE),
+            "unknown_keys": (
+                "refused: every key in the file, in every block, has to be one "
+                "documented here, or the command raises ConfigurationError naming its "
+                "path and the closest accepted key, before computing anything."
+            ),
+            "comments": "keys starting with '_' are ignored at any depth",
+            # A copy: the payload is the caller's to edit, the schema is what
+            # every later config in the process is checked against.
+            "keys": copy.deepcopy(CONFIG_SCHEMA),
+        },
         "evidence": None,
     }
 
@@ -450,6 +472,14 @@ def hedge_structures(config: dict[str, Any] | None) -> dict[str, Any]:
 
 Command = Callable[[dict[str, Any] | None], dict[str, Any]]
 """A use case: an optional configuration mapping in, a JSON-ready payload out."""
+
+CONFIG_FREE: frozenset[str] = frozenset({"describe", "list-instruments"})
+"""The commands that answer from the build itself and read no configuration.
+
+The CLI does not open a ``--config`` passed to them, and neither calls
+:func:`~rates_engine.app.config.require_config`, so a config handed to them
+over MCP is ignored, as their docstrings say, rather than checked.
+"""
 
 COMMANDS: dict[str, Command] = {
     "describe": describe,
