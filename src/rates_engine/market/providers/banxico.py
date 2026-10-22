@@ -71,8 +71,13 @@ def _token(explicit: str | None) -> str:
     return token
 
 
-_THOUSANDS_GROUPED = re.compile(r"[+-]?\d{1,3}(?:,\d{3})+\.\d+")
-"""A number whose commas can only be thousands separators: ``1,850.50``."""
+_THOUSANDS_GROUPED = re.compile(r"[+-]?\d{1,3}(?:(?:,\d{3}){2,}(?:\.\d+)?|,\d{3}\.\d+)")
+"""A number whose commas can only be thousands separators.
+
+``1,850.50`` (one group, then a decimal point) and ``1,234,567`` (two or more
+groups, with or without one): a decimal comma appears at most once and never
+before a point.
+"""
 
 
 def _sie_number(raw: str) -> float:
@@ -81,8 +86,9 @@ def _sie_number(raw: str) -> float:
     Stripping every comma, as this parser did, read ``"11,2850"`` -- an
     exchange rate written with a decimal comma -- as 112850. A comma is
     accepted only where it cannot be anything but a thousands separator:
-    groups of three digits, then a decimal point. ``"1,850"`` is 1850 to one
-    writer and 1.85 to another, and is refused rather than guessed at.
+    groups of three digits followed by a decimal point, or two or more such
+    groups. ``"1,850"`` is 1850 to one writer and 1.85 to another, and is
+    refused rather than guessed at.
     """
     if "," in raw:
         if not _THOUSANDS_GROUPED.fullmatch(raw):
@@ -124,7 +130,8 @@ def parse_sie_payload(payload: str, series_id: str, *, percent: bool = True) -> 
             series, or is not the shape SIE documents, or an observation
             cannot be read: a date that is not day-first, a value that is
             not finite, or a comma that could be a decimal comma (only
-            ``1,850.50``-style thousands separators are accepted).
+            thousands separators that cannot be one are accepted:
+            ``1,850.50``, ``1,234,567``).
     """
     try:
         document: dict[str, Any] = json.loads(payload)

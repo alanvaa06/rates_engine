@@ -81,7 +81,20 @@ class TestParsing:
         )
         assert series.values == (pytest.approx(12_345_678.9),)
 
-    @pytest.mark.parametrize("dato", ["11,2850", "1,850", "1,85.0", "1.850,50"])
+    @pytest.mark.parametrize(
+        ("dato", "expected"), [("1,234,567", 1_234_567.0), ("-12,345,678", -12_345_678.0)]
+    )
+    def test_two_comma_groups_need_no_decimal_point(self, dato, expected):
+        """Two or more comma groups cannot be a decimal comma, so they are
+        thousands separators with or without a fraction. The first version
+        demanded a fraction and refused the whole series over "1,234,567",
+        which main had read as 1234567.0."""
+        series = banxico.parse_sie_payload(
+            _payload([{"fecha": "15/09/2026", "dato": dato}]), "SF43783", percent=False
+        )
+        assert series.values == (expected,)
+
+    @pytest.mark.parametrize("dato", ["11,2850", "1,850", "1,85.0", "1.850,50", "1,234,56"])
     def test_a_comma_that_may_be_decimal_refuses_rather_than_guessing(self, dato):
         """Stripping every comma read "11,2850" -- an exchange rate written
         with a decimal comma -- as 112850, and "1,850" is 1850 or 1.85
