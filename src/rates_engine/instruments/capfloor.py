@@ -145,6 +145,9 @@ class CapFloor:
         # hash alike. Changing one later with ``replace`` must change both.
         object.__setattr__(self, "index", index)
         object.__setattr__(self, "frequency_months", index.tenor.months)
+        # Built now, so a roll convention that leaves no period raises
+        # ConventionError when the cap is written down, not at its first price.
+        _ = self.schedule
 
     @property
     def rate_index(self) -> RateIndex:
@@ -172,8 +175,13 @@ class CapFloor:
 
     @property
     def span(self) -> tuple[date, date]:
-        """Effective through maturity."""
-        return self.effective, self.maturity
+        """Effective through maturity, as the schedule adjusts them.
+
+        The first period's start and the last one's end, rolled by
+        :attr:`convention` like every other date of the schedule; see
+        :attr:`rates_engine.instruments.swaps.OISSwap.span`.
+        """
+        return self.schedule.accrual_start[0], self.schedule.accrual_end[-1]
 
     @cached_property
     def schedule(self) -> Schedule:
