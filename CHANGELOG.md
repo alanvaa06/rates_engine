@@ -89,30 +89,55 @@ wherever a wrong number used to come back with exit code 0.
   Independence Day, Juneteenth and Christmas, and the New York Fed published
   SOFR on 31 December 2021 and 10 November 2023. `is_business_day` on those
   dates (and on 2027-12-31, 2028-11-10, ...) is now `True`, and
-  `holidays(2022)` holds 2022-01-01 instead of 2021-12-31. The 0.3.0 entry
-  that called the old rule SIFMA's was wrong.
+  `holidays(year)` lists only the weekdays the market closes: 2021-12-31 is
+  no longer in `holidays(2022)`, and a Saturday New Year's Day or Veterans
+  Day, which closes nothing, is not listed either (eleven closures in 2022,
+  ten in 2028). The 0.3.0 entry that called the old rule SIFMA's was wrong.
 - **A schedule's effective date is rolled by its convention**, as
   QuantLib's `Schedule` does. Numbers move only when the effective date is
   not a business day: a one-year 4% OIS on USD 100m from the June 2030 IMM
   date (Juneteenth) accrues from 2030-06-20, and its PV goes from 20,591.21
   to 20,351.93 USD. `adjust_accrual_ends=False` still reproduces the old
-  schedule.
+  schedule. The rolled start can precede the stated effective date
+  (Saturday 2026-01-31 starts on Friday the 30th); valued on the Saturday,
+  the swap has begun and is priced as a started trade.
+- **`span` reports the schedule's adjusted dates.** `OISSwap.span`,
+  `IRSwap.span` and `CapFloor.span` return the first accrual start and last
+  accrual end as the roll convention adjusts them, not `effective` and
+  `maturity` as written; `Swaption.span` ends on the underlying's. A swap
+  written from Saturday 30 May 2026 spans from Friday the 29th, so
+  `strip_hedge`'s coverage check sees the Friday, and a swaption expiring on
+  the 30th is refused. Nothing moves when both dates are business days.
+- **A schedule the roll convention leaves with no accrual period raises
+  `ConventionError` when the instrument is built.** Friday 2026-05-29 to
+  Sunday 2026-05-31 under Modified Following used to construct and then
+  raise a bare `ValueError` at the first price. `OISSwap`, `IRSwap` and
+  `CapFloor` build their schedules in `__post_init__`, so
+  `Schedule.generate`'s other `ValueError`s also arrive at construction.
 - **A `MarketSnapshot` serves nothing dated after its `as_of`.** `fixing`,
   `compounded` and `averaged` raise `MissingFixingError` for a business day
   after the valuation date, and `require` returns the series cut there;
   `series` keeps what was loaded. `realized_sofr_sigma` refuses an `as_of`
   later than the snapshot's. A snapshot as of 2026-01-15 used to serve 10
   February's fixing and compound through 30 January: a look-ahead in any
-  backtest.
-- **FRED units are explicit.** `load_series_csv`, `load_snapshot_csv` and
-  `fred.fetch_series` take `percent=`. A CSV in FRED's download layout
-  (`observation_date,<SERIES>`) is read in FRED's units, exactly as
-  `fetch_series` reads the same bytes; the review's FRED file used to load 0
-  observations with the default columns, and 3.64 instead of 0.0364 with the
-  columns named. `SOFRINDEX`, an index level, is no longer divided by 100,
-  and a FRED series whose units this package does not know raises
-  `UnsupportedConventionError` until `percent=` is given, instead of being
-  divided by 100.
+  backtest. The fixing dated `as_of` itself is served, which for SOFR,
+  published the next business day, is a one-day look-ahead; the
+  `MarketSnapshot` docstring says so.
+- **Units are stated, not inferred from a header.** `load_series_csv`,
+  `load_snapshot_csv` and `fred.fetch_series` take `percent=`. Columns the
+  caller names (and this package's `date,value`) are read in the units
+  `percent=` states, decimals when it is None. FRED's download as saved --
+  default columns absent, header `observation_date,<SERIES>` in any case,
+  BOM or not -- is read in FRED's units for the series its column names,
+  exactly as `fetch_series` reads the same bytes; the review's FRED file
+  used to load 0 observations with the default columns, and 3.64 instead of
+  0.0364 with the columns named. `SOFRINDEX`, an index level, is no longer
+  divided by 100, and a FRED series of unknown units raises
+  `UnsupportedConventionError` until `percent=` is given. When units were
+  not stated, a known rate series with a value above
+  `MAX_PLAUSIBLE_DECIMAL_RATE` (30%) as a decimal raises
+  `ImplausibleInputError` naming `percent=True`. FRED's old `DATE` header is
+  no longer recognised.
 - **Reading nothing is an error.** A CSV or FRED response with no
   observations raises `InsufficientDataError`; a column missing from the
   header raises `ValueError` naming the header; a FRED file whose value
@@ -126,20 +151,26 @@ wherever a wrong number used to come back with exit code 0.
   once its fixing date is before `as_of`; a fixing dated `as_of` itself is
   read if supplied and forecast off the curve if not, as QuantLib does by
   default, so a swap struck at spot today still prices without fixings.
-  Term SOFR fixes two SIFMA business days before its period (the ARRC
-  convention, as for caplets below); TIIE 28 is read on its period start, a
-  lag still to be verified. Without the fixings it needs, a trade raises
-  `MissingFixingError` (exit code 1) naming the period, the fixing date or
-  window, the series and how to pass it. It used to return a number with
-  the decided part priced off the curve, or at zero once begun. Risk
+  When the curve's forward stands in for a fixing dated `as_of`, the price
+  carries the degradation `curve_forward_for_todays_fixing:<series>` at
+  `proxy`. Term SOFR fixes two SIFMA business days before its period (the
+  ARRC convention, as for caplets below); TIIE 28 is read on its period
+  start, a lag still to be verified. Without the fixings it needs, a trade
+  raises `MissingFixingError` (exit code 1) naming the period, the fixing
+  date or window, the series and how to pass it. It used to return a number
+  with the decided part priced off the curve, or at zero once begun. Risk
   measures, hedges and `rateng price` call these functions and refuse such
   a trade until they pass fixings on.
 - **`key_rate_duration` is in years.** It is `KR DV01 / (PV x 1bp)`, and its
   `total` equals `effective_duration`; it was reported per basis point,
   1e4 smaller.
 - **`fit_fomc_step_curve` needs the fixings of a contract already running.**
-  A contract whose period started before `as_of` raises `MissingFixingError`
-  unless `fixings` are given.
+  Its `fixings` is a `MarketSnapshot` with a `"SOFR"` series, as for swaps
+  and caps. A contract whose period started before `as_of` raises
+  `MissingFixingError` when the snapshot is absent or lacks the series or a
+  business day of it; a fixing dated `as_of` is read if present and
+  otherwise forecast, with the `curve_forward_for_todays_fixing:SOFR`
+  degradation.
 - **A caplet expires at its fixing.** Term SOFR fixes two US Government
   Securities business days before its period (ARRC), so `cap_floor_pv` and
   `caplet_pv` measure expiry to `Caplet.fixing_date`, not to the accrual
@@ -147,16 +178,17 @@ wherever a wrong number used to come back with exit code 0.
   and now matches QuantLib with `fixingDays = 2` to 2.4e-15.
   `fixing_lag_days=0` restores the old numbers.
 - **A cap, floor or swaption that has started is valued on what has
-  happened**, by QuantLib's rule (`enforcesTodaysHistoricFixings = False`).
-  A period paid on or before the valuation date is dropped. One fixed before
-  it is its intrinsic value on the published fixing, passed as `fixings=` (a
-  `MarketSnapshot`, series named after the index); without it,
-  `MissingFixingError`. One fixing on the valuation date uses that day's
-  fixing if supplied, and otherwise the curve's forward with no time left
-  (status `fixes_today`; the evidence's `fixing_source` says which). A
-  swaption expiring on the valuation date is its intrinsic value on the
-  forward swap rate; one that expired before it raises `ValueError`. A
-  seasoned 3% floor went from 314,181.72 to QuantLib's 11,200.15.
+  happened**, under QuantLib's default conventions
+  (`includeReferenceDateEvents = False`, `enforcesTodaysHistoricFixings =
+  False`). A period paid on or before the valuation date is dropped. One
+  fixed before it is its intrinsic value on the published fixing, passed as
+  `fixings=` (a `MarketSnapshot`, series named after the index); without
+  it, `MissingFixingError`. One fixing on the valuation date uses that day's
+  fixing if the series holds it, else the curve's forward with no time
+  left, recorded as a `curve_forward_for_todays_fixing:<series>` degradation
+  (`proxy`). A snapshot without the index's series is refused. A swaption
+  expiring on or before the valuation date raises `ValueError`. A seasoned
+  3% floor went from 314,181.72 to QuantLib's 11,200.15.
 - **`sabr.lognormal_vol` refuses a shifted smile** with `VolUnitsError`
   unless `shifted_black=True`: with a shift it is a shifted-Black
   volatility, which no pricer here carries.
@@ -165,44 +197,56 @@ wherever a wrong number used to come back with exit code 0.
 - **`worst_case_rate` and `best_case_rate` are worked out from the legs,
   and are `None` on an open side.** They were the edge of the payoff grid,
   so they moved with `grid_width`.
-- **FX inputs no market produces are refused.** `StructureQuote` refuses a
-  volatility outside the lognormal band (`VolUnitsError`), a negative or
-  non-finite one and a non-positive expiry (`ValueError`), and rates beyond
-  ±100% (`ImplausibleInputError`); `compare_structures` refuses a
-  correlation outside `[-1, 1]`; Garman-Kohlhagen raises on a negative or
-  non-finite expiry or volatility;
-  `SmileQuotes.wings()` refuses a broker butterfly; half a ten-delta pair is
-  a `CalibrationError`.
+- **FX inputs no market produces are refused.** A float volatility given to
+  `StructureQuote` must lie in [0.2%, 500%] (`VolUnitsError`,
+  `MIN_PLAUSIBLE_FX_VOLATILITY`), and zero, a negative or a non-finite one
+  is refused (`ValueError`); a market outside the band is passed as
+  `Volatility.unchecked(value, VolUnits.LOGNORMAL_DECIMAL)`. A non-positive
+  expiry is a `ValueError` and rates beyond +/-100% an
+  `ImplausibleInputError`. A smile built on a different forward from the
+  legs, basis included, is refused (`ValueError`, naming the `r_domestic`
+  to rebuild it with); one that cannot report its forward is accepted and
+  marked `smile_forward_unverified` (`assumed`). `compare_structures`
+  refuses a correlation outside `[-1, 1]`; Garman-Kohlhagen raises on a
+  negative or non-finite expiry or volatility; `SmileQuotes.wings()` refuses
+  a broker butterfly; half a ten-delta pair is a `CalibrationError`. FX
+  error messages are ASCII.
 - **A futures strip is sized at each contract's own tick.** An SR1 is worth
   USD 41.67 a basis point and an SR3 USD 25.00; `strip_hedge` used to divide
   every contract by one `contract_dv01` (25.00 by default, and the CLI always
   passed 25.00), so SR1 months were bought 1.67 times over -- 28.7 contracts
   where 17.2 offset the February SR1 of a mixed SR1/SR3 strip.
-  `FuturesNode` takes an optional `contract` (`"SR1"` or `"SR3"`); left out,
-  a calendar-month period is SR1, an IMM quarter SR3, and any other period
-  is sized as SR3 as before, recorded as `assumed`.
+  `FuturesNode` takes an optional `contract` (a new `FuturesContract`, or
+  its name `"SR1"` or `"SR3"`); left out, a calendar-month period is SR1,
+  an IMM quarter SR3, and any other period is sized as SR3 as before, with
+  a `futures_contract_assumed` degradation.
   `strip_hedge(contract_dv01=None)` is the new default; a number still
-  applies to every contract and is refused if it contradicts a declared one.
-  `HedgeResult.contract_dv01` is `None` for a strip that mixes the two,
-  `HedgeResult.contract_dv01_by_label` is new, and the evidence field
-  `contract_dv01_derivation` is now a mapping per contract. A hedge on the
-  SR1 tick carries an `sr1_notional_assumed` degradation. The CLI reads
-  `curve.futures[].contract`. An SR3-only strip is bit-identical.
-- **A config key a command does not read is refused.** Every command that
-  takes a config raises `ConfigurationError` (exit code 1) for a key, in a
-  block it uses, that it neither reads nor finds in the documented schema,
-  naming the path and the closest key: `swap.notionl (did you mean
-  notional?)`. A misspelt key used to fall back to its default with exit 0:
+  applies to every contract but is refused if it contradicts a contract the
+  node declares or its period names. `HedgeResult.contract_dv01` and
+  `HedgeResult.total_contracts` are `None` for a strip that mixes the two;
+  `contract_dv01_by_label` and `total_contracts_by_contract` are new, and
+  the evidence field `contract_dv01_derivation` is a mapping per contract. A
+  hedge with an SR1 in it carries an `sr1_notional_assumed` degradation.
+  The hedge's refusals of contradictory inputs are `ConfigurationError`.
+  The CLI reads `curve.futures[].contract`. An SR3-only strip is
+  bit-identical.
+- **The CLI config is checked against a schema before any command runs.**
+  Every key in the file, in every block, must be one `rateng describe
+  --json` documents under `config` (or start with `_`, a comment): a typo is
+  a `ConfigurationError`, exit code 1, naming the path and the closest key
+  (`swap.notionl (did you mean notional?)`), whichever command reads the
+  file. A misspelt key used to fall back to its default with exit 0:
   `notionl` priced a 1,000,000 notional (PV 921.99 instead of 92,199.33),
-  `convexty` dropped the convexity adjustment (PV 114,866.89), `key_tenor`
-  left `key_rate_dv01` null, `shock_bps` used the default grid. Keys another
-  command reads are accepted, so one file still serves `bootstrap`, `price`
-  and `hedge`; keys starting with `_` are comments.
-- **A missing required config key is `ConfigurationError`, not
-  `KeyError`**, naming the path and what it holds. Exit code unchanged (1).
+  `convexty` dropped the convexity adjustment (PV 114,866.89). For the
+  blocks a command reads, a missing required key is refused by path (it was
+  a `KeyError`), a `null` for a key whose default is a value is refused
+  (`notional: null` was a `TypeError`, `strict: null` turned the residual
+  check off), and a `null` whose default is `null` means absent.
 - **With `--json`, a command line the parser rejects is one error document,
-  exit code 1.** It was exit 2 with an empty stdout. Without `--json`,
-  unchanged.
+  exit code 1.** It was exit 2 with an empty stdout; `--json=1` is such a
+  document too. Without `--json`, unchanged.
+- **With `--json`, `--help` is a `Usage` document** on stdout, and the help
+  text goes to stderr.
 - **MCP tools fail with the CLI's error document.** Every exception reaches
   the agent as `Error executing tool <name>: ` followed by what
   `rateng <name> --json` prints. Anything but a `RatesEngineError` used to
@@ -298,7 +342,8 @@ wherever a wrong number used to come back with exit code 0.
   cross-currency swap instrument, implied discount curve or calibration
   node exists here to convert between them. No number changes.
 - `StructureQuote.expiry` is the span from the spot date to settlement;
-  pair payloads gain `spot_lag_days` and `settlement_calendars`; the CLI's
+  pair payloads gain `spot_lag_days`, `settlement_calendars` and
+  `spot_lag_calendars`; the CLI's
   `fx` rates are documented, and recorded in the evidence, as continuously
   compounded ACT/365F decimals.
 - The licence is declared as the SPDX expression `MIT` with `license-files`
@@ -349,12 +394,17 @@ wherever a wrong number used to come back with exit code 0.
   date; the file and FRED providers skip "", ".", "na", "n/a" and "nan" in
   any case (lower-case "nan" used to load as a NaN fixing).
 - **Banxico decimal commas are refused, not stripped.** "11,2850" would
-  have read as 112850; only `1,850.50`-style thousands separators are
-  accepted.
+  have read as 112850. Commas are accepted only where they cannot be
+  decimal: one group before a decimal point ("1,850.50") or two or more
+  groups ("1,234,567").
+- **Snapshot lookups no longer copy the series.** `fixing()` on a history
+  cut at `as_of`: 0.234 s per 1,000 calls before, 0.0003 s after.
 - **Flows paid on or before the valuation date are worth nothing.** They
   were discounted at a factor of one: on a 4% payer over USD 100m from
   2024-07-15 to 2027-07-15 valued 2026-01-15, the coupon paid 2025-07-17
-  entered at -4,055,556 USD. A flow paid on `as_of` counts as paid.
+  entered at -4,055,556 USD. A flow paid on `as_of` counts as paid. A
+  matured trade in another currency than the curve is still refused with
+  `CurrencyMismatchError`.
 - **A swap that has started is valued on what is left of it.** The
   overnight period in progress compounds its published fixings to `as_of`
   and the curve after it; a term period pays its fixing; the fixed coupon in
@@ -370,13 +420,15 @@ wherever a wrong number used to come back with exit code 0.
   point, as QuantLib's `IterativeBootstrap` does. A 12-swap SOFR strip went
   from residuals of up to 0.1145 bp (and a `BootstrapResidualError` under
   `strict`) to 6e-12 bp; `compare_interpolations` now runs on swap strips.
+  The first pass may rise; only the settled curve must be monotone.
   Log-linear curves are bit-for-bit unchanged. The 0.2.0 entry's "the only
   thing the choice changes" holds on a futures strip; on swaps paid with a
   lag the two interpolations also put the nodes apart, by up to 0.58 bp of
   zero rate on that strip.
-- The monotone convex positivity collar no longer bends curves with
-  negative forwards (a flat -50 bp curve read -88 to -26 bp); it applies
-  only against non-negative intervals.
+- The monotone convex collar clamps each node into `[min(0, 2f), max(0,
+  2f)]` per neighbouring forward: Hagan-West on positive inputs, its
+  mirror on negative ones (a flat -50 bp curve reads -50 bp, where it read
+  -88 to -26 bp), and continuous as a forward crosses zero.
 - `instantaneous_forward` on a monotone convex curve before `as_of` returns
   the forward at `as_of`, not the long-end forward.
 - `fit_nelson_siegel` scans a 100-point tau grid before refining (a
@@ -386,16 +438,22 @@ wherever a wrong number used to come back with exit code 0.
 - `FOMCStepCurve` compounds by the CME/New York Fed rule,
   `prod(1 + r_i d_i/360)` over business days (a weekend was three daily
   periods: +0.029 bp a quarter); `fit_fomc_step_curve` prices realised days
-  of an in-progress SR1/SR3 from `fixings`, and refuses unknown symbols and
-  NaN prices.
+  of an in-progress SR1/SR3 from `fixings`, refuses unknown symbols and NaN
+  prices, and refuses meetings on or before `as_of` and any segment no
+  unfixed day prices (`UnderdeterminedCurveError`): a meeting before
+  `as_of` used to come back as a segment at exactly 100 minus the January
+  price.
 - `solve_dual_curve` enforces `tolerance_bp` and refuses a non-converged
-  solve (`BootstrapResidualError`); its docstring no longer claims the two
-  modes can differ.
-- `bootstrap_discount_curve` and `solve_dual_curve` refuse NaN or infinite
-  quotes with `ImplausibleInputError` (exit code 1), naming each instrument.
+  solve (`BootstrapResidualError`); its residuals are keyed uniquely
+  (`label@node_date`) and checked per instrument, and its docstring no
+  longer claims the two modes can differ.
+- `bootstrap_discount_curve` and `solve_dual_curve` refuse a NaN, infinite
+  or too-large-to-price quote with `ImplausibleInputError` (exit code 1),
+  naming each instrument.
 - `convexity_adjustment` is 0 for a reference period already started (it
-  was negative) and refuses a sigma above `MAX_PLAUSIBLE_SIGMA` (0.10, 1,000
-  bp a year) or non-finite inputs.
+  was negative) and, for `ho_lee` and `hull_white`, refuses a sigma above
+  `MAX_PLAUSIBLE_SIGMA` (0.10, 1,000 bp a year) or non-finite inputs;
+  `model="none"` ignores sigma and kappa.
 - The par view declares its `start` and `payment_lag_days`.
 - NaN volatilities, SABR parameters and implied-vol targets are refused
   instead of priced into NaN or the top of the bracket.
@@ -406,14 +464,22 @@ wherever a wrong number used to come back with exit code 0.
 - The vol cube matches quoted strikes within 1e-10 and marks extrapolation
   (`sabr_extrapolated`, `reliable=False`, `outside_quoted_strikes`).
 - An option payload's `unit` is its currency (MXN for TIIE).
-- Vega of a lognormal quote converts exactly through the price, caplet by
-  caplet: a 10y10y at 30% was 0.893 of its normal-quoted vega.
+- Vega of a lognormal quote is per basis point of normal vol, exactly and
+  in closed form: the numeraire times Bachelier's price at the
+  price-matched normal vol plus the bump, less Bachelier's price at it,
+  caplet by caplet. It no longer raises on long-dated high-vol options (a
+  30y cap at 90% did) and is never negative. A 10y10y at 30% was 0.893 of
+  its normal-quoted vega.
+- `fixing_lag_days` must be a non-negative int; 1.5 used to hang in the
+  calendar and then fail.
 - `caplet_forward_rate` refuses a period that began before the curve.
 - Theta is documented as volatility decay only.
-- **The USD/MXN forward runs from the T+2 spot date** (joint SIFMA_US + BMV
-  calendar), not from the valuation date: it was 76-78 pips high at every
-  tenor, and 81.7 pips at 3M across 16 September; `implied_basis` no longer
-  reads that carry as basis (-125 bp at 1W on a zero-basis forward).
+- **The USD/MXN forward runs from the spot date**: two peso business days
+  after the trade, rolled to a day the Federal Reserve and BMV are both
+  open (a US holiday on T+1 alone does not delay it). Measuring from the
+  valuation date was 76-78 pips high, and 81.7 pips at 3M across 16
+  September; `implied_basis` no longer reads that carry as basis (-125 bp
+  at 1W on a zero-basis forward).
 - An FX forward (and `hedge-structures`) on a peso curve carries the curve's
   degradations and reads `assumed`.
 - `hedge-structures` applies the fx block's `basis_bp` and prices on the
@@ -422,8 +488,9 @@ wherever a wrong number used to come back with exit code 0.
 - Residual variance under a partial hedge is
   `s_a^2 + (1-h)^2 s_x^2 + 2(1-h) rho s_a s_x` (h = 0.8: 0.011265 ->
   0.009149).
-- `upside_participation` is the share of a favourable move kept (ATM call
-  0.533 -> 1.0, seagull 0.433 -> 0.119, collar 0.279 -> 0.339).
+- `upside_participation` is the share kept of a favourable move from the
+  forward to `grid_width` x F (ATM call 0.533 -> 1.0; mirror structures
+  now score alike, a collar 0.400 both ways).
 - `gk.delta_spot` at zero volatility compares the forward with the strike,
   magnitude `e^{-r_f T}`.
 - The vanna-volga smile uses the ten-delta quotes and reprices all five
@@ -435,13 +502,16 @@ wherever a wrong number used to come back with exit code 0.
   without labels was sized as one contract: 101.6 contracts instead of 878,
   a hedge ratio of -0.116, a net of +193,078 USD at +10 bp instead of -310,
   no error. Repeated labels are now keyed `label@period-end`, as the
-  bootstrap's residuals already were. Labelled strips are unchanged.
+  bootstrap's residuals already were: the keys follow the bootstrap's own
+  rule over the whole calibration set, so they index `fit_residuals_bp`.
+  Labelled strips are unchanged.
 - **Overlapping futures no longer open a false gap.** The coverage check
   compared each contract only with the next, so SR1 months under an SR3
   quarter were refused with a hole the quarter covers.
 - **A zero shock is refused by name.** `shock_table` raised a bare
-  `ZeroDivisionError` on `shocks_bp` containing 0; it now raises a
-  `ValueError` that says to drop it.
+  `ZeroDivisionError` on `shocks_bp` containing 0; it now raises
+  `ConfigurationError` (over the CLI naming `hedge.shocks_bp[i]`), and
+  reads a one-pass grid once.
 - **The bucketed-delta notes say what they measure.** They claimed the
   bucketed deltas and the key rates sum to the same parallel DV01; each sums
   to its own (-21,949.91 against -21,870.07 USD/bp on the README strip), and
@@ -497,20 +567,25 @@ wherever a wrong number used to come back with exit code 0.
   and `tests/test_sifma_publication_record.py`, which checks every weekday
   from 2018-04-03 to 2026-10-14 against FRED's SOFR record.
 - `market.providers.file`: `parse_series_csv`, `is_missing_value`,
-  `MISSING_VALUE_MARKERS`, `FRED_DATE_COLUMNS`. `market.classify`:
-  `quoted_in_percent`, `resolve_percent`.
+  `MISSING_VALUE_MARKERS`, `FRED_DATE_COLUMN`, `MAX_PLAUSIBLE_DECIMAL_RATE`.
+  `market.classify`: `quoted_in_percent`, `resolve_percent`.
 - `RealisedFixing`, `Cashflow.fixing` and `Cashflow.projected_fixing_date`:
   what a floating amount rests on. Prices report the fixings read as
   `realised_fixings` in the evidence, with the series' provenance among the
   inputs, so their data quality reaches `worst_quality`; a term period fixed
   on the valuation date adds a `fixings_dated_as_of` entry saying whether
-  its fixing was read (`"fixings"`) or forecast (`"curve"`).
+  its fixing was read (`"fixings"`) or forecast (`"curve"`), and a
+  forecast in its place also adds that degradation.
+- `rates_engine.pricing.projection.is_paid(payment_date, as_of)`: the one
+  statement of the paid-flow convention (a payment on `as_of` has happened,
+  QuantLib's default).
 - `bootstrap_discount_curve(max_iterations=, iteration_tolerance=)`,
   `DEFAULT_MAX_ITERATIONS`, `DEFAULT_ITERATION_TOLERANCE`; evidence
   `iterations`, `max_iterations`, `iteration_tolerance`.
   `DiscountCurve.with_factor`.
-- `fit_fomc_step_curve(fixings=, calendar=)`; `calendar=` on
-  `FOMCStepCurve.compounded`, `.averaged` and `.discount_curve`.
+- `fit_fomc_step_curve(fixings=, calendar=)`, `fixings` a `MarketSnapshot`
+  with a `"SOFR"` series; `calendar=` on `FOMCStepCurve.compounded`,
+  `.averaged` and `.discount_curve`.
 - `all_views(par_start=, par_payment_lag_days=)`; `CurveView.start`,
   `CurveView.payment_lag_days`. `models.convexity.MAX_PLAUSIBLE_SIGMA`.
 - `pricing.options.option_value`, `PeriodStatus` (`paid`, `fixed`,
@@ -519,17 +594,21 @@ wherever a wrong number used to come back with exit code 0.
   `CapFloor` and `Caplet`; `TERM_RATE_FIXING_LAG_DAYS`;
   `fixings=` on `cap_floor_pv`, `caplet_pv` and `option_greeks`;
   `OptionPriceResult.currency`; `CubeQuote.reliable`;
-  `volatility.cube.STRIKE_TOLERANCE`.
-- `CurrencyPair.spot_lag_days`, `.calendars`, `.spot_date()`,
-  `.is_settlement_day()`; `SETTLEMENT_CALENDARS`.
-- `StructureQuote.basis_bp`, `.r_domestic_effective`, `.carried()`.
+  `volatility.cube.STRIKE_TOLERANCE`; `pricing.options.FIXING_FORECAST_CODE`
+  (the `curve_forward_for_todays_fixing` prefix).
+- `conventions.settlement` (`FederalReserveCalendar`, `FEDERAL_RESERVE`,
+  `SETTLEMENT_CALENDARS`); `CurrencyPair.spot_lag_days`, `.calendars`,
+  `.lag_calendars`, `.spot_date()`, `.is_settlement_day()`.
+- `StructureQuote.basis_bp`, `.r_domestic_effective`, `.carried()`;
+  `StructureQuote` accepts a lognormal `Volatility`;
+  `hedging.fx_structures.MIN_PLAUSIBLE_FX_VOLATILITY`.
 - `pricing.fx_forward.MAX_PLAUSIBLE_RATE`, `require_plausible_rate`,
   `require_plausible_basis`; `forward_from_curves(inputs=...)`;
   `FXForwardResult.spot_date` and `.year_fraction`.
 - `ButterflyConvention` (`SMILE`, the default, and `BROKER`),
   `VannaVolgaSmile.smile_quotes()`, `.wing_pillars()`, `.all_pillars()`.
 - `hedge.require_full_coverage` in the CLI's `hedge` block (default `true`,
-  a JSON boolean), and `SR1_DV01`.
+  a JSON boolean); `SR1_DV01` and `FuturesContract`.
 - `rateng describe --json` publishes every config key under `config`, with
   units, defaults and the commands that read it, the `fx` block included.
 - The sdist now carries `tests/conftest.py`, `tests/fixtures/`, `scripts/`,
