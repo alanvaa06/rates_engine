@@ -283,97 +283,94 @@ class TestTheTradeOff:
         assert collar.upfront_cost < otm.upfront_cost
         assert collar.upside_participation < otm.upside_participation
 
-    def test_participation_is_the_ratio_it_claims_to_be(self, payable):
-        """The share of a favourable move the structure keeps, worked out
-        from each row's legs rather than from its payoff grid.
+    @staticmethod
+    def _kept_by_slope(structure, direction, forward, width):
+        """The share of the favourable move a row keeps, from its legs alone.
 
-        For a payable the favourable move is the spot falling from 18.50 to
-        the bottom of the grid, 14.80. Every bought call here is struck above
-        the spot, so it plays no part in that move; a sold put fixes the rate
-        below its strike. So a row keeps the stretch between the spot and its
-        sold put, and all of it when it has none. This used to be read off
-        the two ends of the grid -- the rate at the top minus the rate at the
-        bottom -- which mixed the protection bought against a rise into the
-        share of a fall kept: 0.533 for an at-the-money call that keeps every
-        peso of a fall, and a seagull (0.433) ahead of a collar (0.279) when
-        the seagull sells its put closer in. The old test recomputed that
-        same formula from the grid, so it could not tell.
+        Integrates the row's slope in the spot over the favourable move --
+        from the forward down to `(1 - width) F` for a payable, up to
+        `(1 + width) F` for a receivable -- with the strikes as breakpoints.
+        The slope is the open share of the exposure plus or minus each leg
+        in the money; nothing here reads the payoff grid or calls the code
+        under test.
         """
-        spot, edge = QUOTE.spot, payable.spot_grid[0]
-        assert edge == pytest.approx(14.80)
-        expected = {"unhedged": 1.0, "forward": 0.0}
-        for structure in payable.structures:
-            if structure.name in expected:
-                continue
-            calls = [k for kind, k, _ in structure.legs if kind == "call"]
-            puts = [k for kind, k, q in structure.legs if kind == "put"]
-            assert all(k > spot for k in calls), structure.name
-            if not puts:
-                expected[structure.name] = 1.0
-                continue
-            (sold_put,) = puts
-            assert edge < sold_put < spot, structure.name
-            expected[structure.name] = (spot - sold_put) / (spot - edge)
-        for structure in payable.structures:
-            assert structure.upside_participation == pytest.approx(
-                expected[structure.name], abs=1e-12
-            ), structure.name
+        payable = direction is ExposureDirection.PAYABLE
+        edge = forward * (1.0 - width) if payable else forward * (1.0 + width)
+        low, high = min(edge, forward), max(edge, forward)
+        helped = -1.0 if payable else 1.0
 
-    def test_the_reviews_numbers(self, payable):
-        """REVISION finding 3.2, on this market: the protective call and the
-        spread keep a whole fall, the collar a third and the seagull an
-        eighth, because the seagull's sold put sits closest to the spot."""
+        def slope(s):
+            value = 1.0 - abs(structure.forward_amount) / 1_000_000.0
+            for kind, strike, quantity in structure.legs:
+                if kind == "call" and s > strike:
+                    value += helped * quantity
+                if kind == "put" and s < strike:
+                    value -= helped * quantity
+            return value
+
+        points = sorted({low, high, *(k for _, k, _ in structure.legs if low < k < high)})
+        moved = sum(
+            slope(0.5 * (a + b)) * (b - a) for a, b in zip(points, points[1:], strict=False)
+        )
+        # For a payable the favourable move is downwards: what is kept is
+        # the fall in the rate, which is the integral of the slope.
+        return moved / (high - low)
+
+    @pytest.mark.parametrize("direction", list(ExposureDirection))
+    def test_participation_is_the_ratio_it_claims_to_be(self, direction):
+        """The share of a favourable move from the forward the structure keeps,
+        worked out from each row's legs rather than from what the code
+        computed.
+
+        Two earlier definitions are pinned out by this. The first read the
+        two ends of the grid and gave an at-the-money call on a payable,
+        which keeps every peso of a fall, 0.533. The second measured from
+        today's spot, and with USD/MXN carry putting the forward above the
+        spot, a receivable's at-the-money put kept nothing of the rise until
+        the forward: 0.7279 at one year (0.9333 at three months) where the
+        payable's mirror-image call read 1.0.
+        """
+        comparison = compare_structures(_exposure(direction), QUOTE)
+        for structure in comparison.structures:
+            expected = self._kept_by_slope(structure, direction, QUOTE.forward, 0.20)
+            assert structure.upside_participation == pytest.approx(expected, abs=1e-12), (
+                structure.name
+            )
+
+    def test_mirror_image_structures_keep_the_same_share(self):
+        """Alan Vazquez's case on PR #13: one year, 9.5%/4.2%."""
+        quote = StructureQuote(18.5, 1.0, 0.095, 0.042, 0.115)
+        payable = compare_structures(_exposure(), quote)
+        receivable = compare_structures(_exposure(ExposureDirection.RECEIVABLE), quote)
+        for name in ("unhedged", "forward", "protective_option_atm",
+                     "protective_option_otm", "collar", "option_spread"):
+            assert payable.by_name(name).upside_participation == pytest.approx(
+                receivable.by_name(name).upside_participation, abs=1e-12
+            ), name
+        assert receivable.by_name("protective_option_atm").upside_participation == pytest.approx(1.0)
+
+    def test_the_closed_forms(self, payable):
+        """The collar sells its put 8% under the forward, and the move is 20%
+        of the forward, so it keeps exactly 0.08 / 0.20 of it; the seagull
+        keeps the stretch between the forward and its sold put."""
         got = {s.name: s.upside_participation for s in payable.structures}
         assert got["protective_option_atm"] == pytest.approx(1.0)
         assert got["option_spread"] == pytest.approx(1.0)
-        assert got["collar"] == pytest.approx(0.3387, abs=5e-4)
-        assert got["seagull"] == pytest.approx(0.119, abs=5e-3)
-        assert got["seagull"] < got["collar"]
-
-    def test_a_receivable_keeps_the_rise_its_legs_leave_open(self, receivable):
-        """The mirror, by integrating each row's slope between the spot and
-        the top of the grid. A receivable's at-the-money put is struck at the
-        forward, above this spot, so it keeps nothing of the rise until the
-        forward and everything after it."""
-        spot, edge = QUOTE.spot, receivable.spot_grid[-1]
-
-        def slope(structure, s):
-            # Receivable: the rate is s plus the option payoffs, so a bought
-            # put in the money takes one off the slope and a sold call in the
-            # money takes one off it too.
-            value = 1.0 - abs(structure.forward_amount) / 1_000_000.0
-            for kind, strike, quantity in structure.legs:
-                if kind == "put" and s < strike:
-                    value -= quantity
-                if kind == "call" and s > strike:
-                    value += quantity
-            return value
-
-        for structure in receivable.structures:
-            points = sorted({spot, edge, *(k for _, k, _ in structure.legs if spot < k < edge)})
-            kept = sum(
-                slope(structure, 0.5 * (a + b)) * (b - a)
-                for a, b in zip(points, points[1:], strict=False)
-            )
-            assert structure.upside_participation == pytest.approx(
-                kept / (edge - spot), abs=1e-12
-            ), structure.name
-        atm = receivable.by_name("protective_option_atm")
-        assert atm.upside_participation == pytest.approx(
-            (edge - QUOTE.forward) / (edge - spot), abs=1e-12
+        assert got["collar"] == pytest.approx(0.40, abs=1e-12)
+        sold_put = payable.by_name("seagull").legs[-1][1]
+        assert got["seagull"] == pytest.approx(
+            (QUOTE.forward - sold_put) / (0.20 * QUOTE.forward), abs=1e-12
         )
+        assert got["seagull"] < got["collar"]
 
     def test_the_clamp_never_binds_on_these_structures(self, payable, receivable):
         """So the assertions above test the ratio and not the guard. If a
         structure ever needs the clamp, this fails and says so rather than
         hiding it behind a range check that always passes."""
-        for comparison, edge in ((payable, 0), (receivable, -1)):
-            grid = comparison.spot_grid
+        for comparison in (payable, receivable):
+            direction = comparison.exposure.direction
             for structure in comparison.structures:
-                rates = structure.payoff_grid
-                middle = grid.index(min(grid, key=lambda g: abs(g - QUOTE.spot)))
-                assert grid[middle] == pytest.approx(QUOTE.spot)
-                ratio = (rates[edge] - rates[middle]) / (grid[edge] - grid[middle])
+                ratio = self._kept_by_slope(structure, direction, QUOTE.forward, 0.20)
                 assert -1e-12 <= ratio <= 1.0 + 1e-12, structure.name
 
     def test_the_unhedged_and_forward_rows_bracket_participation(self, payable):
@@ -921,3 +918,4 @@ class TestTheMarketIsCheckedBeforeItIsUsed:
     def test_a_nan_amount_refuses(self):
         with pytest.raises(ValueError, match="positive size"):
             Exposure(float("nan"), ExposureDirection.PAYABLE, SETTLEMENT, USDMXN)
+

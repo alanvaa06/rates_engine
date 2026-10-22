@@ -386,14 +386,16 @@ class StructureResult(EngineResult):
             down towards a spot of zero, and that floor is not a bound any
             structure bought.
         upside_participation: Fraction of a favourable move retained, in
-            ``[0, 1]``, measured over the reported spot grid: the change in
-            the effective rate as the spot moves from today's spot to the
-            favourable edge of the grid (its bottom for a payable, its top
-            for a receivable), over the change in spot. One is fully open in
-            the good direction, as the unhedged row is; zero is fully fixed,
-            as a full forward is. Because it is measured to the edge of the
-            grid, a structure that caps its gain inside the grid — a sold
-            wing — reads lower on a wider grid.
+            ``[0, 1]``: the change in the effective rate as the spot at
+            settlement moves from the forward to ``grid_width`` times the
+            forward away from it in the favourable direction (down for a
+            payable, up for a receivable), over the change in spot. One is
+            fully open in the good direction, as the unhedged row is; zero
+            is fully fixed, as a full forward is. Measured from the forward
+            because every strike here is set off the forward, so mirror-image
+            structures — a payable's call and a receivable's put at the same
+            offset — keep the same share; a structure that sells a wing
+            inside the move reads lower on a wider ``grid_width``.
         hedge_ratio: The fraction of the exposure covered *by a forward*.
             An option structure covers the whole exposure by a different
             mechanism, so this is ``None`` there rather than ``0.0`` —
@@ -548,32 +550,35 @@ def _effective_rate(
 
 def _participation(
     exposure: Exposure,
-    spot: float,
-    grid: tuple[float, ...],
+    forward: float,
+    width: float,
     rate_at: Callable[[float], float],
 ) -> float:
-    """The share of a favourable move from today's spot that the structure keeps.
+    """The share of a favourable move from the forward that the structure keeps.
 
     Measured against the unhedged position, which keeps all of it: the
-    favourable move is the spot going from where it is to the favourable
-    edge of the grid — down for a payable, up for a receivable — and the
-    structure keeps whatever its effective rate moves by on the way, over
-    what the spot moves by. One means fully open in the good direction, zero
-    means fully fixed.
+    favourable move is the spot at settlement going from the forward to
+    ``width`` times the forward away from it — down for a payable, up for a
+    receivable — and the structure keeps whatever its effective rate moves
+    by on the way, over what the spot moves by. One means fully open in the
+    good direction, zero means fully fixed.
 
-    This used to take the rate at the *adverse* edge of the grid minus the
-    rate at the favourable one, over the whole grid's span. That mixes the
-    protection bought against an adverse move into the share of a
+    Two earlier versions were wrong. The first took the rate at the
+    *adverse* edge of the grid minus the rate at the favourable one, which
+    mixes the protection bought against an adverse move into the share of a
     favourable one: an at-the-money call on a payable, which keeps every
-    peso of a fall, read 0.533, and a seagull read above a collar although
-    it sells its put closer to the spot.
+    peso of a fall, read 0.533. The second measured from today's spot to the
+    grid's edge, which with USD/MXN's carry puts the forward well above the
+    spot: a receivable's at-the-money put, struck at the forward, kept
+    nothing of the rise until the forward and read 0.73 at one year where
+    the payable's mirror-image call read 1.
     """
     if exposure.direction is ExposureDirection.PAYABLE:
-        favourable = grid[0]
-        move, kept = spot - favourable, rate_at(spot) - rate_at(favourable)
+        favourable = forward * (1.0 - width)
+        move, kept = forward - favourable, rate_at(forward) - rate_at(favourable)
     else:
-        favourable = grid[-1]
-        move, kept = favourable - spot, rate_at(favourable) - rate_at(spot)
+        favourable = forward * (1.0 + width)
+        move, kept = favourable - forward, rate_at(favourable) - rate_at(forward)
     if move <= 0.0:
         return 0.0
     return max(0.0, min(1.0, kept / move))
@@ -631,15 +636,15 @@ def _bounds(
 
 def _summarise(
     exposure: Exposure,
-    spot: float,
-    grid: tuple[float, ...],
+    forward: float,
+    width: float,
     legs: tuple[_Leg, ...],
     forward_amount: float,
     rate_at: Callable[[float], float],
 ) -> tuple[float | None, float | None, float]:
     """Worst case, best case and participation."""
     worst, best = _bounds(exposure, legs, forward_amount, rate_at)
-    return worst, best, _participation(exposure, spot, grid, rate_at)
+    return worst, best, _participation(exposure, forward, width, rate_at)
 
 
 def _structure(
@@ -647,6 +652,7 @@ def _structure(
     exposure: Exposure,
     quote: StructureQuote,
     grid: tuple[float, ...],
+    width: float,
     *,
     legs: tuple[_Leg, ...] = (),
     forward_amount: float = 0.0,
@@ -663,7 +669,7 @@ def _structure(
 
     rates = tuple(rate_at(spot) for spot in grid)
     worst, best, participation = _summarise(
-        exposure, quote.spot, grid, legs, forward_amount, rate_at
+        exposure, quote.forward, width, legs, forward_amount, rate_at
     )
     evidence = Evidence(
         produced_by=f"hedging_structures.{name}",
@@ -841,12 +847,13 @@ def compare_structures(
     )
 
     rows: list[StructureResult] = [
-        _structure("unhedged", exposure, quote, grid, hedge_ratio=0.0),
+        _structure("unhedged", exposure, quote, grid, grid_width, hedge_ratio=0.0),
         _structure(
             "forward",
             exposure,
             quote,
             grid,
+            grid_width,
             forward_amount=signed * hedge_ratio,
             hedge_ratio=hedge_ratio,
         ),
@@ -855,6 +862,7 @@ def compare_structures(
             exposure,
             quote,
             grid,
+            grid_width,
             legs=(_Leg(protective, atm_strike, 1.0),),
         ),
         _structure(
@@ -862,6 +870,7 @@ def compare_structures(
             exposure,
             quote,
             grid,
+            grid_width,
             legs=(_Leg(protective, otm_strike, 1.0),),
         ),
     ]
@@ -881,6 +890,7 @@ def compare_structures(
             exposure,
             quote,
             grid,
+            grid_width,
             legs=(
                 _Leg(protective, otm_strike, 1.0),
                 _Leg(protective.opposite, collar_sold, -1.0),
@@ -895,6 +905,7 @@ def compare_structures(
             exposure,
             quote,
             grid,
+            grid_width,
             legs=(
                 _Leg(protective, otm_strike, 1.0),
                 _Leg(protective.opposite, sold_strike, -1.0),
@@ -907,6 +918,7 @@ def compare_structures(
             exposure,
             quote,
             grid,
+            grid_width,
             legs=(
                 _Leg(protective, otm_strike, 1.0),
                 _Leg(protective, far_strike, -1.0),
@@ -928,6 +940,7 @@ def compare_structures(
             exposure,
             quote,
             grid,
+            grid_width,
             legs=(
                 _Leg(protective, otm_strike, 1.0),
                 _Leg(protective, far_strike, -1.0),
