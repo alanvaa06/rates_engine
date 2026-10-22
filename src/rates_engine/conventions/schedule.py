@@ -155,6 +155,17 @@ class Schedule:
         when ``effective`` is not a business day; on a business day the
         adjustment returns it unchanged.
 
+        **The adjusted start can come before ``effective``.** Modified
+        Following rolls a month-end Saturday back to the Friday, and so does
+        Preceding any weekend: ``effective`` Saturday 31 January 2026 starts
+        accruing on Friday 30 January, as it does in QuantLib. A trade valued
+        on that Saturday has therefore already begun -- one day of its first
+        period is history -- and is a started trade, not a forward-starting
+        one. This function cannot say so, because it does not know the
+        valuation date; the instrument's ``span`` reports the adjusted start
+        so that whatever does know it can tell. Clamping the start to the
+        valuation date instead would drop a day of accrual the trade has.
+
         **A first period that rolls onto the start is dropped.** When the
         convention pulls the first roll date back onto the adjusted
         effective date -- an effective date of Friday 29 May 2026 and a roll

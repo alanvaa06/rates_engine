@@ -341,6 +341,14 @@ class TestScheduleAgainstQuantLib:
         assert not issubclass(ConventionError, ValueError)
         assert ConventionError.exit_code == 1
 
+    def test_a_start_rolled_back_comes_before_the_stated_effective_date(self):
+        # QuantLib 1.44, the same ql.Schedule call as above: Saturday 31
+        # January 2026 under Modified Following starts on Friday the 30th, and
+        # the roll to Sunday 1 February leaves a three-day first period.
+        schedule = Schedule.generate(date(2026, 1, 31), date(2027, 2, 1), frequency_months=12)
+        assert schedule.accrual_start == (date(2026, 1, 30), date(2026, 2, 2))
+        assert schedule.accrual_end == (date(2026, 2, 2), date(2027, 2, 1))
+
     def test_an_effective_date_on_a_business_day_is_untouched(self):
         schedule = Schedule.generate(date(2026, 3, 18), date(2027, 3, 17), frequency_months=12)
         assert schedule.accrual_start[0] == date(2026, 3, 18)
@@ -353,6 +361,60 @@ class TestScheduleAgainstQuantLib:
         )
         assert schedule.accrual_start == (date(2030, 6, 19),)
         assert schedule.accrual_end == (date(2031, 6, 18),)
+
+
+class TestInstrumentsReportTheSchedulesDates:
+    """``span`` and the swaption's exercise check read the adjusted schedule.
+
+    Until this was fixed they read ``effective`` and ``maturity`` as written,
+    while the schedule had been adjusted: an OIS written from Saturday 30 May
+    2026 accrued from Friday the 29th but spanned from the 30th, so a hedge
+    coverage check could miss the Friday and a swaption expiring on the 30th
+    was accepted on a swap already accruing. Expected dates are QuantLib
+    1.44's ``ql.Schedule`` for the same terms (2026-05-29 and 2027-05-28,
+    the latter because 31 May 2027 is Memorial Day).
+    """
+
+    EFFECTIVE = date(2026, 5, 30)  # Saturday
+    MATURITY = date(2027, 5, 31)   # Memorial Day
+    SPAN = (date(2026, 5, 29), date(2027, 5, 28))
+
+    def test_an_ois_spans_its_adjusted_schedule(self):
+        from rates_engine.instruments.swaps import OISSwap
+
+        swap = OISSwap(effective=self.EFFECTIVE, maturity=self.MATURITY, fixed_rate=0.04)
+        assert swap.span == self.SPAN
+        assert swap.span == (swap.schedule.accrual_start[0], swap.schedule.accrual_end[-1])
+
+    def test_an_irs_spans_its_adjusted_schedule(self):
+        from rates_engine.instruments.swaps import IRSwap
+
+        swap = IRSwap(effective=self.EFFECTIVE, maturity=self.MATURITY, fixed_rate=0.04)
+        assert swap.span == self.SPAN
+        assert swap.float_schedule.accrual_start[0] == self.SPAN[0]
+        assert swap.float_schedule.accrual_end[-1] == self.SPAN[1]
+
+    def test_a_cap_spans_its_adjusted_schedule(self):
+        from rates_engine.instruments.capfloor import CapFloor
+
+        cap = CapFloor(effective=self.EFFECTIVE, maturity=self.MATURITY, strike=0.04)
+        assert cap.span == self.SPAN
+
+    def test_a_swaption_cannot_expire_after_its_swap_starts_accruing(self):
+        from rates_engine.instruments.swaps import OISSwap
+        from rates_engine.instruments.swaption import Swaption
+
+        swap = OISSwap(effective=self.EFFECTIVE, maturity=self.MATURITY, fixed_rate=0.04)
+        with pytest.raises(ValueError, match="starts at 2026-05-29"):
+            Swaption(expiry=self.EFFECTIVE, underlying=swap, strike=0.04)
+        option = Swaption(expiry=date(2026, 5, 29), underlying=swap, strike=0.04)
+        assert option.span == (date(2026, 5, 29), self.SPAN[1])
+
+    def test_a_business_day_effective_date_spans_as_written(self):
+        from rates_engine.instruments.swaps import OISSwap
+
+        swap = OISSwap(effective=date(2026, 3, 18), maturity=date(2028, 3, 15), fixed_rate=0.04)
+        assert swap.span == (date(2026, 3, 18), date(2028, 3, 15))
 
 
 class TestCollapsedTermsAreRefusedAtConstruction:

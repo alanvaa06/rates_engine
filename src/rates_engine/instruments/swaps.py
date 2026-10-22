@@ -142,8 +142,15 @@ class OISSwap:
         what stretch of the curve a trade touches — the hedge coverage check,
         for one — does not have to know which attribute each product spells
         its dates with.
+
+        The dates are the schedule's, adjusted by the roll convention, not
+        the terms as written: ``effective`` Saturday 30 May 2026 starts
+        accruing on Friday the 29th, and the span says the 29th. Until v0.4
+        it returned ``effective`` and ``maturity`` unadjusted, so a hedge
+        coverage check could miss the Friday and a swaption could expire
+        after the swap it exercises into had begun.
         """
-        return self.effective, self.maturity
+        return self.schedule.accrual_start[0], self.schedule.accrual_end[-1]
 
     def with_terms(self, **changes: object) -> OISSwap:
         """A copy with some terms changed; the original is untouched.
@@ -305,8 +312,13 @@ class IRSwap:
 
     @property
     def span(self) -> tuple[date, date]:
-        """First accrual start and last accrual end, as a half-open interval."""
-        return self.effective, self.maturity
+        """First accrual start and last accrual end, as a half-open interval.
+
+        The schedule's adjusted dates, as for :attr:`OISSwap.span`. The two
+        legs share them: both start on the adjusted effective date and end on
+        the adjusted maturity, whatever their frequencies.
+        """
+        return self.fixed_schedule.accrual_start[0], self.fixed_schedule.accrual_end[-1]
 
     def with_terms(self, **changes: object) -> IRSwap:
         """A copy with some terms changed; see :meth:`OISSwap.with_terms`.

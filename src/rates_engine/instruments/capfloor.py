@@ -175,8 +175,13 @@ class CapFloor:
 
     @property
     def span(self) -> tuple[date, date]:
-        """Effective through maturity."""
-        return self.effective, self.maturity
+        """Effective through maturity, as the schedule adjusts them.
+
+        The first period's start and the last one's end, rolled by
+        :attr:`convention` like every other date of the schedule; see
+        :attr:`rates_engine.instruments.swaps.OISSwap.span`.
+        """
+        return self.schedule.accrual_start[0], self.schedule.accrual_end[-1]
 
     @cached_property
     def schedule(self) -> Schedule:
