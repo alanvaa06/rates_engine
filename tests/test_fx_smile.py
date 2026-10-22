@@ -687,3 +687,21 @@ class TestTheButterflyConvention:
         broker = SmileQuotes(0.13, 0.030, 0.006, butterfly_convention=ButterflyConvention.BROKER)
         with pytest.raises(CalibrationError, match="broker"):
             broker.wings(0.25)
+
+
+class TestOneRefusalForAPriceNoVolatilityImplies:
+    """Alan Vazquez on PR #13 (cleanup): `volatility_at` refused a price at
+    or below intrinsic itself, and `_implied` refused the same input again
+    with a different message once its floor existed. There is now one check,
+    in `_implied`, and `volatility_at` reaches it."""
+
+    def test_a_vanna_volga_price_below_intrinsic_is_refused_once(self, smile, monkeypatch):
+        monkeypatch.setattr(VannaVolgaSmile, "price", lambda self, strike, kind=OptionKind.CALL: -1e-3)
+        with pytest.raises(CalibrationError, match="construction breaking down"):
+            smile.volatility_at(18.2)
+
+    def test_volatility_at_has_no_check_of_its_own(self):
+        import inspect
+
+        source = inspect.getsource(VannaVolgaSmile.volatility_at)
+        assert "intrinsic" not in source

@@ -352,3 +352,30 @@ class TestTheFxBlockIsCheckedBeforeItIsUsed:
         del config["fx"]["volatility"]
         with pytest.raises(ConfigurationError, match="volatility"):
             commands.COMMANDS["hedge-structures"](config)
+
+
+class TestThereIsOneForward:
+    """Alan Vazquez on PR #13 (cleanup): hedge-structures repeated
+    fx-forward's `forward_from_curves(...)` call word for word, which is how
+    the two came to disagree by 1,941 pips in the first place. Both now go
+    through one function."""
+
+    def test_both_commands_build_it_in_the_same_place(self, monkeypatch):
+        calls = []
+        original = commands._usdmxn_forward
+
+        def counting(inputs):
+            calls.append(inputs.delivery)
+            return original(inputs)
+
+        monkeypatch.setattr(commands, "_usdmxn_forward", counting)
+        config = {k: v for k, v in FX_CONFIG.items() if k != "hedge_program"}
+        commands.fx_forward(json.loads(json.dumps(config)))
+        commands.hedge_structures(json.loads(json.dumps(config)))
+        assert len(calls) == 2
+
+    def test_neither_body_calls_the_pricer_itself(self):
+        import inspect
+
+        for function in (commands.fx_forward, commands.hedge_structures):
+            assert "forward_from_curves(" not in inspect.getsource(function)

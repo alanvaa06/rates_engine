@@ -354,10 +354,8 @@ def forward_from_curves(
     require_plausible_basis(basis_bp)
     if not spot > 0.0:
         raise ValueError(f"a spot rate is positive; got {spot!r}")
-    if delivery <= domestic.as_of:
-        raise ValueError(
-            f"delivery {delivery} is not after the valuation date {domestic.as_of}"
-        )
+    # The spot date is on or after the valuation date, so this also refuses
+    # a delivery on or before the valuation date.
     spot_date = _spot_date(pair, delivery, domestic.as_of)
 
     domestic_df = domestic.df(delivery)
@@ -468,10 +466,6 @@ def implied_basis(
     if not (spot > 0.0 and market_forward > 0.0):
         raise ValueError(
             f"spot and forward are positive rates; got {spot!r} and {market_forward!r}"
-        )
-    if delivery <= domestic.as_of:
-        raise ValueError(
-            f"delivery {delivery} is not after the valuation date {domestic.as_of}"
         )
     spot_date = _spot_date(pair, delivery, domestic.as_of)
 

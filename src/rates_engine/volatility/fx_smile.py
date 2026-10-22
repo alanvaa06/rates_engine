@@ -591,7 +591,9 @@ class VannaVolgaSmile:
         The bracket is ``[1e-6, 5.0]``. A premium outside what those two
         volatilities price is refused: the bisection used to converge on
         whichever end it was pushed against and return it as if it were the
-        answer, so a premium worth 700% volatility read back as 500%.
+        answer, so a premium worth 700% volatility read back as 500%. This
+        is the one place the smile refuses a price no volatility implies;
+        a vanna-volga price at or below intrinsic is the floor's case.
         """
         low, high = 1e-6, 5.0
         args = (self.expiry, self.r_domestic, self.r_foreign)
@@ -602,7 +604,8 @@ class VannaVolgaSmile:
                 f"no volatility between {low:g} and {high:.0%} gives the {kind.value} at "
                 f"strike {strike} a premium of {premium:.10f}: that range prices it from "
                 f"{floor:.10f} to {ceiling:.10f}. The vanna-volga correction has taken the "
-                f"price where no lognormal volatility reaches. {NOT_ARBITRAGE_FREE}"
+                "price where no lognormal volatility reaches; this is the construction "
+                f"breaking down, not a solver failure. {NOT_ARBITRAGE_FREE}"
             )
         for _ in range(200):
             mid = 0.5 * (low + high)
@@ -645,16 +648,6 @@ class VannaVolgaSmile:
 
         kind = OptionKind.CALL if strike >= self.atm_strike else OptionKind.PUT
         premium = self.price(strike, kind)
-        intrinsic = gk.price(
-            self.spot, strike, self.expiry, self.r_domestic, self.r_foreign, 1e-9, kind
-        )
-        if premium <= intrinsic:
-            raise CalibrationError(
-                f"the vanna-volga correction at strike {strike} takes the price to "
-                f"{premium:.10f}, at or below its {intrinsic:.10f} intrinsic, so no "
-                "volatility implies it. This is the construction breaking down, not a "
-                f"solver failure. {NOT_ARBITRAGE_FREE}"
-            )
         return self._reading(self._implied(strike, premium, kind), strike, "vanna_volga", True)
 
     def wing_is_reliable(self, strike: float) -> bool:
