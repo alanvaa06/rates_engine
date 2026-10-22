@@ -97,6 +97,15 @@ def _full_config(as_of) -> dict:
             "payment_lag_days": 2,
             "index": "SOFR",
         },
+        # The swap starts at the March IMM date and has no history, so the
+        # fixings are read and checked but price nothing.
+        "fixings": {
+            "SOFR": {
+                "values": [{"date": "2026-01-14", "rate": 0.0430}],
+                "source": "fred",
+                "data_quality": "observed",
+            }
+        },
         "risk": {"key_tenors": [0.5, 1.0, 2.0]},
         "hedge": {
             "contract_dv01": 25.0,

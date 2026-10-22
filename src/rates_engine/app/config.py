@@ -267,6 +267,64 @@ CONFIG_SCHEMA: dict[str, Any] = {
             },
         },
     },
+    "fixings": {
+        "used_by": ["price", "hedge"],
+        "description": (
+            "Published fixings for a swap that has started, one block per series. A swap "
+            "whose floating period began before as_of has accrued at rates no curve "
+            "knows; without them price and hedge refuse it and name this block. A swap "
+            "with no history ignores it, so one file can carry the desk's SOFR."
+        ),
+        "keys": {
+            "SOFR": {
+                "description": (
+                    "SOFR as the New York Fed publishes it, each rate dated by the day it "
+                    "is for. Read on the SIFMA calendar: a weekend or holiday takes the "
+                    "business day before it, so only business days are given."
+                ),
+                "keys": {
+                    "values": {
+                        "required": True,
+                        "description": (
+                            "One entry per SIFMA business day the swap has accrued over, "
+                            "from its period start to the day before as_of; a business "
+                            "day left out is refused, never interpolated."
+                        ),
+                        "items": {
+                            "date": {
+                                "required": True,
+                                "description": (
+                                    "The business day the rate is for, ISO 8601 (YYYY-MM-DD)."
+                                ),
+                            },
+                            "rate": {
+                                "required": True,
+                                "description": (
+                                    "The published rate as a decimal a year: 0.043 is 4.30%, "
+                                    "not 4.30. A value of 1 or more is refused as a percent."
+                                ),
+                            },
+                        },
+                    },
+                    "source": {
+                        "default": "config",
+                        "description": (
+                            "Where the fixings came from (fred, a vendor, a file), "
+                            "recorded in their provenance and in every result's evidence."
+                        ),
+                    },
+                    "data_quality": {
+                        "default": "observed",
+                        "description": (
+                            "observed, synthetic, proxy or assumed. Recorded in the "
+                            "provenance, so every result priced on the fixings carries it "
+                            "into its worst_quality."
+                        ),
+                    },
+                },
+            },
+        },
+    },
     "risk": {
         "used_by": ["price"],
         "description": "Key-rate settings for price.",
@@ -466,12 +524,13 @@ is a mapping with these fields:
     A key recognised in order to refuse it; the text is the migration.
 
 To add a key, add its entry where the config nests it. A new top-level
-block -- the ``fixings`` a seasoned trade needs, say -- is one entry::
+block is one entry, as ``fixings`` -- the history a seasoned swap needs --
+was::
 
     "fixings": {
         "used_by": ["price", "hedge"],
-        "description": "Published overnight fixings, as decimals, by ISO date.",
-        "keys": {...},  # one entry per key the block takes
+        "description": "Published fixings for a swap that has started, ...",
+        "keys": {"SOFR": {...}},  # one entry per key the block takes
     },
 
 ``tests/test_app_config.py`` holds the schema to the handlers: every key a

@@ -439,3 +439,160 @@ class TestTheStripHedgeTakesTheFixings:
         with pytest.raises(IncompleteStripError, match="2026-01-15") as caught:
             strip_hedge(swap, nodes, as_of=AS_OF, fixings=_fixings(_sofr_history()))
         assert "2025-07-15" not in str(caught.value)
+
+
+# ---------------------------------------------------------------------------
+# The CLI and the MCP server read fixings from the config.
+# ---------------------------------------------------------------------------
+
+
+def _seasoned_config(*, fixings: bool = True, **sofr: object) -> dict:
+    """A desk file for a payer struck on 2025-09-17, six months before as_of.
+
+    The curve block is the suite's flat 4% futures strip. ``fixings``, when
+    asked for, holds SOFR at 4.30% for every SIFMA business day the swap's
+    first period has accrued over, the shape ``rateng describe`` documents.
+    """
+    from rates_engine.conventions.schedule import imm_date, next_imm_on_or_after
+
+    start = imm_date(2026, 3)
+    futures = []
+    period = start
+    for index in range(9):
+        following = next_imm_on_or_after(period + timedelta(days=1))
+        futures.append({"label": f"SR3-{index + 1}", "start": period.isoformat(),
+                        "end": following.isoformat(), "price": 96.0})
+        period = following
+    config: dict = {
+        "as_of": AS_OF.isoformat(),
+        "curve": {
+            "stub": {"end": start.isoformat(),
+                     "accrual_factor": 1.0 + 0.04 * ((start - AS_OF).days / 360.0)},
+            "futures": futures,
+        },
+        "swap": {"effective": "2025-09-17", "maturity": period.isoformat(), "fixed_rate": 0.04,
+                 "notional": NOTIONAL, "side": "payer"},
+        "hedge": {"require_full_coverage": False, "shocks_bp": [-25, 25]},
+    }
+    if fixings:
+        days = [d for d in _sofr_history().dates if d >= date(2025, 9, 17)]
+        config["fixings"] = {
+            "SOFR": {"values": [{"date": d.isoformat(), "rate": 0.0430} for d in days], **sofr}
+        }
+    return config
+
+
+def _library_price(config: dict) -> float:
+    """The same swap, curve and history priced through the library itself."""
+    from rates_engine.app.builders import calibration_nodes, ois_swap
+    from rates_engine.app.config import as_date
+    from rates_engine.curves.bootstrap import bootstrap_discount_curve
+
+    as_of = as_date(config["as_of"])
+    curve = bootstrap_discount_curve(as_of, calibration_nodes(config, as_of)).curve
+    days = [as_date(entry["date"]) for entry in config["fixings"]["SOFR"]["values"]]
+    series = Series("SOFR", tuple(days), tuple(0.0430 for _ in days),
+                    Provenance(source="config", series_id="SOFR"))
+    return pv(ois_swap(config), CurveSet(curve), fixings=_fixings(series)).value
+
+
+class TestTheConfigCarriesTheFixings:
+    """``price`` and ``hedge`` value a swap that has started when the file holds its history."""
+
+    def test_without_them_the_refusal_names_the_config_key(self):
+        from rates_engine.app import commands
+        from rates_engine.core.errors import MissingFixingError
+
+        for name in ("price", "hedge"):
+            with pytest.raises(MissingFixingError) as caught:
+                commands.COMMANDS[name](_seasoned_config(fixings=False))
+            message = str(caught.value)
+            assert "fixings.SOFR.values" in message, name
+            assert "MarketSnapshot" not in message, name
+            assert "2025-09-17" in message, name
+
+    def test_price_values_the_swap_on_the_history_the_file_holds(self):
+        from rates_engine.app import commands
+
+        config = _seasoned_config()
+        payload = commands.COMMANDS["price"](config)
+        assert payload["value"] == _library_price(config)
+        records = payload["evidence"]["fields"]["realised_fixings"]
+        assert records[0]["series_id"] == "SOFR" and records[0]["source"] == "config"
+        assert math.isfinite(payload["measures"]["dv01"]["value"])
+        dv01_sources = payload["measures"]["dv01"]["evidence"]["sources"]
+        assert any(s["produced_by"] == "pricing.history" for s in dv01_sources)
+
+    def test_hedge_sizes_it_and_shocks_it(self):
+        from rates_engine.app import commands
+
+        payload = commands.COMMANDS["hedge"](_seasoned_config())
+        assert payload["total_contracts"] is not None
+        assert len(payload["shock_table"]["rows"]) == 2
+
+    def test_the_mcp_tool_serves_the_same_document(self):
+        import json
+
+        from rates_engine import mcp_server
+        from rates_engine.app import commands
+
+        config = _seasoned_config()
+        served = json.loads(mcp_server.call_tool("price", config))
+        assert served == json.loads(json.dumps(commands.COMMANDS["price"](config)))
+
+    def test_the_cli_exits_1_and_points_at_the_block(self, tmp_path, capsys):
+        import json
+
+        from rates_engine.cli import main
+
+        path = tmp_path / "seasoned.json"
+        path.write_text(json.dumps(_seasoned_config(fixings=False)), encoding="utf-8")
+        assert main(["price", "--config", str(path), "--json"]) == 1
+        document = json.loads(capsys.readouterr().out)
+        assert document["error"]["type"] == "MissingFixingError"
+        assert "fixings.SOFR.values" in document["error"]["message"]
+
+    def test_the_fixings_quality_reaches_the_price(self):
+        from rates_engine.app import commands
+
+        payload = commands.COMMANDS["price"](_seasoned_config(data_quality="assumed"))
+        assert payload["evidence"]["data_quality"] == "assumed"
+
+    def test_a_rate_in_percent_is_refused_by_its_path(self):
+        from rates_engine.app import commands
+        from rates_engine.core.errors import ConfigurationError
+
+        config = _seasoned_config()
+        config["fixings"]["SOFR"]["values"][3]["rate"] = 4.30
+        with pytest.raises(ConfigurationError, match=r"fixings\.SOFR\.values\[3\]\.rate"):
+            commands.COMMANDS["price"](config)
+
+    def test_a_date_given_twice_is_refused(self):
+        from rates_engine.app import commands
+        from rates_engine.core.errors import ConfigurationError
+
+        config = _seasoned_config()
+        values = config["fixings"]["SOFR"]["values"]
+        values.append(dict(values[0]))
+        with pytest.raises(ConfigurationError, match="2025-09-17"):
+            commands.COMMANDS["price"](config)
+
+    def test_a_misspelt_series_is_refused_with_the_name_it_meant(self):
+        from rates_engine.app import commands
+        from rates_engine.core.errors import ConfigurationError
+
+        config = _seasoned_config()
+        config["fixings"] = {"SOFRR": config["fixings"]["SOFR"]}
+        with pytest.raises(ConfigurationError, match="did you mean SOFR"):
+            commands.COMMANDS["price"](config)
+
+    def test_a_swap_with_no_history_ignores_the_block(self):
+        # The README's swap starts at the March IMM date; a file that also
+        # carries SOFR history prices it exactly as without.
+        from rates_engine.app import commands
+
+        config = _seasoned_config()
+        config["swap"]["effective"] = config["curve"]["stub"]["end"]
+        bare = dict(config)
+        bare.pop("fixings")
+        assert commands.COMMANDS["price"](config) == commands.COMMANDS["price"](bare)

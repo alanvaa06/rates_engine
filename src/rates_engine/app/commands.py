@@ -17,15 +17,26 @@ or called directly.
 from __future__ import annotations
 
 import copy
+import re
 from collections.abc import Callable
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
-from rates_engine.app.builders import calibration_nodes, flat_curve, fx_inputs, ois_swap
+from rates_engine.app.builders import (
+    calibration_nodes,
+    fixings_snapshot,
+    flat_curve,
+    fx_inputs,
+    ois_swap,
+)
 from rates_engine.app.config import CONFIG_SCHEMA, as_date, require_config
 from rates_engine.conventions.currency_pair import USDMXN
 from rates_engine.conventions.indices import INDICES, UNRESOLVED_MXN
-from rates_engine.core.errors import ConfigurationError, UndefinedDurationError
+from rates_engine.core.errors import (
+    ConfigurationError,
+    MissingFixingError,
+    UndefinedDurationError,
+)
 from rates_engine.core.errors import __all__ as EXCEPTION_NAMES
 from rates_engine.core.money import Currency
 from rates_engine.core.results import SCHEMA_VERSION
@@ -237,17 +248,50 @@ def bootstrap(config: dict[str, Any] | None) -> dict[str, Any]:
     return result_payload(result, views=views.to_dict(), command="bootstrap")
 
 
+_PYTHON_REMEDY = re.compile(r"\s*Pass the published fixings as fixings=.*$", re.DOTALL)
+
+_CONFIG_REMEDY = (
+    "In a config, the history goes under fixings.SOFR.values: one {\"date\", \"rate\"} "
+    "entry per SIFMA business day the swap has accrued over, the rate as a decimal "
+    "(0.043 for 4.30%); `rateng describe --json` documents the block."
+)
+
+
+def _config_remedy(error: MissingFixingError) -> MissingFixingError:
+    """The refusal with the remedy a config can use in place of the Python one.
+
+    The pricer's message ends by telling a Python caller to pass
+    ``fixings=MarketSnapshot(...)``, which a file cannot do. What is missing
+    is kept, and the key that supplies it replaces the keyword.
+    """
+    reason = _PYTHON_REMEDY.sub("", str(error)).rstrip(" .")
+    return MissingFixingError(f"{reason}. {_CONFIG_REMEDY}")
+
+
 def price(config: dict[str, Any] | None) -> dict[str, Any]:
     """Price the configured swap and report every risk measure that is defined.
 
     Args:
         config: The whole configuration mapping. ``None`` is refused by name.
+            A swap that has started needs its SOFR history in the
+            ``fixings`` block.
 
     Returns:
         The ``pv`` payload with a ``measures`` block. A measure undefined on
         this swap is reported as refused rather than omitted.
+
+    Raises:
+        MissingFixingError: The swap has started and the ``fixings`` block
+            does not hold the history it needs; the message names the key.
     """
     config = require_config(config, "price")
+    try:
+        return _price(config)
+    except MissingFixingError as error:
+        raise _config_remedy(error) from error
+
+
+def _price(config: dict[str, Any]) -> dict[str, Any]:
     as_of = as_date(config["as_of"])
     instruments = calibration_nodes(config, as_of)
     swap = ois_swap(config)
@@ -266,16 +310,21 @@ def price(config: dict[str, Any] | None) -> dict[str, Any]:
     )
     curve_set = CurveSet(boot.curve)
     sources = (boot.evidence,)
+    fixings = fixings_snapshot(config, as_of)
 
-    value = pv(swap, curve_set, source_evidence=sources)
+    value = pv(swap, curve_set, source_evidence=sources, fixings=fixings)
     measures: dict[str, Any] = {
         "pv": value.to_dict(),
-        "par_rate": par_rate(swap, curve_set, source_evidence=sources).to_dict(),
+        "par_rate": par_rate(swap, curve_set, source_evidence=sources, fixings=fixings).to_dict(),
         "annuity": annuity(swap, curve_set, source_evidence=sources).to_dict(),
-        "dv01": dv01(swap, curve_set, source_evidence=sources).to_dict(),
-        "pvbp": pvbp(swap, curve_set, source_evidence=sources).to_dict(),
-        "money_duration": money_duration(swap, curve_set, source_evidence=sources).to_dict(),
-        "money_convexity": money_convexity(swap, curve_set, source_evidence=sources).to_dict(),
+        "dv01": dv01(swap, curve_set, source_evidence=sources, fixings=fixings).to_dict(),
+        "pvbp": pvbp(swap, curve_set, source_evidence=sources, fixings=fixings).to_dict(),
+        "money_duration": money_duration(
+            swap, curve_set, source_evidence=sources, fixings=fixings
+        ).to_dict(),
+        "money_convexity": money_convexity(
+            swap, curve_set, source_evidence=sources, fixings=fixings
+        ).to_dict(),
     }
     # Normalised measures are undefined on a par swap. Reporting the refusal is
     # the honest answer, and it keeps the key present rather than missing.
@@ -284,14 +333,20 @@ def price(config: dict[str, Any] | None) -> dict[str, Any]:
         ("effective_convexity", effective_convexity),
     ):
         try:
-            measures[name] = function(swap, curve_set, source_evidence=sources).to_dict()
+            measures[name] = function(
+                swap, curve_set, source_evidence=sources, fixings=fixings
+            ).to_dict()
         except UndefinedDurationError as exc:
             measures[name] = {"value": None, "refused": str(exc)}
 
     key_tenors = (config.get("risk") or {}).get("key_tenors")
     measures["key_rate_dv01"] = (
         key_rate_dv01(
-            swap, curve_set, tuple(float(t) for t in key_tenors), source_evidence=sources
+            swap,
+            curve_set,
+            tuple(float(t) for t in key_tenors),
+            source_evidence=sources,
+            fixings=fixings,
         ).to_dict()
         if key_tenors
         else None
@@ -309,7 +364,9 @@ def hedge(config: dict[str, Any] | None) -> dict[str, Any]:
             left out, each futures entry is sized at its own contract's
             tick, SR1 USD 41.67 or SR3 USD 25.00) and
             ``require_full_coverage`` (``true`` by default; ``false`` sizes a
-            strip that leaves part of the swap uncovered).
+            strip that leaves part of the swap uncovered). A swap that
+            has started needs its SOFR history in the ``fixings`` block, and
+            its coverage is checked from ``as_of``.
 
     Returns:
         The ``HedgeResult`` payload with a ``shock_table`` block.
@@ -317,8 +374,17 @@ def hedge(config: dict[str, Any] | None) -> dict[str, Any]:
     Raises:
         ConfigurationError: ``hedge.require_full_coverage`` is not a boolean,
             or ``hedge.shocks_bp`` contains a zero shock.
+        MissingFixingError: The swap has started and the ``fixings`` block
+            does not hold the history it needs; the message names the key.
     """
     config = require_config(config, "hedge")
+    try:
+        return _hedge(config)
+    except MissingFixingError as error:
+        raise _config_remedy(error) from error
+
+
+def _hedge(config: dict[str, Any]) -> dict[str, Any]:
     as_of = as_date(config["as_of"])
     instruments = calibration_nodes(config, as_of)
     swap = ois_swap(config)
@@ -351,6 +417,7 @@ def hedge(config: dict[str, Any] | None) -> dict[str, Any]:
         long_end_source=(config.get("curve") or {}).get("long_end_source"),
         contract_dv01=float(contract_dv01) if contract_dv01 is not None else None,
         require_full_coverage=require_full_coverage,
+        fixings=fixings_snapshot(config, as_of),
     )
     table = shock_table(result, shocks)
     return result_payload(result, shock_table=table.to_dict(), command="hedge")

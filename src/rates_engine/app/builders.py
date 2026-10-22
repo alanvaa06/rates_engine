@@ -22,11 +22,12 @@ from rates_engine.core.money import Currency
 from rates_engine.curves.bootstrap import FuturesContract, FuturesNode, RealizedStubNode
 from rates_engine.curves.discount import DiscountCurve
 from rates_engine.instruments.swaps import OISSwap
+from rates_engine.market.snapshot import MarketSnapshot, Series
 from rates_engine.models.convexity import ConvexityModel, convexity_adjustment
 from rates_engine.pricing.calibration import SwapQuoteNode
 from rates_engine.pricing.fx_forward import require_plausible_rate
 
-__all__ = ["calibration_nodes", "ois_swap", "flat_curve", "fx_inputs"]
+__all__ = ["calibration_nodes", "ois_swap", "fixings_snapshot", "flat_curve", "fx_inputs"]
 
 
 def calibration_nodes(config: dict[str, Any], as_of: date) -> tuple[Any, ...]:
@@ -193,6 +194,71 @@ def ois_swap(config: dict[str, Any]) -> OISSwap:
         payment_lag_days=int(spec.get("payment_lag_days", 2)),
         index=index_named(str(spec.get("index", SOFR.name))),
     )
+
+
+def fixings_snapshot(config: dict[str, Any], as_of: date) -> MarketSnapshot | None:
+    """The ``fixings`` block of a config as the snapshot the pricers read, or ``None``.
+
+    Each series becomes a :class:`~rates_engine.market.snapshot.Series` under
+    the index's name, with a provenance saying where the block says the
+    numbers came from and how good they are. The rates are checked here,
+    where the file can still be named: a rate of 1 or more is a percent
+    written where a decimal was meant -- 4.30 for 4.30% -- and would price
+    every coupon a hundredfold; a date given twice cannot be resolved.
+
+    Args:
+        config: The whole configuration mapping.
+        as_of: Valuation date; the snapshot serves nothing dated after it.
+
+    Returns:
+        The snapshot, or ``None`` when the config has no ``fixings`` block.
+
+    Raises:
+        ConfigurationError: A rate is not a finite number below 1 in
+            magnitude, or a date appears twice in one series.
+        ValueError: A date is not ISO 8601, or ``data_quality`` is not one
+            of observed, synthetic, proxy or assumed.
+    """
+    block = config.get("fixings") or {}
+    if not block:
+        return None
+    series: dict[str, Series] = {}
+    for series_id, spec in block.items():
+        where = f"fixings.{series_id}"
+        published: dict[date, float] = {}
+        for number, entry in enumerate(spec["values"]):
+            day = as_date(entry["date"])
+            rate = entry["rate"]
+            if (
+                isinstance(rate, bool)
+                or not isinstance(rate, (int, float))
+                or not math.isfinite(rate)
+                or abs(rate) >= 1.0
+            ):
+                raise ConfigurationError(
+                    f"{where}.values[{number}].rate is {rate!r}. A fixing is a decimal a year, "
+                    "0.043 for 4.30%: a value of 1 or more is a percent, which would price "
+                    "every coupon a hundredfold, and anything but a finite number is no rate."
+                )
+            if day in published:
+                raise ConfigurationError(
+                    f"{where}.values gives {day} twice ({published[day]!r} and {rate!r}); one "
+                    "business day has one published rate, so keep the one that was published."
+                )
+            published[day] = float(rate)
+        days = tuple(sorted(published))
+        series[series_id] = Series(
+            series_id,
+            days,
+            tuple(published[day] for day in days),
+            Provenance(
+                source=str(spec.get("source", "config")),
+                series_id=series_id,
+                instrument_kind="overnight_fixing",
+                data_quality=DataQuality(spec.get("data_quality", "observed")),
+            ),
+        )
+    return MarketSnapshot(as_of=as_of, series=series)
 
 
 def flat_curve(as_of: date, rate: float, currency: Currency, years: float) -> DiscountCurve:
