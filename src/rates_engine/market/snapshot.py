@@ -93,6 +93,26 @@ class Series:
             self.provenance,
         )
 
+    def _through(self, day: date) -> Series:
+        """The observations dated on or before ``day``, without re-validating them.
+
+        A prefix of a series that passed :meth:`__post_init__` passes it too,
+        so it is sliced rather than rebuilt. Rebuilding it through the
+        constructor, as :meth:`window` does, re-checked every observation and
+        made :meth:`MarketSnapshot.require` cost 0.25 ms on a 2,000-point
+        series -- once per lookup, while :meth:`MarketSnapshot.fixing` went
+        through it.
+        """
+        count = bisect.bisect_right(self.dates, day)
+        if count == len(self.dates):
+            return self
+        head = object.__new__(Series)
+        object.__setattr__(head, "series_id", self.series_id)
+        object.__setattr__(head, "dates", self.dates[:count])
+        object.__setattr__(head, "values", self.values[:count])
+        object.__setattr__(head, "provenance", self.provenance)
+        return head
+
 
 @dataclass(frozen=True)
 class CompoundedRate:
@@ -147,11 +167,21 @@ class MarketSnapshot:
     :meth:`require` returns the series cut at it. ``as_of`` used to be a
     label: a snapshot as of 15 January served 10 February's fixing and
     compounded through 30 January, which in a backtest is the future
-    leaking into the past with nothing in the result to say so. The
-    fixing dated ``as_of`` itself is served, the convention
-    :func:`~rates_engine.market.estimators.realized_sofr_sigma` already
-    used. :attr:`series` keeps what was loaded, so one history can be
-    loaded once and wrapped in a snapshot per backtest date.
+    leaking into the past with nothing in the result to say so.
+    :attr:`series` keeps what was loaded, so one history can be loaded once
+    and wrapped in a snapshot per backtest date.
+
+    **The fixing dated** ``as_of`` **is served, and for SOFR that is a
+    one-day look-ahead.** Observations are dated by the day the rate is
+    *for*, not the day it was *published*. The New York Fed publishes SOFR
+    for day T on the morning of the next business day, so on T itself no
+    one could have seen it; Term SOFR, which CME publishes on T, has no such
+    gap. The cut is at ``as_of`` inclusive anyway because that is the
+    convention every caller here relies on -- the fixing dated ``as_of`` is
+    read if it is there and forecast from the curve if it is not, as in
+    QuantLib's defaults -- and because the lag differs by series and is not
+    recorded in a :class:`Series`. A backtest that must not see SOFR(T) on T
+    should build the snapshot as of the previous business day.
 
     Attributes:
         as_of: The valuation date the snapshot describes.
@@ -175,21 +205,23 @@ class MarketSnapshot:
 
         Returns:
             The series without its observations dated after :attr:`as_of`,
-            with the same provenance. The same object when there are none.
+            with the same provenance. The same object when there are none;
+            otherwise a slice, found by bisection, not a re-validated copy.
 
         Raises:
             MissingFixingError: No such series in this snapshot.
         """
+        return self._held(series_id)._through(self.as_of)
+
+    def _held(self, series_id: str) -> Series:
+        """The series as loaded, for lookups that check :attr:`as_of` themselves."""
         try:
-            series = self.series[series_id]
+            return self.series[series_id]
         except KeyError:
             raise MissingFixingError(
                 f"snapshot as of {self.as_of} has no series {series_id!r}; "
                 f"it has {sorted(self.series)}"
             ) from None
-        if series.dates and series.dates[-1] > self.as_of:
-            return series.window(series.dates[0], self.as_of)
-        return series
 
     def _refuse_after_as_of(self, series_id: str, day: date, needed_by: str, remedy: str) -> None:
         """Raise when ``day`` is after :attr:`as_of`, naming what needed it and the way out."""
@@ -206,7 +238,9 @@ class MarketSnapshot:
         Args:
             series_id: Series to read.
             day: Business day the fixing is wanted for, on or before
-                :attr:`as_of`.
+                :attr:`as_of`. The fixing dated ``as_of`` is served; for
+                SOFR, published the next morning, that is a look-ahead of
+                one business day (see the class docstring).
 
         Returns:
             The published value as a decimal.
@@ -220,7 +254,9 @@ class MarketSnapshot:
         self._refuse_after_as_of(
             series_id, day, "this lookup", "build the snapshot as of a later date to read it"
         )
-        value = self.require(series_id).get(day)
+        # The as_of check above is the cut, so the series as loaded is read
+        # directly: going through require() sliced it on every lookup.
+        value = self._held(series_id).get(day)
         if value is None:
             raise MissingFixingError(
                 f"series {series_id!r} has no fixing for {day}; fixings are never interpolated"
@@ -337,7 +373,9 @@ class MarketSnapshot:
         """
         if end < start:
             raise ValueError(f"end {end} precedes start {start}")
-        series = self.require(series_id)
+        # Every lookup below is checked against as_of before it is made, so
+        # the series as loaded is read rather than a cut copy of it.
+        series = self._held(series_id)
         out: list[tuple[date, float, bool]] = []
         day = start
         last_published: float | None = None

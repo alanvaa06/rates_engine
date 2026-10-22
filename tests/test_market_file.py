@@ -471,9 +471,30 @@ class TestTheValuationDate:
             snap.compounded("SOFR", date(2026, 1, 5), date(2026, 1, 13))
 
     def test_the_series_it_serves_stop_at_the_valuation_date(self, snapshot):
-        assert snapshot.require("SOFR").dates[-1] <= snapshot.as_of
+        loaded = snapshot.series["SOFR"]
+        served = snapshot.require("SOFR")
+        kept = [(d, v) for d, v in zip(loaded.dates, loaded.values, strict=True)]
+        kept = [(d, v) for d, v in kept if d <= snapshot.as_of]
+        assert served.dates == tuple(d for d, _ in kept)
+        assert served.values == tuple(v for _, v in kept)
+        assert served.provenance is loaded.provenance
         # What was loaded is kept as loaded; only what is served is cut.
-        assert snapshot.series["SOFR"].dates[-1] > snapshot.as_of
+        assert loaded.dates[-1] > snapshot.as_of
+
+    def test_lookups_do_not_rebuild_the_series(self, snapshot, monkeypatch):
+        # Alan's review: require() copied and re-validated the whole series on
+        # every fixing() once the history ran past as_of -- 0.23 s for 1,000
+        # lookups on 2,000 points, against 0.0003 s with nothing to cut. No
+        # lookup constructs a Series any more, which this pins without a
+        # timing test.
+        def rebuilt(self):
+            raise AssertionError("a lookup rebuilt the series")
+
+        monkeypatch.setattr(Series, "__post_init__", rebuilt)
+        assert snapshot.fixing("SOFR", date(2026, 1, 14)) > 0.0
+        assert snapshot.compounded("SOFR", date(2026, 1, 5), date(2026, 1, 12)).rate > 0.0
+        assert snapshot.averaged("SOFR", date(2026, 1, 5), date(2026, 1, 12)).rate > 0.0
+        assert snapshot.require("SOFR").dates[-1] <= snapshot.as_of
 
     def test_realised_sigma_cannot_be_measured_at_a_later_date(self, snapshot):
         from rates_engine.market.estimators import realized_sofr_sigma
