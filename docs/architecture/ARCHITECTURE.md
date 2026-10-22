@@ -55,7 +55,7 @@ La calidad por función era alta: evidencia encadenada, refusals nombradas, 1612
 | Paquete | Módulos |
 |---|---|
 | `core` | `errors`, `evidence`, `results`, `money`, `diagnostics` |
-| `conventions` | `daycount`, `calendar`, `schedule`, `indices`, `side`, `option_kind`, `currency_pair` |
+| `conventions` | `daycount`, `calendar`, `settlement`, `schedule`, `indices`, `side`, `option_kind`, `currency_pair` |
 | `market` | `snapshot`, `classify`, `estimators`, `providers/{file,fred,banxico}` |
 | `models` | `gaussian`, `black`, `bachelier`, `garman_kohlhagen`, `fx_delta`, `sabr`, `convexity` |
 | `curves` | `discount`, `interpolation`, `bootstrap`, `dual`, `mxn`, `parametric`, `views`, `comparison` |
@@ -163,7 +163,7 @@ Lo que se descubrió al implementarlo: la duplicación no era inocua, y el diagn
 
 Revierte la decisión del deep review de v0.3 ("un instrumento se denomina por la curva en la que se valúa"). Cada instrumento lleva un `RateIndex` que fija su moneda y, salvo que se indique otro, su calendario; valuarlo sobre una curva de otra moneda lanza `CurrencyMismatchError`. La proyección de flujos pasó a `pricing.projection` (`project`, `float_leg`, registrables con `singledispatch`), y con ella desapareció la última excepción de capas. Las convenciones no verificadas del índice del instrumento llegan a cada precio, sensibilidad y griega.
 
-Los números en dólares siguen bit a bit idénticos a v0.3.0. El payload de `price` vuelve a ser byte a byte el de v0.3.0 (`float_index: compounded_sofr`), porque ahora el swap sabe su índice en lugar de tenerlo cableado.
+El payload de `price` volvió entonces a ser byte a byte el de v0.3.0 (`float_index: compounded_sofr`), porque ahora el swap sabe su índice en lugar de tenerlo cableado. Las correcciones de la revisión del 2026-10-15 sí mueven números en dólares; el CHANGELOG de 0.4.0 da cada uno con su antes y después.
 
 **Lo que sigue abierto:** el swap TIIE 28 acumula periodos de 28 días que `Schedule` (en meses) no genera, así que existe como nodo (`tiie_par_swap_node`) pero no como instrumento. `IRSwap(index=TIIE_28)` se rechaza con un mensaje que lo dice.
 
@@ -184,7 +184,7 @@ Un agente revisor comparó 112 resultados contra v0.3.0 (OIS, IRS 3M/6M, FRA, ca
 
 La primera versión de §8.1 atribuía el descuadre de 1.7 pb a `ParSwapNode`. La revisión lo acotó: el origen era la convención de schedule de esta librería, que dejaba los fines de período sin ajustar mientras movía los pagos. La convención de mercado para OIS SOFR ajusta ambos. Así lo describen el reglamento del contrato Eris SOFR de CME (periodos que terminan en el aniversario "subject to adjustment in accordance with the Modified Following Business Day Convention", con pago dos días hábiles después, Following) y la nota de ISDA sobre las definiciones 2006 (los *Period End Dates* se ajustan junto con las fechas de pago, Modified Following por defecto). Ambas se leyeron vía resúmenes de búsqueda; los PDFs de CME no cargaron desde este entorno.
 
-`Schedule.generate` ahora ajusta los fines de período con la misma convención que los pagos, y `adjust_accrual_ends=False` reproduce el comportamiento anterior. Es el único cambio que mueve números en dólares, y solo donde una fecha de aniversario no es día hábil. En el quickstart del README, la tasa par pasa de 4.0539% a 4.0537%. Con lag 0, `ParSwapNode` y `SwapQuoteNode` coinciden ahora también donde las fechas se mueven.
+`Schedule.generate` ahora ajusta los fines de período con la misma convención que los pagos, y `adjust_accrual_ends=False` reproduce el comportamiento anterior. Es el único cambio de la reorganización que mueve números en dólares, y solo donde una fecha de aniversario no es día hábil. En el quickstart del README, la tasa par pasa de 4.0539% a 4.0537%. Con lag 0, `ParSwapNode` y `SwapQuoteNode` coinciden ahora también donde las fechas se mueven.
 
 ### 8.5 La CLI calibra con swaps (decisión de Alan, opción a)
 

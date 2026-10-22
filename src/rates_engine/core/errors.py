@@ -73,7 +73,16 @@ class RatesEngineError(Exception):
 
 
 class ConventionError(RatesEngineError):
-    """A day count, calendar, roll or tenor this package does not implement."""
+    """The terms of a trade cannot be read under the conventions they name.
+
+    The parent of :class:`UnsupportedConventionError` (a day count, calendar,
+    roll or tenor this package does not implement) and
+    :class:`UnresolvedConventionError`. Raised itself when an instrument is
+    built whose roll convention leaves its schedule no accrual period: the
+    maturity adjusts onto or before the adjusted effective date (Friday
+    2026-05-29 to Sunday 2026-05-31 under Modified Following). Change the
+    maturity or the roll.
+    """
 
     exit_code = 1
 
@@ -136,13 +145,12 @@ class IncompatibleDependencyError(MissingDependencyError):
 
 
 class ConfigurationError(RatesEngineError):
-    """The command was asked to run without the configuration it needs.
+    """The configuration cannot be used as given.
 
-    ``describe`` and ``list-instruments`` answer from the build itself; every
-    other command reads a config. Over the CLI argparse enforces that, but the
-    MCP server's tools take the config as an optional argument, so the refusal
-    has to be a named one rather than whatever the first missing key happens
-    to raise.
+    It is absent, has a key a command reached that it neither reads nor
+    documents, or lacks a required key; or, under ``--json``, the command line
+    is one the parser rejects. The message names the path and what to write
+    instead.
     """
 
     exit_code = 1

@@ -40,10 +40,11 @@ cannot hedge shows up in dollars and in basis points.
 
 Carries a currency on every curve and cashflow, so discounting pesos on the
 dollar curve raises rather than returning a number. Builds the USD/MXN
-forward from covered interest parity and reports the cross-currency basis
-separately, because parity has not held since 2007 and the residual is a
-real, signed cost. Prices FX options with Garman-Kohlhagen and builds their
-smile with vanna-volga from the three quotes the market makes, under a delta
+forward from covered interest parity, run from the T+2 spot date, and
+reports the cross-currency basis separately, because parity has not held
+since 2007 and the residual is a real, signed cost. Prices FX options with
+Garman-Kohlhagen and builds their smile with vanna-volga from the three or
+five quotes the market makes (smile or broker butterfly), under a delta
 convention that has to be stated because FX has four and they differ by
 hundreds of pips. Compares eight hedge structures against a transaction
 exposure, and audits a proposed hedge against a policy loaded from data.
@@ -67,7 +68,10 @@ approximated by effective duration under their own names. A lognormal model is n
 non-positive forward. A volatility is never converted between normal and
 lognormal, because there is no such conversion. A volatility cube never
 interpolates across expiry or tenor. An asymptotic expansion never returns a
-negative volatility. Thirty-three named exceptions, each with an exit code and
+negative volatility. A swap, FRA, cap, floor or swaption that has started is
+never valued as if it had not: paid periods drop out, fixed ones need their
+published fixing, and an expired swaption is refused. A config key is never
+silently ignored. Thirty-three named exceptions, each with an exit code and
 an entry in `docs/ERRORS.md` saying whether it is recoverable and what to do.
 
 ## What it is not
@@ -97,7 +101,8 @@ yields as a proxy for OIS par, which carries a swap spread that is negative,
 variable and not quantified here — it is opt-in, it marks every node it
 touches, and it is barred from any test that validates a published number. The
 SR1 contract notional is assumed rather than read from the contract spec, and
-the evidence says `notional_source="assumed"`.
+the evidence says `notional_source="assumed"`; a hedge with an SR1 contract
+in it carries an `sr1_notional_assumed` degradation.
 
 In v3: the peso conventions -- the TIIE day count and period, the calendar,
 the rate peso collateral earns -- are assumptions this build could not check

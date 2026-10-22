@@ -103,9 +103,13 @@ rateng hedge-structures --config fx.json --json  # eight structures, costed side
 ```
 
 `python scripts/write_example_config.py config.json` writes a config to start
-from. With `--json`, stdout is exactly one parseable document and all
-narration goes to stderr. Exit code 1 means the inputs are unusable, 2 means
-the calculation is impossible.
+from, and `rateng describe --json` lists every config key under `config`,
+with its units, its default and the commands that read it.
+`fixings.SOFR.values: [{"date": "2025-09-17", "rate": 0.043}, ...]` gives
+`price` and `hedge` the history a swap that has started needs. With
+`--json`, stdout is exactly one parseable document and all narration goes
+to stderr. Exit code 1 means the inputs are unusable, 2 means the
+calculation is impossible.
 
 ## The MCP server
 
@@ -116,7 +120,8 @@ rateng-mcp
 
 Seven tools, the same seven commands. Each one is literally the callable the
 CLI dispatches to, so a tool's answer is byte-identical to the corresponding
-`--json` document rather than a second serialisation kept in step by hand.
+`--json` document rather than a second serialisation kept in step by hand,
+and a failure arrives as the same error document the CLI prints.
 The server is transport: it writes no file, opens no socket and invokes no
 model, and `tests/test_mcp_server.py` asserts all three by running the
 handlers under guards that make the first two fatal.
@@ -133,7 +138,11 @@ never divided by a zero price — a par swap is worth nothing, so
 `effective_duration` raises and points you at `dv01` and `money_convexity`.
 Macaulay and modified duration need a yield, and therefore a bond, so they
 raise rather than being approximated by effective duration under their own
-names.
+names. A swap, FRA, cap, floor or swaption that has started is never valued
+as if it had not: paid periods drop out, fixed ones need their published
+fixing, and an expired swaption is refused. A config key the schema does
+not document is never ignored: a typo anywhere in the file is refused by
+path, with the key it probably meant.
 
 A currency never mixes with another: discounting a peso cashflow on a dollar
 curve raises rather than returning a number, and there is no implicit
@@ -214,16 +223,26 @@ pricing or hedging code knowing what a proxy is.
   environment could not reach the whitepaper or CME's published settlements.
   The tolerances are unchanged and the tests activate the moment the fixtures
   land in `tests/fixtures/cme_published/`. Nothing was faked in their place;
-  see that directory's README.
-- **The SIFMA Saturday-observance rule has not been checked** against SIFMA's
-  published calendar. It is implemented and the fixture's provenance records
-  the check as outstanding.
+  see that directory's README. The sign of that last figure is itself
+  unconfirmed: in this engine a hedged payer always nets negative and a
+  hedged receiver positive (the residual is half the swap's money convexity
+  times the shock squared), so the whitepaper may hedge the receiver;
+  `tests/test_golden_cme.py` says what to check in the PDF.
+- **The SIFMA calendar is checked against the SOFR publication record, not
+  SIFMA's own list.** It agrees with FRED's SOFR series on every weekday from
+  3 April 2018 to 14 October 2026. Later dates are its rules: an unscheduled
+  closure cannot be known in advance, and Juneteenth on a Saturday (first on
+  19 June 2027) is the one rule the record has not exercised. Closures before
+  2018 are not encoded. Good Friday is a holiday every year, including years
+  when SIFMA recommends only an early close, because no SOFR is published on
+  it.
 - **The dual-curve solver is validated on synthetic inputs.** No free source
   of Term SOFR par or basis swap quotes exists, so v1 proves the solver rather
   than a market fit, and every such result declares
   `inputs_origin="synthetic"`.
 - **The SR1 contract notional is assumed**, not read from the contract spec.
-  The evidence says `notional_source="assumed"`.
+  The evidence says `notional_source="assumed"`, and a hedge with an SR1
+  contract in it carries an `sr1_notional_assumed` degradation.
 - **Hagan's SABR expansion and Hagan-West's interpolation are transcribed**
   from secondary sources. What stands in for reading them: the limits each
   formula must satisfy, a Monte Carlo of the SABR process the expansion
@@ -239,8 +258,8 @@ pricing or hedging code knowing what a proxy is.
 - **No MXN convention is verified.** Banxico, ISDA and CME are all unreachable
   from the build environment, and QuantLib — the one substantive source that
   is — has no TIIE index at all. The TIIE day count, the 28-day coupon period,
-  the TIIE 28 versus TIIE de Fondeo distinction and the SIE series identifiers
-  are assumptions, named in `UNRESOLVED_MXN`, carried as a degradation on
+  the TIIE 28 versus TIIE de Fondeo distinction, the TIIE 28 fixing lag and
+  the SIE series identifiers are assumptions, named in `UNRESOLVED_MXN`, carried as a degradation on
   every peso result, and refusable with `strict_conventions=True`. Resolving
   them shortens a tuple and changes nothing else.
 - **The Mexican calendar is the BMV's, not Banxico's.** Different lists, and

@@ -198,7 +198,7 @@ from rates_engine.risk.sensitivities import (
 from rates_engine.volatility.cube import CubePoint, CubeQuote, StrikeConvention, VolCube
 from rates_engine.volatility.units import Volatility, VolUnits
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = [
     "all_views",
