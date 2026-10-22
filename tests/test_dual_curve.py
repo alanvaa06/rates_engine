@@ -14,7 +14,12 @@ from datetime import date
 import pytest
 
 from rates_engine.conventions.daycount import DayCount, year_fraction
-from rates_engine.core.errors import NoTenorQuoteSourceError, UnderdeterminedCurveError
+from rates_engine.core.errors import (
+    BootstrapResidualError,
+    ImplausibleInputError,
+    NoTenorQuoteSourceError,
+    UnderdeterminedCurveError,
+)
 from rates_engine.core.evidence import DataQuality
 from rates_engine.curves.bootstrap import RealizedStubNode
 from rates_engine.curves.discount import DiscountCurve
@@ -168,6 +173,17 @@ class TestModes:
         with pytest.raises(ValueError, match="simultaneous"):
             solve_dual_curve(AS_OF, _ois_instruments(), tenor, basis_nodes, mode="clever")
 
+    @pytest.mark.parametrize("basis", [0.0025, 0.0150])
+    def test_the_modes_agree_whatever_the_basis(self, basis):
+        """The module docstring used to say a wide basis could separate them
+        by a few basis points. It cannot: the OIS residuals depend on the OIS
+        nodes alone and pin them, so the system is block triangular and both
+        modes solve the same square system. At 150 bp of basis the review
+        measured 0.00 bp."""
+        tenor, basis_nodes = _dual_instruments(basis)
+        result = solve_dual_curve(AS_OF, _ois_instruments(), tenor, basis_nodes)
+        assert max(abs(v) for v in result.sequential_vs_simultaneous_bp.values()) < 1e-8
+
     def test_the_comparison_can_be_skipped(self):
         tenor, basis_nodes = _dual_instruments(0.0)
         result = solve_dual_curve(
@@ -224,6 +240,81 @@ class TestUnderdetermined:
     def test_no_dual_instruments_at_all_refuses(self):
         with pytest.raises(UnderdeterminedCurveError, match="nothing to pin"):
             solve_dual_curve(AS_OF, _ois_instruments(), (), ())
+
+
+class TestTheSolverIsChecked:
+    """``tolerance_bp`` is enforced and a solver that did not converge is refused.
+
+    Before, ``tolerance_bp`` was written into the evidence and nothing else,
+    and ``least_squares`` was never asked whether it had converged: a fit
+    that missed by any amount came back as a result.
+    """
+
+    def test_an_unreachable_tolerance_refuses(self):
+        tenor, basis_nodes = _dual_instruments(0.0015)
+        with pytest.raises(BootstrapResidualError, match="tolerance"):
+            solve_dual_curve(AS_OF, _ois_instruments(), tenor, basis_nodes, tolerance_bp=1e-30)
+
+    def test_a_solver_that_stopped_early_refuses(self, monkeypatch):
+        from types import SimpleNamespace
+
+        from rates_engine.curves import dual
+
+        real = dual.least_squares
+
+        def gave_up(function, guess, **kwargs):
+            solution = real(function, guess, **kwargs)
+            return SimpleNamespace(
+                x=solution.x,
+                success=False,
+                status=0,
+                message="The maximum number of function evaluations is exceeded.",
+            )
+
+        monkeypatch.setattr(dual, "least_squares", gave_up)
+        tenor, basis_nodes = _dual_instruments(0.0015)
+        with pytest.raises(BootstrapResidualError, match="did not converge"):
+            solve_dual_curve(AS_OF, _ois_instruments(), tenor, basis_nodes)
+
+    def test_the_ois_quotes_are_checked_after_a_simultaneous_solve(self):
+        tenor, basis_nodes = _dual_instruments(0.0015)
+        result = solve_dual_curve(AS_OF, _ois_instruments(), tenor, basis_nodes)
+        assert result.evidence.fields["ois_max_abs_residual_bp"] < 0.01
+
+    def test_unlabelled_instruments_do_not_shadow_each_other(self):
+        """Alan Vazquez's PR #15 review: keyed by label, two unlabelled
+        ``TenorParSwapNode``s shared ``tenor_par_swap``, the second hid the
+        first in the residuals, and a miss on the first went unreported. They
+        are keyed as the bootstrap keys them now, with the node date."""
+        tenor, basis_nodes = _dual_instruments(0.0015)
+        unlabelled = tuple(
+            TenorParSwapNode(
+                start=node.start,
+                payment_dates=node.payment_dates,
+                year_fractions=node.year_fractions,
+                float_periods=node.float_periods,
+                quoted_rate=node.quoted_rate,
+            )
+            for node in tenor
+        )
+        result = solve_dual_curve(AS_OF, _ois_instruments(), unlabelled, basis_nodes)
+        assert len(result.residuals_bp) == len(unlabelled) + len(basis_nodes)
+        with pytest.raises(BootstrapResidualError) as excinfo:
+            solve_dual_curve(
+                AS_OF, _ois_instruments(), unlabelled, basis_nodes, tolerance_bp=1e-30
+            )
+        for node in unlabelled:
+            assert f"tenor_par_swap@{node.node_date.isoformat()}" in str(excinfo.value)
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+    def test_a_non_finite_quote_refuses_by_name(self, bad):
+        """It used to reach scipy, which raised a bare ``ValueError``."""
+        tenor, basis_nodes = _dual_instruments(0.0015)
+        broken = BasisSwapNode(
+            float_periods=basis_nodes[0].float_periods, quoted_spread=bad, label="basis_nan"
+        )
+        with pytest.raises(ImplausibleInputError, match="basis_nan"):
+            solve_dual_curve(AS_OF, _ois_instruments(), tenor, (broken, basis_nodes[1]))
 
 
 class TestPayload:

@@ -27,8 +27,14 @@ import pytest
 import rates_engine
 from rates_engine.conventions.daycount import DayCount, year_fraction
 from rates_engine.conventions.side import Side
-from rates_engine.core.errors import CalibrationError, UnderdeterminedCurveError
-from rates_engine.core.evidence import DataQuality
+from rates_engine.core.errors import (
+    CalibrationError,
+    ImplausibleInputError,
+    MissingFixingError,
+    UnderdeterminedCurveError,
+    UnsupportedConventionError,
+)
+from rates_engine.core.evidence import DataQuality, Provenance
 from rates_engine.curves.discount import CurveSet, DiscountCurve
 from rates_engine.curves.parametric import (
     TERM_RATE_CAVEAT,
@@ -38,10 +44,46 @@ from rates_engine.curves.parametric import (
     fit_nelson_siegel,
 )
 from rates_engine.instruments.swaps import OISSwap
+from rates_engine.market.snapshot import MarketSnapshot, Series
 from rates_engine.pricing.linear import ParametricComparison, price_on_parametric, pv
 
 FIXTURES = Path(__file__).parent / "fixtures"
 AS_OF = date(2026, 9, 16)
+
+SIFMA_2026_HOLIDAYS = frozenset(
+    {date(2026, 10, 12), date(2026, 11, 11), date(2026, 11, 26), date(2026, 12, 25)}
+)
+"""SIFMA's full closes between September and December 2026, written out by hand
+(Columbus Day, Veterans Day, Thanksgiving, Christmas), so the reference below
+does not lean on the calendar it is checking."""
+
+
+def _is_business(day: date, holidays: frozenset[date]) -> bool:
+    return day.weekday() < 5 and day not in holidays
+
+
+def _business_day_weights(
+    start: date, end: date, holidays: frozenset[date]
+) -> list[tuple[date, int]]:
+    """CME's ``(business day, d_i)`` over ``[start, end)``, one calendar day at a time.
+
+    Every calendar day takes the rate of the business day on or before it;
+    ``d_i`` counts the calendar days each business day's rate covers. Written
+    independently of the package so the tests check its arithmetic rather
+    than repeat it.
+    """
+    out: list[tuple[date, int]] = []
+    day = start
+    while day < end:
+        anchor = day
+        while not _is_business(anchor, holidays):
+            anchor -= timedelta(days=1)
+        if out and out[-1][0] == anchor:
+            out[-1] = (anchor, out[-1][1] + 1)
+        else:
+            out.append((anchor, 1))
+        day += timedelta(days=1)
+    return out
 
 
 def _zero_curve() -> tuple[tuple[float, ...], tuple[float, ...]]:
@@ -195,6 +237,91 @@ class TestNelsonSiegelFit:
         assert payload["model"] == "nelson_siegel"
         json.dumps(ns_fit.to_dict())
 
+    def test_it_finds_the_global_minimum_of_the_tau_profile(self):
+        """A Svensson curve whose profile has an interior minimum and a lower
+        value nowhere else but a slope down to the upper bound.
+
+        Bounded Brent alone settled on the bound: tau = 30, 7.16 bp RMSE. A
+        dense grid over the same bounds (20,001 log-spaced points, loadings
+        and least squares written out independently in a scratch script)
+        finds tau = 2.0127 at 1.5988 bp. In the review, 24 of 300 random
+        Svensson curves were left more than 5 bp worse than the grid.
+        """
+        b0, b1, b2, b3 = (
+            0.046729229025487776,
+            -0.001418807478039904,
+            0.01112545124353296,
+            -0.027950686078118084,
+        )
+        tau1, tau2 = 2.014123777370009, 13.41654368571956
+
+        def svensson(t: float) -> float:
+            x, y = t / tau1, t / tau2
+            s1, s2 = (1.0 - math.exp(-x)) / x, (1.0 - math.exp(-y)) / y
+            return b0 + b1 * s1 + b2 * (s1 - math.exp(-x)) + b3 * (s2 - math.exp(-y))
+
+        times = (0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 15.0, 20.0, 30.0)
+        fit = fit_nelson_siegel(times, tuple(svensson(t) for t in times))
+        assert fit.rmse_bp == pytest.approx(1.598783249179921, abs=1e-5)
+        assert fit.model.tau == pytest.approx(2.0126537839608125, abs=1e-3)
+        assert "nelson_siegel_tau_at_bound" not in {w.code for w in fit.evidence.warnings}
+
+    def test_it_finds_a_minimum_on_the_bound_too(self):
+        """The mirror case: an interior local minimum that is worse than the
+        bound. Brent alone stopped at tau = 0.3006 inside ``(0.05, 1.0)``."""
+        truth = NelsonSiegel(0.042, -0.006, 0.012, 2.5)
+        times = (0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 20.0, 30.0)
+        rates = tuple(truth.zero_rate(t) for t in times)
+        fit = fit_nelson_siegel(times, rates, tau_bounds=(0.05, 1.0))
+        assert fit.model.tau == pytest.approx(1.0, abs=1e-6)
+
+    def test_a_tau_on_its_bound_is_flagged(self):
+        """The optimum outside the bounds is not an error -- the caller chose
+        the range -- but the decay was set by the range rather than the data,
+        and the evidence has to say so."""
+        truth = NelsonSiegel(0.042, -0.006, 0.012, 2.5)
+        times = (0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 20.0, 30.0)
+        fit = fit_nelson_siegel(
+            times, tuple(truth.zero_rate(t) for t in times), tau_bounds=(4.0, 30.0)
+        )
+        assert fit.model.tau == pytest.approx(4.0, abs=1e-6)
+        warnings = {w.code: w for w in fit.evidence.warnings}
+        assert "nelson_siegel_tau_at_bound" in warnings
+        assert "4.0" in warnings["nelson_siegel_tau_at_bound"].message
+        assert fit.evidence.fields["tau_at_bound"] == "lower"
+
+    def test_an_interior_tau_is_not_flagged(self, ns_fit):
+        assert ns_fit.evidence.fields["tau_at_bound"] is None
+        assert ns_fit.evidence.warnings == ()
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+    def test_a_non_finite_rate_refuses(self, zero_curve, bad):
+        """NaN used to pass straight through: ``rmse > tolerance`` is false
+        for a NaN RMSE, so even an explicit tolerance never fired."""
+        times, rates = zero_curve
+        broken = (bad, *rates[1:])
+        with pytest.raises(ImplausibleInputError, match="zero_rates"):
+            fit_nelson_siegel(times, broken, tolerance_bp=1.0)
+
+    def test_a_non_finite_time_refuses(self, zero_curve):
+        times, rates = zero_curve
+        with pytest.raises(ImplausibleInputError, match="times"):
+            fit_nelson_siegel((*times[:-1], float("nan")), rates)
+
+    def test_a_fit_that_is_not_a_number_refuses(self):
+        """Finite inputs whose squares overflow: the RMSE is not a number, and
+        that is a failed fit, not a fit to report."""
+        times = (1.0, 2.0, 3.0, 5.0, 10.0)
+        with pytest.raises(CalibrationError, match="not a finite"):
+            fit_nelson_siegel(times, (1e300, -1e300, 1e300, -1e300, 1e300))
+
+    def test_nonsense_bounds_refuse(self, zero_curve):
+        times, rates = zero_curve
+        with pytest.raises(ValueError, match="tau_bounds"):
+            fit_nelson_siegel(times, rates, tau_bounds=(5.0, 1.0))
+        with pytest.raises(ValueError, match="tau_bounds"):
+            fit_nelson_siegel(times, rates, tau_bounds=(0.0, 30.0))
+
     def test_sampling_onto_a_discount_curve_reproduces_the_model(self, ns_fit):
         nodes = tuple(AS_OF + timedelta(days=365 * k) for k in (1, 2, 5, 10, 30))
         curve = ns_fit.model.discount_curve(AS_OF, nodes)
@@ -257,15 +384,66 @@ class TestFOMCStepCurveTheFunction:
             FOMCStepCurve(AS_OF, (date(2026, 12, 17), date(2026, 11, 5)), (0.043, 0.04, 0.038))
 
     def test_the_discount_curve_compounds_the_path(self):
+        """Business day by business day, each rate for the calendar days it
+        covers, as the SR3 settlement does. It used to compound
+        ``1 + r/360`` once per calendar day, which turns a weekend into
+        ``(1 + r/360)^3`` rather than ``1 + 3r/360``."""
         curve = FOMCStepCurve(AS_OF, (), (0.043,))
         node = AS_OF + timedelta(days=90)
         sampled = curve.discount_curve((node,))
         expected = 1.0
-        day = AS_OF
-        while day < node:
-            expected *= 1.0 + 0.043 / 360.0
-            day += timedelta(days=1)
-        assert sampled.df(node) == pytest.approx(1.0 / expected)
+        for _, days in _business_day_weights(AS_OF, node, SIFMA_2026_HOLIDAYS):
+            expected *= 1.0 + 0.043 * days / 360.0
+        assert sampled.df(node) == pytest.approx(1.0 / expected, rel=1e-15)
+
+    def test_the_sampled_curve_and_compounded_agree_at_every_node(self):
+        """One set of terms for both, so a later fix to one reaches the other.
+        Nodes on weekdays, a weekend and across meetings."""
+        curve = FOMCStepCurve(
+            AS_OF, (date(2026, 11, 5), date(2026, 12, 17)), (0.043, 0.0405, 0.038)
+        )
+        nodes = (
+            date(2026, 10, 3),   # a Saturday
+            date(2026, 10, 30),
+            date(2026, 11, 5),   # the meeting itself
+            date(2026, 11, 29),  # a Sunday
+            date(2027, 1, 20),
+        )
+        sampled = curve.discount_curve(nodes)
+        for node in nodes:
+            growth = 1.0 + curve.compounded(AS_OF, node) * (node - AS_OF).days / 360.0
+            assert sampled.df(node) == pytest.approx(1.0 / growth, rel=1e-14)
+
+    def test_compounding_follows_the_cme_and_new_york_fed_formula(self):
+        """``prod(1 + r_i d_i / 360)`` over business days, ``d_i`` the calendar
+        days rate ``r_i`` applies for -- three for a Friday. The window holds
+        no SIFMA holiday (Columbus Day is the day before it, Veterans Day the
+        day after), so the weights are plain weekday arithmetic."""
+        rate = 0.043
+        curve = FOMCStepCurve(AS_OF, (), (rate,))
+        start, end = date(2026, 10, 13), date(2026, 11, 10)
+        factor = 1.0
+        for _, days in _business_day_weights(start, end, frozenset()):
+            factor *= 1.0 + rate * days / 360.0
+        expected = (factor - 1.0) * 360.0 / (end - start).days
+        assert curve.compounded(start, end) == pytest.approx(expected, abs=1e-15)
+        daily = (1.0 + rate / 360.0) ** (end - start).days
+        old = (daily - 1.0) * 360.0 / (end - start).days
+        assert abs(old - expected) * 1e4 > 0.02, "the window no longer separates the two"
+
+    def test_a_period_starting_on_a_weekend_carries_the_friday_rate(self):
+        """A step dated on a Saturday -- not a real effective date, chosen to
+        separate the two readings -- and a period starting that Saturday. The
+        weekend takes the rate published for Friday, the one before the step,
+        not the one the path holds on the calendar day."""
+        saturday = date(2026, 10, 17)
+        curve = FOMCStepCurve(AS_OF, (saturday,), (0.043, 0.040))
+        assert curve.compounded(saturday, saturday + timedelta(days=2)) == pytest.approx(
+            0.043, abs=1e-12
+        )
+        assert curve.averaged(saturday, saturday + timedelta(days=2)) == pytest.approx(
+            0.043, abs=1e-12
+        )
 
 
 class TestFOMCStepFit:
@@ -353,6 +531,258 @@ class TestFOMCStepFit:
         first = fit_fomc_step_curve(AS_OF, dates, strip)
         second = fit_fomc_step_curve(AS_OF, dates, strip)
         assert first.curve.segment_rates == second.curve.segment_rates
+
+    def test_a_non_finite_price_refuses_by_contract(self, strip, meetings):
+        """It used to reach scipy, which raised a bare ``ValueError`` about
+        residuals 'not finite in the initial point'."""
+        broken = strip[:1] + ((strip[1][0], strip[1][1], strip[1][2], "SR1", float("nan")),)
+        with pytest.raises(ImplausibleInputError, match=strip[1][0]):
+            fit_fomc_step_curve(AS_OF, tuple(d for d, _ in meetings), broken + strip[2:])
+
+    def test_an_unknown_symbol_refuses(self, strip, meetings):
+        """Anything that was not ``SR1`` used to be compounded as an SR3."""
+        relabelled = ((strip[0][0], strip[0][1], strip[0][2], "SR2", strip[0][4]), *strip[1:])
+        with pytest.raises(UnsupportedConventionError, match="SR2"):
+            fit_fomc_step_curve(AS_OF, tuple(d for d, _ in meetings), relabelled)
+
+
+class TestFOMCStepFitInProgress:
+    """A contract whose reference period started before ``as_of``.
+
+    Its settlement is part history. The path starts at ``as_of``, so before
+    this the days already fixed were read off the first segment as if the
+    overnight rate had sat there all along -- through a meeting already
+    held, if there was one. Now they come from the published fixings, passed
+    as the same ``MarketSnapshot`` swaps and caps take, and a strip that
+    needs them and does not have them is refused.
+    """
+
+    IN_PROGRESS_AS_OF = date(2026, 10, 15)
+    MEETINGS = (date(2026, 11, 5), date(2026, 12, 17))
+    PATH = (0.0430, 0.0405, 0.0380)
+    FIXING = 0.0450
+    """Every SOFR fixing before ``as_of``: deliberately not the first segment."""
+
+    def _days(self, *, through_as_of: bool = False) -> list[date]:
+        out: list[date] = []
+        day = date(2026, 9, 14)
+        while day < self.IN_PROGRESS_AS_OF or (through_as_of and day == self.IN_PROGRESS_AS_OF):
+            if _is_business(day, SIFMA_2026_HOLIDAYS):
+                out.append(day)
+            day += timedelta(days=1)
+        return out
+
+    def _snapshot(self, days: list[date], values: list[float] | None = None) -> MarketSnapshot:
+        series = Series(
+            "SOFR",
+            tuple(days),
+            tuple(values if values is not None else [self.FIXING] * len(days)),
+            Provenance(source="file", series_id="SOFR", instrument_kind="sofr_fixing"),
+        )
+        return MarketSnapshot(as_of=self.IN_PROGRESS_AS_OF, series={"SOFR": series})
+
+    def _rate(self, business_day: date, *, as_of_fixed: bool = False) -> float:
+        """The overnight rate published for a business day: a fixing before
+        ``as_of`` (and on it, when it is fixed), the path after."""
+        if business_day < self.IN_PROGRESS_AS_OF or (
+            as_of_fixed and business_day == self.IN_PROGRESS_AS_OF
+        ):
+            return self.FIXING
+        index = sum(1 for meeting in self.MEETINGS if business_day >= meeting)
+        return self.PATH[index]
+
+    def _sr1(self, start: date, end: date, **kw) -> float:
+        """CME SR1: the calendar-day average, each day at its business day's rate."""
+        weights = _business_day_weights(start, end, SIFMA_2026_HOLIDAYS)
+        total = sum(self._rate(day, **kw) * days for day, days in weights)
+        return 100.0 * (1.0 - total / (end - start).days)
+
+    def _sr3(self, start: date, end: date, **kw) -> float:
+        """CME SR3: ``prod(1 + r_i d_i / 360)`` over the business days."""
+        factor = 1.0
+        for day, days in _business_day_weights(start, end, SIFMA_2026_HOLIDAYS):
+            factor *= 1.0 + self._rate(day, **kw) * days / 360.0
+        return 100.0 * (1.0 - (factor - 1.0) * 360.0 / (end - start).days)
+
+    def _strip(self, **kw):
+        months = (
+            ("SR1-Oct26", date(2026, 10, 1), date(2026, 11, 1)),
+            ("SR1-Nov26", date(2026, 11, 1), date(2026, 12, 1)),
+            ("SR1-Dec26", date(2026, 12, 1), date(2027, 1, 1)),
+        )
+        strip = [(label, s, e, "SR1", self._sr1(s, e, **kw)) for label, s, e in months]
+        sep, dec = date(2026, 9, 16), date(2026, 12, 16)
+        strip.append(("SR3-Sep26", sep, dec, "SR3", self._sr3(sep, dec, **kw)))
+        return tuple(strip)
+
+    def test_without_fixings_it_refuses_and_names_the_contracts(self):
+        with pytest.raises(MissingFixingError) as excinfo:
+            fit_fomc_step_curve(self.IN_PROGRESS_AS_OF, self.MEETINGS, self._strip())
+        assert "SR1-Oct26" in str(excinfo.value)
+        assert "SR3-Sep26" in str(excinfo.value)
+        assert "MarketSnapshot" in str(excinfo.value)
+
+    def test_with_fixings_it_recovers_the_path(self):
+        fit = fit_fomc_step_curve(
+            self.IN_PROGRESS_AS_OF,
+            self.MEETINGS,
+            self._strip(),
+            fixings=self._snapshot(self._days()),
+        )
+        assert fit.curve.segment_rates == pytest.approx(self.PATH, abs=1e-10)
+        assert fit.max_residual_bp < 1e-6
+
+    def test_the_realised_days_are_in_the_evidence(self):
+        fit = fit_fomc_step_curve(
+            self.IN_PROGRESS_AS_OF,
+            self.MEETINGS,
+            self._strip(),
+            fixings=self._snapshot(self._days()),
+        )
+        realised = fit.evidence.fields["realised_days"]
+        assert realised["SR1-Oct26"] == 14
+        assert realised["SR3-Sep26"] == 29
+        assert realised["SR1-Nov26"] == 0
+        assert fit.evidence.inputs[0].instrument_kind == "sofr_fixing"
+
+    def test_the_as_of_fixing_is_forecast_when_absent_and_says_so(self):
+        """The convention on as_of: a fixing dated as_of is read when it is
+        there and forecast when it is not, and the forecast is a warning."""
+        fit = fit_fomc_step_curve(
+            self.IN_PROGRESS_AS_OF,
+            self.MEETINGS,
+            self._strip(),
+            fixings=self._snapshot(self._days()),
+        )
+        warnings = {w.code: w for w in fit.evidence.warnings}
+        code = "curve_forward_for_todays_fixing:SOFR"
+        assert code in warnings
+        assert "SR1-Oct26" in warnings[code].message
+        assert warnings[code].data_quality is DataQuality.PROXY
+        assert fit.evidence.fields["forecast_days_on_as_of"]["SR1-Oct26"] == 1
+
+    def test_the_as_of_fixing_is_read_when_present(self):
+        days = self._days(through_as_of=True)
+        fit = fit_fomc_step_curve(
+            self.IN_PROGRESS_AS_OF,
+            self.MEETINGS,
+            self._strip(as_of_fixed=True),
+            fixings=self._snapshot(days),
+        )
+        assert fit.curve.segment_rates == pytest.approx(self.PATH, abs=1e-10)
+        assert fit.evidence.fields["realised_days"]["SR1-Oct26"] == 15
+        codes = {w.code for w in fit.evidence.warnings}
+        assert "curve_forward_for_todays_fixing:SOFR" not in codes
+
+    def test_a_missing_business_day_is_named(self):
+        days = [d for d in self._days() if d != date(2026, 10, 7)]
+        with pytest.raises(MissingFixingError, match="2026-10-07"):
+            fit_fomc_step_curve(
+                self.IN_PROGRESS_AS_OF, self.MEETINGS, self._strip(), fixings=self._snapshot(days)
+            )
+
+    def test_a_snapshot_without_sofr_is_refused(self):
+        empty = MarketSnapshot(as_of=self.IN_PROGRESS_AS_OF, series={})
+        with pytest.raises(MissingFixingError, match="SOFR"):
+            fit_fomc_step_curve(self.IN_PROGRESS_AS_OF, self.MEETINGS, self._strip(), fixings=empty)
+
+    def test_a_non_finite_fixing_refuses(self):
+        """Refused by the fit on main's ``Series``; a ``Series`` that refuses
+        NaN at construction (PR #11) stops it one step earlier, also naming
+        the day."""
+        days = self._days()
+        values = [float("nan") if d == date(2026, 10, 7) else self.FIXING for d in days]
+        with pytest.raises((ImplausibleInputError, ValueError), match="2026-10-07"):
+            fit_fomc_step_curve(
+                self.IN_PROGRESS_AS_OF,
+                self.MEETINGS,
+                self._strip(),
+                fixings=self._snapshot(days, values),
+            )
+
+    def test_a_strip_that_starts_after_as_of_needs_none(self, strip, meetings):
+        fit = fit_fomc_step_curve(AS_OF, tuple(d for d, _ in meetings), strip)
+        assert set(fit.evidence.fields["realised_days"].values()) == {0}
+
+
+class TestFOMCStepFitPinsEverySegment:
+    """Alan Vazquez's PR #15 review: a segment no unfixed day touches is pinned by nothing.
+
+    ``as_of`` 2026-01-30, meetings 2026-01-29 and 2026-03-19, fixings at
+    3.65% before ``as_of`` and SR1 for January to March. The segment before
+    the January meeting covers only days already fixed, so ``least_squares``
+    left it at its starting point -- 100 minus the January price, exactly --
+    and ``implied_moves_bp`` reported a move for a meeting already held.
+    """
+
+    AS_OF = date(2026, 1, 30)
+
+    def _snapshot(self) -> MarketSnapshot:
+        days, day = [], date(2025, 12, 20)
+        while day < self.AS_OF:
+            if day.weekday() < 5 and day not in (date(2025, 12, 25), date(2026, 1, 1),
+                                                 date(2026, 1, 19)):
+                days.append(day)
+            day += timedelta(days=1)
+        series = Series(
+            "SOFR", tuple(days), (0.0365,) * len(days), Provenance(source="file")
+        )
+        return MarketSnapshot(as_of=self.AS_OF, series={"SOFR": series})
+
+    STRIP = (
+        ("SR1-Jan26", date(2026, 1, 1), date(2026, 2, 1), "SR1", 96.35),
+        ("SR1-Feb26", date(2026, 2, 1), date(2026, 3, 1), "SR1", 96.40),
+        ("SR1-Mar26", date(2026, 3, 1), date(2026, 4, 1), "SR1", 96.45),
+    )
+
+    def test_a_meeting_already_held_is_refused(self):
+        with pytest.raises(UnderdeterminedCurveError, match="2026-01-29"):
+            fit_fomc_step_curve(
+                self.AS_OF,
+                (date(2026, 1, 29), date(2026, 3, 19)),
+                self.STRIP,
+                fixings=self._snapshot(),
+                strict=False,
+            )
+
+    def test_a_meeting_on_as_of_is_refused_too(self):
+        with pytest.raises(UnderdeterminedCurveError, match="2026-01-30"):
+            fit_fomc_step_curve(
+                self.AS_OF, (self.AS_OF,), self.STRIP, fixings=self._snapshot(), strict=False
+            )
+
+    def test_without_it_the_same_strip_fits(self):
+        fit = fit_fomc_step_curve(
+            self.AS_OF, (date(2026, 3, 19),), self.STRIP, fixings=self._snapshot(), strict=False
+        )
+        assert len(fit.curve.segment_rates) == 2
+
+    def test_a_meeting_the_strip_never_reaches_is_refused(self, strip, meetings):
+        """Enough contracts to count, and none in the last segment: it came back
+        at its starting point too."""
+        dates = (*(d for d, _ in meetings), date(2027, 9, 16))
+        with pytest.raises(UnderdeterminedCurveError, match="2027-09-16 onwards"):
+            fit_fomc_step_curve(AS_OF, dates, strip, strict=False)
+
+    def test_a_wholly_fixed_contract_does_not_count(self):
+        """December was fixed in full by as_of: it prices nothing from the path."""
+        strip = (("SR1-Dec25", date(2025, 12, 1), date(2026, 1, 1), "SR1", 96.35),) + self.STRIP[:1]
+        days, day = [], date(2025, 11, 26)
+        while day < self.AS_OF:
+            if day.weekday() < 5 and day not in (
+                date(2025, 11, 27), date(2025, 12, 25), date(2026, 1, 1), date(2026, 1, 19)
+            ):
+                days.append(day)
+            day += timedelta(days=1)
+        snapshot = MarketSnapshot(
+            as_of=self.AS_OF,
+            series={"SOFR": Series("SOFR", tuple(days), (0.0365,) * len(days),
+                                   Provenance(source="file"))},
+        )
+        with pytest.raises(UnderdeterminedCurveError, match="wholly fixed"):
+            fit_fomc_step_curve(
+                self.AS_OF, (date(2026, 3, 19),), strip, fixings=snapshot, strict=False
+            )
 
 
 class TestPricingOnAParametricCurve:
