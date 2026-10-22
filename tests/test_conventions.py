@@ -14,7 +14,7 @@ from rates_engine.conventions.calendar import (
 )
 from rates_engine.conventions.daycount import DayCount, day_count_from_name, year_fraction
 from rates_engine.conventions.schedule import Schedule, imm_date, imm_dates, next_imm_on_or_after
-from rates_engine.core.errors import UnsupportedConventionError
+from rates_engine.core.errors import ConventionError, UnsupportedConventionError
 
 
 class TestYearFraction:
@@ -330,8 +330,16 @@ class TestScheduleAgainstQuantLib:
 
     def test_a_single_period_that_collapses_refuses(self):
         # Maturity on Sunday 31 May 2026 rolls back to the effective date.
-        with pytest.raises(ValueError, match="no accrual period"):
+        with pytest.raises(ConventionError, match="no accrual period"):
             Schedule.generate(date(2026, 5, 29), date(2026, 5, 31), frequency_months=12)
+
+    def test_a_collapsed_schedule_is_a_typed_refusal(self):
+        # Inside the RatesEngineError contract, exit code 1: fix the request.
+        from rates_engine.core.errors import RatesEngineError
+
+        assert issubclass(ConventionError, RatesEngineError)
+        assert not issubclass(ConventionError, ValueError)
+        assert ConventionError.exit_code == 1
 
     def test_an_effective_date_on_a_business_day_is_untouched(self):
         schedule = Schedule.generate(date(2026, 3, 18), date(2027, 3, 17), frequency_months=12)
@@ -345,6 +353,42 @@ class TestScheduleAgainstQuantLib:
         )
         assert schedule.accrual_start == (date(2030, 6, 19),)
         assert schedule.accrual_end == (date(2031, 6, 18),)
+
+
+class TestCollapsedTermsAreRefusedAtConstruction:
+    """A schedule with no period is refused when the trade is written down.
+
+    It used to construct without complaint and raise a bare ``ValueError``
+    from the cached ``schedule`` at the first ``pv``, outside the
+    ``RatesEngineError`` contract.
+    """
+
+    TERMS = {"effective": date(2026, 5, 29), "maturity": date(2026, 5, 31)}
+
+    def test_ois(self):
+        from rates_engine.instruments.swaps import OISSwap
+
+        with pytest.raises(ConventionError, match="no accrual period"):
+            OISSwap(fixed_rate=0.04, **self.TERMS)
+
+    def test_irs(self):
+        from rates_engine.instruments.swaps import IRSwap
+
+        with pytest.raises(ConventionError, match="no accrual period"):
+            IRSwap(fixed_rate=0.04, **self.TERMS)
+
+    def test_cap(self):
+        from rates_engine.instruments.capfloor import CapFloor
+
+        with pytest.raises(ConventionError, match="no accrual period"):
+            CapFloor(strike=0.04, **self.TERMS)
+
+    def test_following_keeps_the_same_terms_valid(self):
+        from rates_engine.instruments.swaps import OISSwap
+
+        swap = OISSwap(fixed_rate=0.04, convention=_F, **self.TERMS)
+        assert swap.schedule.accrual_start == (date(2026, 5, 29),)
+        assert swap.schedule.accrual_end == (date(2026, 6, 1),)
 
 
 class TestSaturdayObservance:

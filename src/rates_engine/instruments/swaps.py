@@ -93,6 +93,8 @@ class OISSwap:
 
     Raises:
         UnsupportedConventionError: ``index`` is not an overnight rate.
+        ConventionError: The roll convention leaves the schedule no accrual
+            period, which is refused here rather than at the first price.
     """
 
     effective: date
@@ -113,6 +115,9 @@ class OISSwap:
                 f"an OIS floats on an overnight rate; {self.index.name} is a "
                 f"{self.index.tenor.value} term rate. Use IRSwap for a term index."
             )
+        # Built now, so terms the schedule cannot serve are refused when the
+        # swap is written down, not by the first pv() that reaches for them.
+        _ = self.schedule
 
     @property
     def rate_index(self) -> RateIndex:
@@ -227,6 +232,8 @@ class IRSwap:
         UnsupportedConventionError: The index is not a term rate in whole
             months (TIIE 28 accrues 28-day periods, which this schedule cannot
             generate), or its tenor disagrees with ``float_frequency_months``.
+        ConventionError: The roll convention leaves either leg's schedule no
+            accrual period, refused here rather than at the first price.
     """
 
     effective: date
@@ -264,6 +271,8 @@ class IRSwap:
         # hash alike. Changing one later with ``replace`` must change both.
         object.__setattr__(self, "index", index)
         object.__setattr__(self, "float_frequency_months", index.tenor.months)
+        # Both legs built now; see OISSwap.__post_init__.
+        _ = self.fixed_schedule, self.float_schedule
 
     @property
     def float_index(self) -> RateIndex:

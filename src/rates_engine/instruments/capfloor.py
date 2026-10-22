@@ -145,6 +145,9 @@ class CapFloor:
         # hash alike. Changing one later with ``replace`` must change both.
         object.__setattr__(self, "index", index)
         object.__setattr__(self, "frequency_months", index.tenor.months)
+        # Built now, so a roll convention that leaves no period raises
+        # ConventionError when the cap is written down, not at its first price.
+        _ = self.schedule
 
     @property
     def rate_index(self) -> RateIndex:

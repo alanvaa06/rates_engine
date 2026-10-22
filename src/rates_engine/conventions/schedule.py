@@ -16,6 +16,7 @@ from rates_engine.conventions.calendar import (
     HolidayCalendar,
     _nth_weekday,
 )
+from rates_engine.core.errors import ConventionError
 
 __all__ = ["imm_dates", "imm_date", "next_imm_on_or_after", "add_months", "Schedule"]
 
@@ -178,9 +179,12 @@ class Schedule:
             The schedule.
 
         Raises:
-            ValueError: ``maturity`` is not after ``effective``, the
-                frequency is not positive, or ``maturity`` adjusts onto or
-                before the adjusted effective date, which leaves no period.
+            ValueError: ``maturity`` is not after ``effective``, or the
+                frequency is not positive.
+            ConventionError: ``maturity`` adjusts onto or before the adjusted
+                effective date -- Friday 29 May 2026 to Sunday 31 May under
+                Modified Following -- so the roll convention leaves the trade
+                no accrual period at all.
         """
         if maturity <= effective:
             raise ValueError(f"maturity {maturity} must be after effective {effective}")
@@ -198,17 +202,19 @@ class Schedule:
             start = calendar.adjust(effective, convention)
             ends = [calendar.adjust(end, convention) for end in ends]
             # Roll dates are strictly after the unadjusted effective date, but
-            # adjusting both can land the first on the second. Only the front
-            # can collapse: later roll dates are a whole period apart, and no
-            # adjustment moves a date by that much.
-            while len(ends) > 1 and ends[0] <= start:
-                ends.pop(0)
+            # adjusting both can land the first on the second. Only the first
+            # can: the next one is a whole period later, and no adjustment
+            # moves a date by that much, so one test is enough.
             if ends[0] <= start:
-                raise ValueError(
-                    f"maturity {maturity} adjusts to {ends[0]} under {convention.value}, "
-                    f"which is not after the adjusted effective date {start}, so the "
-                    "schedule has no accrual period; move the maturity to a later date"
-                )
+                if len(ends) == 1:
+                    raise ConventionError(
+                        f"maturity {maturity} adjusts to {ends[0]} under "
+                        f"{convention.value}, which is not after the adjusted effective "
+                        f"date {start}, so the schedule has no accrual period. Move the "
+                        "maturity to a later date, or roll with a convention that keeps "
+                        "it after the start."
+                    )
+                ends = ends[1:]
         starts = [start, *ends[:-1]]
 
         payments = tuple(
