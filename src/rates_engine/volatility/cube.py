@@ -12,6 +12,15 @@ modelling choice with its own literature, and picking one silently would put
 an unexamined assumption under every price. v2 fills strikes; a surface
 model is a later question.
 
+**Beyond the quoted strikes it extrapolates, and says so.** A strike below
+the lowest quote or above the highest is still answered by the fitted smile,
+because a cap or a far-wing swaption needs a number, but nothing in the data
+constrains it there: the 1y5y fixture, quoted from 3.25% to 5.25%, gives
+248.5 bp at 20%. Such a reading is ``source="sabr_extrapolated"``,
+``reliable=False``, and carries an ``outside_quoted_strikes`` degradation that
+marks it ``assumed``. It used to come back as ``"sabr"`` with a provenance
+note calling it interpolated.
+
 **Units travel with the numbers.** A cube that does not say whether it holds
 normal basis points or lognormal percent, and whether its strikes are
 absolute or offsets from the forward, is four ways ambiguous. All of it is
@@ -20,18 +29,30 @@ carried on the cube and serialised with it (AC-3.4).
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import date
 from enum import StrEnum
 from typing import Any
 
 from rates_engine.core.errors import SliceNotQuotedError, VolatilityError
-from rates_engine.core.evidence import DataQuality, Evidence, Provenance
+from rates_engine.core.evidence import DataQuality, Degradation, Evidence, Provenance
 from rates_engine.core.results import EngineResult
 from rates_engine.models.sabr import DEFAULT_BETA, SABRCalibration, calibrate, normal_vol
 from rates_engine.volatility.units import Volatility, VolUnits
 
-__all__ = ["StrikeConvention", "CubePoint", "VolCube", "CubeQuote"]
+__all__ = ["StrikeConvention", "CubePoint", "VolCube", "CubeQuote", "STRIKE_TOLERANCE"]
+
+STRIKE_TOLERANCE = 1e-10
+"""Two strikes closer than this, in decimal rate, are one strike: a millionth of a bp.
+
+A strike asked for as ``forward + offset`` and the one a quote was written at
+differ by a rounding error -- up to 6.9e-18 on the test fixture -- and
+comparing them with ``==`` called 8 of its 27 quoted points unquoted,
+refitted them, and reported a SABR number in place of the quote. This is
+ten orders of magnitude above that noise and far below any spacing a market
+quotes strikes at.
+"""
 
 
 class StrikeConvention(StrEnum):
@@ -84,8 +105,11 @@ class CubeQuote(EngineResult):
         tenor: Tenor asked for, in years.
         strike: Absolute strike asked for, as a decimal.
         source: ``"quoted"`` when the grid held it, ``"sabr"`` when the smile
-            was fitted to produce it.
-        calibration: The fit behind a ``"sabr"`` answer, else ``None``.
+            was fitted to produce it between quoted strikes, and
+            ``"sabr_extrapolated"`` when the strike lies outside them.
+        calibration: The fit behind a SABR answer, else ``None``.
+        reliable: ``False`` for an extrapolation, which no quote constrains;
+            ``True`` for a quote or a fill between quotes.
     """
 
     volatility: Volatility
@@ -94,6 +118,7 @@ class CubeQuote(EngineResult):
     strike: float
     source: str
     calibration: SABRCalibration | None
+    reliable: bool = True
 
     def payload_fields(self) -> dict[str, Any]:
         """The quote, the point asked for, and the fit if there was one."""
@@ -103,6 +128,7 @@ class CubeQuote(EngineResult):
             "tenor": self.tenor,
             "strike": self.strike,
             "source": self.source,
+            "reliable": self.reliable,
             "calibration": self.calibration.payload_fields() if self.calibration else None,
         }
 
@@ -220,7 +246,10 @@ class VolCube:
             forward: The forward swap rate for this slice, as a decimal.
 
         Returns:
-            The :class:`CubeQuote`, carrying which of the two it was.
+            The :class:`CubeQuote`, carrying which of the three it was: a
+            quote (matched within :data:`STRIKE_TOLERANCE`), a SABR fill
+            between quoted strikes, or a SABR extrapolation beyond them,
+            marked unreliable and warned.
 
         Raises:
             SliceNotQuotedError: No quotes exist for this expiry and tenor.
@@ -234,8 +263,9 @@ class VolCube:
                 f"the cube has no quotes at expiry {expiry} tenor {tenor}; it holds "
                 f"{sorted(self.slices)}"
             )
-        for point in points:
-            if self.absolute_strike(point.strike, forward) == strike:
+        quoted = [(self.absolute_strike(p.strike, forward), p) for p in points]
+        for absolute, point in quoted:
+            if math.isclose(absolute, strike, rel_tol=0.0, abs_tol=STRIKE_TOLERANCE):
                 return CubeQuote(
                     evidence=Evidence(
                         produced_by="volatility.cube.volatility_at",
@@ -258,8 +288,31 @@ class VolCube:
                     calibration=None,
                 )
 
+        # The quoted strikes are sorted, and both conventions map them to
+        # absolute strikes monotonically, so the ends are the range.
+        lowest, highest = quoted[0][0], quoted[-1][0]
+        extrapolated = not lowest < strike < highest
         fit = self.calibrate_slice(expiry, tenor, forward)
         value = normal_vol(fit.parameters, forward, strike, expiry)
+        warnings: tuple[Degradation, ...] = ()
+        if extrapolated:
+            warnings = (
+                Degradation(
+                    code="outside_quoted_strikes",
+                    message=(
+                        f"strike {strike} is outside the quoted strikes of the "
+                        f"{expiry}x{tenor} smile, {lowest} to {highest}; the volatility is "
+                        "SABR extrapolated beyond its data, which no quote constrains."
+                    ),
+                    data_quality=DataQuality.ASSUMED,
+                ),
+            )
+        notes = (
+            "Extrapolated by SABR beyond the quoted strikes of this smile."
+            if extrapolated
+            else "Interpolated by SABR from the quoted strikes of this smile."
+        )
+        source = "sabr_extrapolated" if extrapolated else "sabr"
         return CubeQuote(
             evidence=Evidence(
                 produced_by="volatility.cube.volatility_at",
@@ -269,11 +322,11 @@ class VolCube:
                         series_id=f"smile:{expiry}x{tenor}",
                         instrument_kind="swaption_vol",
                         data_quality=DataQuality.SYNTHETIC,
-                        notes="Interpolated by SABR from the quoted strikes of this smile.",
+                        notes=notes,
                     ),
                 ),
                 fields={
-                    "source": "sabr",
+                    "source": source,
                     "as_of": self.as_of.isoformat(),
                     "units": self.units.value,
                     "strike_convention": self.strike_convention.value,
@@ -281,18 +334,22 @@ class VolCube:
                     "tenor": tenor,
                     "strike": strike,
                     "forward": forward,
+                    "extrapolated": extrapolated,
+                    "quoted_strike_range": [lowest, highest],
                     "quoted_strikes_used": list(fit.strikes),
                     "parameters": fit.parameters.to_dict(),
                     "rmse_bp": fit.rmse_bp,
                 },
+                warnings=warnings,
                 sources=(fit.evidence,),
             ),
             volatility=Volatility(value * 1e4, VolUnits.NORMAL_BP),
             expiry=expiry,
             tenor=tenor,
             strike=strike,
-            source="sabr",
+            source=source,
             calibration=fit,
+            reliable=not extrapolated,
         )
 
     def to_dict(self) -> dict[str, Any]:
