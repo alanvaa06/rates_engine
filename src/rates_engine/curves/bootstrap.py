@@ -424,12 +424,20 @@ def bootstrap_discount_curve(
     curve = DiscountCurve(
         as_of, (ordered[0].node_date,), (1.0,), interpolation, currency=currency
     )
-    curve = _solve_node(curve, ordered[0], previous_df=1.0)
+    # Under a non-local interpolation the first pass is only the seed of the
+    # sweeps, solved before the later nodes exist; a quote may need a factor
+    # above the previous node *then* that it does not need once they are in
+    # place. So the seed may rise, and require_monotone, after the sweeps,
+    # judges the curve that is returned. Log-linear's first pass is final, so
+    # a rising factor there is refused where it is found, as it always was.
+    seed_may_rise = interpolation not in _LOCAL_INTERPOLATIONS
+    curve = _solve_node(curve, ordered[0], previous_df=1.0, may_rise=seed_may_rise)
     for instrument in ordered[1:]:
         curve = _solve_node(
             curve.with_node(instrument.node_date, curve.dfs[-1]),
             instrument,
             previous_df=curve.dfs[-1],
+            may_rise=seed_may_rise,
         )
     iterations = 0
     if interpolation not in _LOCAL_INTERPOLATIONS:
@@ -552,9 +560,19 @@ def _convexity_models(instruments: Sequence[CalibrationInstrument]) -> set[str]:
 
 
 def _solve_node(
-    curve: DiscountCurve, instrument: CalibrationInstrument, *, previous_df: float
+    curve: DiscountCurve,
+    instrument: CalibrationInstrument,
+    *,
+    previous_df: float,
+    may_rise: bool = False,
 ) -> DiscountCurve:
-    """Solve the last node's discount factor so ``instrument`` reprices exactly."""
+    """Solve the last node's discount factor so ``instrument`` reprices exactly.
+
+    The root is bracketed below ``previous_df``: a factor rising into the
+    node is a negative forward over the segment, and for a final curve that
+    is refused. With ``may_rise`` -- the seed of a swept curve -- the bracket
+    is grown above it instead, and the settled curve is checked later.
+    """
     node = instrument.node_date
 
     def residual(df: float) -> float:
@@ -563,11 +581,26 @@ def _solve_node(
     upper = previous_df
     at_upper = residual(upper)
     if at_upper > 0.0:
-        raise CurveArbitrageError(
-            f"{instrument.label}: no discount factor at or below {previous_df!r} solves it. "
-            f"The quote implies a discount factor rising into {node}, which is a negative "
-            "zero rate over that segment rather than a curve."
+        if not may_rise:
+            raise CurveArbitrageError(
+                f"{instrument.label}: no discount factor at or below {previous_df!r} solves "
+                f"it. The quote implies a discount factor rising into {node}, which is a "
+                "negative zero rate over that segment rather than a curve."
+            )
+        lower, step = upper, 1e-6 * upper
+        for _ in range(200):
+            upper = lower + step
+            if residual(upper) <= 0.0:
+                break
+            step *= 2.0
+        else:  # pragma: no cover - a factor ~1e54 times the last would be needed
+            raise CurveArbitrageError(
+                f"{instrument.label}: no admissible discount factor brackets the quote"
+            )
+        solved = brentq(
+            residual, lower, upper, xtol=_SOLVER_XTOL, rtol=_SOLVER_RTOL, maxiter=200
         )
+        return curve.with_node(node, float(solved))
     lower = upper
     for _ in range(200):
         lower *= 0.5

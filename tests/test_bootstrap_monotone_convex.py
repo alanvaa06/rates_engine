@@ -27,7 +27,7 @@ from datetime import date
 import pytest
 
 from rates_engine.conventions.schedule import add_months
-from rates_engine.core.errors import BootstrapResidualError
+from rates_engine.core.errors import BootstrapResidualError, CurveArbitrageError
 from rates_engine.curves.bootstrap import (
     DEFAULT_ITERATION_TOLERANCE,
     DEFAULT_MAX_ITERATIONS,
@@ -164,6 +164,60 @@ class TestMonotoneConvexRepricesSwaps:
             for node in comparison.log_linear.nodes
         ]
         assert max(gaps) > 1e-9
+
+
+class TestTheFirstPassIsOnlyASeed:
+    """Alan Vazquez's PR #15 review: a valid monotone convex curve the first pass refused.
+
+    SOFR OIS at 1Y 3.00%, 2Y 1.502% and 3Y 2.00%. Solved before the 3Y node
+    exists, the 2Y quote needs a factor above the 1Y one, and the first pass
+    refused it with ``CurveArbitrageError``. Once the 3Y node is in place the
+    sweeps settle on a monotone curve: forwards of 0.38 bp over 2027-28 and
+    about 301 bp (ACT/360; 305.15 bp on ACT/365) over 2028-29.
+    """
+
+    @pytest.fixture
+    def quotes(self) -> tuple[SwapQuoteNode, ...]:
+        return tuple(
+            SwapQuoteNode(
+                OISSwap(effective=SPOT, maturity=add_months(SPOT, 12 * years), fixed_rate=rate),
+                rate,
+                label=f"{years}Y",
+            )
+            for years, rate in ((1, 0.03), (2, 0.01502), (3, 0.02))
+        )
+
+    def test_monotone_convex_fits_it(self, quotes):
+        result = bootstrap_discount_curve(AS_OF, quotes, interpolation="monotone_convex")
+        assert max(abs(r) for r in result.residuals_bp.values()) < 1e-8
+        assert result.curve.rising_segments == ()
+        nodes = (AS_OF, *result.curve.nodes)
+        forwards = [
+            result.curve.forward(a, b, compounding="continuous") * 1e4
+            for a, b in zip(nodes, nodes[1:], strict=False)
+        ]
+        assert forwards[1] == pytest.approx(0.38, abs=0.01)
+        assert forwards[1] > 0.0
+
+    def test_log_linear_still_refuses_it(self, quotes):
+        """Log-linear is local, its first pass is final, and on it the 2Y quote
+        really does need a rising factor."""
+        with pytest.raises(CurveArbitrageError, match="2Y"):
+            bootstrap_discount_curve(AS_OF, quotes)
+
+    def test_a_curve_that_stays_rising_is_still_refused(self):
+        """The seed may rise; the settled curve may not. A 2Y quote far below
+        the 1Y one needs a negative forward under any interpolation."""
+        quotes = tuple(
+            SwapQuoteNode(
+                OISSwap(effective=SPOT, maturity=add_months(SPOT, 12 * years), fixed_rate=rate),
+                rate,
+                label=f"{years}Y",
+            )
+            for years, rate in ((1, 0.03), (2, 0.005), (3, 0.02))
+        )
+        with pytest.raises(CurveArbitrageError, match="rises"):
+            bootstrap_discount_curve(AS_OF, quotes, interpolation="monotone_convex")
 
 
 class TestLogLinearIsUntouched:
