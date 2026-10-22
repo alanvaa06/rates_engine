@@ -160,13 +160,15 @@ class TestPositivity:
 
 
 class TestNonPositiveForwards:
-    """The collar protects positive intervals and leaves the others alone.
+    """The collar is sign-aware, and continuous where a forward crosses zero.
 
     Hagan and West bound each node forward into ``[0, 2 min(f_i, f_{i+1})]``
     to carry positivity from the inputs to the output. When a neighbouring
     discrete forward is negative that range is empty, and clamping into it
-    returned ``2 min f`` — a curve flat at -50 bp came out with instantaneous
-    forwards from -88 to -26 bp, where log-linear gives -50 exactly.
+    returned ``2 min f`` -- a curve flat at -50 bp came out with instantaneous
+    forwards from -88 to -26 bp, where log-linear gives -50 exactly. The bound
+    is now ``[min(0, 2 f), max(0, 2 f)]`` per neighbour: the paper's on
+    positive inputs, its mirror on negative ones, zero between the two.
     """
 
     def test_a_flat_negative_curve_stays_flat(self):
@@ -197,10 +199,45 @@ class TestNonPositiveForwards:
             day = AS_OF + timedelta(days=17 * k)
             assert bumped.instantaneous_forward(day) * 1e4 == pytest.approx(-0.5, abs=1e-9)
 
-    def test_a_negative_interval_is_not_clamped_into_an_empty_range(self):
+    def test_a_negative_curve_is_held_by_the_mirror_bound(self):
+        """Every node of an all-negative curve inside ``[2 max f, 0]`` of its
+        neighbours, as Hagan and West's ``[0, 2 min f]`` is for a positive one."""
+        times = (0.5, 1.0, 1.5)
+        discrete = (-0.002, -0.06, -0.06)
+        loose = node_forwards(times, discrete, collar=False)
+        tight = node_forwards(times, discrete)
+        assert max(loose) > 0.0, "the fixture no longer exercises the mirror bound"
+        assert tight[0] >= 2.0 * discrete[0] and tight[0] <= 0.0
+        for index in range(1, len(discrete)):
+            assert 2.0 * max(discrete[index - 1], discrete[index]) <= tight[index] <= 0.0
+        assert 2.0 * discrete[-1] <= tight[-1] <= 0.0
+
+    def test_a_node_between_signs_sits_at_zero(self):
+        forwards = node_forwards((1.0, 2.0, 3.0), (0.03, -0.01, 0.03))
+        assert forwards[1] == 0.0
+        assert forwards[2] == 0.0
+
+    @pytest.mark.parametrize("epsilon", [1e-12, 1e-8, 1e-6])
+    def test_the_collar_is_continuous_across_zero(self, epsilon):
+        """Alan Vazquez's case on PR #15: the previous collar dropped a negative
+        neighbour from the bound, so moving the middle forward from +1e-12 to
+        -1e-12 moved its nodes from 2e-12 to 1.5% and the 6M zero rate by 18 bp."""
         times = (1.0, 2.0, 3.0)
-        discrete = (-0.004, -0.006, -0.003)
-        assert node_forwards(times, discrete) == node_forwards(times, discrete, collar=False)
+        above = node_forwards(times, (0.03, +epsilon, 0.03))
+        below = node_forwards(times, (0.03, -epsilon, 0.03))
+        for up, down in zip(above, below, strict=True):
+            assert abs(up - down) <= 4.0 * epsilon + 1e-15
+
+    def test_the_collar_never_moves_a_node_faster_than_twice_its_input(self):
+        """A sweep of the middle forward through zero: every node forward is
+        Lipschitz in it, with constant two, which is what keeps a bump's
+        response continuous."""
+        times = (0.5, 1.0, 2.0, 3.0)
+        steps = [k * 1e-6 for k in range(-100, 101)]
+        rows = [node_forwards(times, (0.04, 0.035, f, 0.03)) for f in steps]
+        for previous, current in zip(rows, rows[1:], strict=False):
+            for a, b in zip(previous, current, strict=True):
+                assert abs(b - a) <= 2.0 * 1e-6 + 1e-15
 
     @pytest.mark.parametrize(
         "forwards",
@@ -210,17 +247,20 @@ class TestNonPositiveForwards:
             (0.0002, -0.006, 0.0002, -0.006, 0.0002, 0.03),  # a sawtooth across zero
         ],
     )
-    def test_positive_intervals_stay_positive_beside_negative_ones(self, forwards):
+    def test_every_interval_keeps_the_sign_of_its_average(self, forwards):
+        """Positive intervals stay non-negative and negative ones non-positive,
+        whatever their neighbours: PRD-002 AC-5.2 and its mirror."""
         times = tuple(0.5 * (k + 1) for k in range(len(forwards)))
         interpolant = MonotoneConvex(times, _log_dfs(times, forwards))
         grid = (0.0, *times)
         for index, forward in enumerate(forwards):
-            if forward <= 0.0:
-                continue
             left, right = grid[index], grid[index + 1]
             inside = [left + (right - left) * k / 50.0 for k in range(51)]
-            worst = min(interpolant.instantaneous_forward(t) for t in inside)
-            assert worst >= -1e-15, f"interval {index} reached {worst}"
+            values = [interpolant.instantaneous_forward(t) for t in inside]
+            if forward > 0.0:
+                assert min(values) >= -1e-15, f"interval {index} reached {min(values)}"
+            else:
+                assert max(values) <= 1e-15, f"interval {index} reached {max(values)}"
 
     @pytest.mark.parametrize(
         "forwards",
@@ -234,6 +274,69 @@ class TestNonPositiveForwards:
             left, right = grid[index], grid[index + 1]
             integral = -(interpolant.log_df(right) - interpolant.log_df(left))
             assert integral / (right - left) == pytest.approx(expected, abs=1e-14)
+
+
+class TestDV01AcrossBumpSizes:
+    """Alan Vazquez's repro on PR #15: a half-basis-point forward, bumped through zero.
+
+    Monotone convex, 3% forwards with 0.5 bp from 2027 to 2028, a three-year
+    payer at 2% on 100mm. Main gives -29,477.64 at every bump size. The
+    collar that dropped negative neighbours gave -29,477.64 at 0.25 and
+    0.5 bp but -29,314.43 at 1 bp and -29,395.30 at 2 bp: once the down bump
+    took the forward below zero the curve jumped.
+
+    With the sign-aware bound the curve moves continuously, but not
+    linearly: a node between a positive and a negative interval sits at
+    zero, where the paper's bound would put it at ``2 f``. A down bump that
+    crosses zero (1 and 2 bp here, not 0.25 or 0.5) therefore sees a kink,
+    and DV01 moves by about a dollar on 29,478. That residue is what keeping
+    each interval's sign costs; main had none only because it let the
+    positive interval go negative.
+    """
+
+    @pytest.fixture
+    def position(self):
+        from rates_engine.conventions.side import Side
+        from rates_engine.curves.discount import CurveSet
+        from rates_engine.instruments.swaps import OISSwap
+
+        as_of = date(2026, 1, 15)
+        nodes = tuple(date(2026 + k, 1, 15) for k in range(1, 5))
+        forwards = (0.03, 0.00005, 0.03, 0.03)
+        log, previous, dfs = 0.0, 0.0, []
+        for node, forward in zip(nodes, forwards, strict=True):
+            time = (node - as_of).days / 365.0
+            log -= forward * (time - previous)
+            previous = time
+            dfs.append(math.exp(log))
+        curve = DiscountCurve(as_of, nodes, tuple(dfs), "monotone_convex")
+        swap = OISSwap(
+            effective=date(2026, 1, 20),
+            maturity=date(2029, 1, 20),
+            fixed_rate=0.02,
+            notional=100_000_000.0,
+            side=Side.PAYER,
+        )
+        return swap, CurveSet(curve)
+
+    def test_it_is_main_s_number_at_small_bumps(self, position):
+        from rates_engine.risk.sensitivities import dv01
+
+        swap, curve_set = position
+        for bump in (0.25, 0.5):
+            assert dv01(swap, curve_set, bump_bp=bump).value == pytest.approx(
+                -29_477.64, abs=0.01
+            )
+
+    def test_it_barely_moves_with_the_bump_size(self, position):
+        from rates_engine.risk.sensitivities import dv01
+
+        swap, curve_set = position
+        base = dv01(swap, curve_set, bump_bp=0.25).value
+        assert dv01(swap, curve_set, bump_bp=0.5).value == pytest.approx(base, rel=1e-8)
+        for bump in (1.0, 2.0):
+            # Was 163 USD (5.5e-3) apart at 1 bp; now about a dollar.
+            assert dv01(swap, curve_set, bump_bp=bump).value == pytest.approx(base, rel=1e-4)
 
 
 class TestBeforeTheValuationDate:

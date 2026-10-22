@@ -30,12 +30,14 @@ The algorithm in three steps:
 
 1. Estimate an instantaneous forward at each node by interpolating the
    discrete forwards either side of it, with one-sided rules at the ends.
-2. Collar those estimates into ``[0, 2 f]`` for each neighbouring interval
-   whose discrete forward ``f`` is not negative -- Hagan and West's
-   ``[0, 2 min(f_i, f_{i+1})]`` when both are. This is what makes positive
-   inputs give positive outputs, which is PRD-002 AC-5.2. An interval with a
-   negative average forward has no positivity to protect, and is left out of
-   the bound rather than clamped into an empty range.
+2. Collar those estimates into ``[min(0, 2 f), max(0, 2 f)]`` for each
+   neighbouring interval's discrete forward ``f`` -- Hagan and West's
+   ``[0, 2 min(f_i, f_{i+1})]`` when both are positive. This is what makes
+   positive inputs give positive outputs, which is PRD-002 AC-5.2, and the
+   mirror bound does the same for negative ones. The paper writes only the
+   positive case; clamping a negative interval into its empty range bent a
+   flat negative curve, and dropping the negative neighbour instead made the
+   collar jump as a forward crossed zero.
 3. On each interval fit a quadratic in ``g = f - f_discrete`` chosen from four
    regions, each of which is the one shape that stays monotone there.
 
@@ -91,13 +93,16 @@ def node_forwards(
     inside ``[0, 2 min(f_i, f_{i+1})]`` cannot drive the quadratic on either
     neighbouring interval below zero.
 
-    The bound is taken over the neighbouring intervals whose discrete
-    forward is non-negative, and a node with none is not collared. Hagan and
-    West write the collar for positive inputs; applied to a negative one,
-    ``[0, 2 min]`` is empty and clamping into it returned ``2 min f``, which
-    bent a curve flat at -50 bp into forwards between -88 and -26 bp. When
-    every discrete forward is non-negative the bound is the paper's, and the
-    result is what it always was.
+    The bound is sign-aware: ``[min(0, 2 f), max(0, 2 f)]`` for every
+    neighbouring discrete forward ``f``. Hagan and West write the collar for
+    positive inputs; applied to a negative one, ``[0, 2 min]`` is empty and
+    clamping into it returned ``2 min f``, which bent a curve flat at -50 bp
+    into forwards between -88 and -26 bp. The mirror bound keeps a flat
+    negative curve flat, a node between a positive and a negative interval
+    sits at zero, and every bound moves continuously with the forwards, so a
+    bump through zero moves the curve continuously too. When every discrete
+    forward is non-negative the bound is the paper's, and the result is what
+    it always was.
 
     Args:
         times: Node times in years.
@@ -133,18 +138,25 @@ def node_forwards(
 
 
 def _collared(forward: float, neighbours: tuple[float, ...]) -> float:
-    """One node forward held inside ``[0, 2 f]`` for each non-negative neighbour ``f``.
+    """One node forward held inside ``[min(0, 2 f), max(0, 2 f)]`` for each neighbour ``f``.
 
-    With every neighbour non-negative this is ``min(max(0, x), 2 min f)``,
-    the expression the collar always evaluated, so those curves are
-    unchanged to the bit. A negative neighbour drops out of the bound; with
-    no neighbour left there is no positivity to protect and the forward is
-    returned as step 1 estimated it.
+    With every neighbour non-negative the bounds are ``0`` and ``2 min f``,
+    and ``min(max(0, x), 2 min f)`` is the expression the collar always
+    evaluated, so those curves are unchanged to the bit. With every
+    neighbour negative they are the mirror image, ``2 max f`` and ``0``.
+    With one of each the range closes on zero, and the forward crosses zero
+    at the node.
+
+    Every bound is a continuous function of the neighbouring forwards, so
+    the collar is too. The previous version dropped a negative neighbour
+    from the bound instead, and that was not: a forward moving from +1e-12
+    to -1e-12 moved the node forward next to it from 2e-12 to 1.5%, and a
+    risk bump that pushed a half-basis-point forward through zero made DV01
+    depend on the bump size.
     """
-    protected = [f for f in neighbours if f >= 0.0]
-    if not protected:
-        return forward
-    return min(max(0.0, forward), 2.0 * min(protected))
+    lower = max(min(0.0, 2.0 * f) for f in neighbours)
+    upper = min(max(0.0, 2.0 * f) for f in neighbours)
+    return min(max(lower, forward), upper)
 
 
 def _region(g0: float, g1: float) -> int:
