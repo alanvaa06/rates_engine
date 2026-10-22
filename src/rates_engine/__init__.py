@@ -89,6 +89,7 @@ from rates_engine.core.money import Currency, require_same_currency
 from rates_engine.core.results import SCHEMA_VERSION, EngineResult
 from rates_engine.curves.bootstrap import (
     BootstrapResult,
+    FuturesContract,
     FuturesNode,
     ParSwapNode,
     RealizedStubNode,
@@ -260,6 +261,7 @@ __all__ = [
     "FOMCStepFit",
     "forward_curve",
     "FRA",
+    "FuturesContract",
     "FuturesNode",
     "FuturesSettlement",
     "GreeksResult",
