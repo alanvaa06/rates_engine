@@ -246,8 +246,9 @@ class TestTwoBases:
 
     def test_the_two_agree_to_within_the_basis_factor(self, par_swap, strip, as_of):
         # A basis point on an ACT/360 simple forward against one on a
-        # continuously compounded zero rate: roughly 365/360, less the part of
-        # the swap covered by the realised stub, which is not a quote.
+        # continuously compounded zero rate: about (365/360)/(1 + F tau),
+        # 1.00365 on this strip, less the part of the swap covered by the
+        # realised stub, which is not a quote.
         hedge = strip_hedge(par_swap, strip, as_of=as_of)
         ratio = hedge.quote_parallel_dv01 / hedge.swap_dv01
         assert 1.0 < ratio < 365.0 / 360.0
