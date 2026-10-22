@@ -40,14 +40,18 @@ from scipy.optimize import least_squares
 from rates_engine.conventions.daycount import DayCount, year_fraction
 from rates_engine.core.errors import (
     BootstrapResidualError,
-    ImplausibleInputError,
     NoTenorQuoteSourceError,
     UnderdeterminedCurveError,
 )
 from rates_engine.core.evidence import DataQuality, Evidence, Provenance
 from rates_engine.core.money import Currency
 from rates_engine.core.results import EngineResult
-from rates_engine.curves.bootstrap import CalibrationInstrument, bootstrap_discount_curve
+from rates_engine.curves.bootstrap import (
+    CalibrationInstrument,
+    _refuse_non_finite,
+    _residual_keys,
+    bootstrap_discount_curve,
+)
 from rates_engine.curves.discount import DiscountCurve
 
 __all__ = [
@@ -327,19 +331,14 @@ def solve_dual_curve(
 
     # A NaN quote used to reach least_squares, which raised a bare ValueError
     # about residuals "not finite in the initial point". Checked here, on the
-    # starting curves, so every offender is named in the error.
+    # starting curves, with the bootstrap's own guard, so every offender is
+    # named in the error and the two messages cannot drift apart.
+    dual_keys = _residual_keys(dual)
     start = _initial_tenor(as_of, ois_curve, node_dates)
-    broken: list[tuple[str, float]] = []
-    for instrument in dual:
-        residual = instrument.residual_bp(ois_curve, start)
-        if not math.isfinite(residual):
-            broken.append((instrument.label, residual))
-    if broken:
-        raise ImplausibleInputError(
-            "these tenor and basis instruments have no finite residual, so a quote or a "
-            "term they are priced from is NaN or infinite: "
-            + ", ".join(f"{label!r} ({value!r} bp)" for label, value in broken)
-        )
+    _refuse_non_finite(
+        "tenor and basis instruments",
+        zip(dual_keys, (i.residual_bp(ois_curve, start) for i in dual), strict=True),
+    )
 
     sequential = _solve_tenor(as_of, ois_curve, dual, node_dates)
     if mode == "simultaneous":
@@ -363,21 +362,27 @@ def solve_dual_curve(
             for node in tenor_curve.nodes
         }
 
-    residuals = {i.label: i.residual_bp(ois_curve_final, tenor_curve) for i in dual}
-    # The simultaneous solve moves the OIS nodes too, so the OIS quotes are
-    # checked again on the curve actually returned, not on the bootstrap's.
-    ois_residuals = {i.label: i.residual_bp(ois_curve_final) for i in ois_instruments}
-    missed = {
-        label: value
-        for label, value in {**ois_residuals, **residuals}.items()
+    # One residual per instrument, checked per instrument, under keys made
+    # unique the way the bootstrap makes them: keyed by label, two unlabelled
+    # TenorParSwapNodes shared "tenor_par_swap" and the second hid the first,
+    # so a miss could go unreported. The simultaneous solve moves the OIS
+    # nodes too, so the OIS quotes are checked on the curve actually
+    # returned, not on the bootstrap's.
+    dual_values = [i.residual_bp(ois_curve_final, tenor_curve) for i in dual]
+    residuals = dict(zip(dual_keys, dual_values, strict=True))
+    ois_keys = [f"ois:{key}" for key in _residual_keys(ois_instruments)]
+    ois_values = [i.residual_bp(ois_curve_final) for i in ois_instruments]
+    missed = [
+        (key, value)
+        for key, value in zip(ois_keys + dual_keys, ois_values + dual_values, strict=True)
         if not abs(value) <= tolerance_bp
-    }
+    ]
     if missed:
         raise BootstrapResidualError(
             f"the {mode} dual-curve solve leaves these instruments outside the "
             f"{tolerance_bp} bp tolerance: "
-            f"{ {label: round(value, 6) for label, value in missed.items()} }. The quotes "
-            "may not be consistent with one OIS and one tenor curve."
+            + ", ".join(f"{key!r} ({value:.6f} bp)" for key, value in missed)
+            + ". The quotes may not be consistent with one OIS and one tenor curve."
         )
     forward_basis = {
         f"{begin.isoformat()}:{end.isoformat()}": (
@@ -399,14 +404,12 @@ def solve_dual_curve(
             ),
             "tolerance_bp": tolerance_bp,
             "instruments_used": [
-                {"label": i.label, **i.describe(), "residual_bp": residuals[i.label]}
-                for i in dual
+                {"label": i.label, **i.describe(), "residual_bp": value}
+                for i, value in zip(dual, dual_values, strict=True)
             ],
             "fit_residuals_bp": dict(residuals),
             "max_abs_residual_bp": max((abs(r) for r in residuals.values()), default=0.0),
-            "ois_max_abs_residual_bp": max(
-                (abs(r) for r in ois_residuals.values()), default=0.0
-            ),
+            "ois_max_abs_residual_bp": max((abs(r) for r in ois_values), default=0.0),
             "tenor_nodes": [n.isoformat() for n in tenor_curve.nodes],
             "forward_basis_bp": dict(forward_basis),
             "sequential_vs_simultaneous_bp": comparison,

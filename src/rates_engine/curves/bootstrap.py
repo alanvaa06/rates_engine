@@ -36,7 +36,7 @@ evidence chain into whatever consumes the curve.
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date
 from typing import Any, Protocol, runtime_checkable
@@ -527,7 +527,18 @@ def bootstrap_discount_curve(
     )
 
 
-def _residual_keys(instruments: Sequence[CalibrationInstrument]) -> list[str]:
+class _Pinning(Protocol):
+    """Anything with a label and the node it pins: either kind of calibration node."""
+
+    label: str
+
+    @property
+    def node_date(self) -> date:
+        """The node the instrument pins."""
+        ...
+
+
+def _residual_keys(instruments: Sequence[_Pinning]) -> list[str]:
     """Each instrument's label, made unique with its node date where two collide.
 
     A label that appears once is its own key, which keeps every labelled
@@ -640,16 +651,34 @@ def _require_finite_quotes(
         interpolation,
         currency=currency,
     )
-    broken: list[tuple[str, float]] = []
-    for inst in ordered:
-        residual = inst.residual_bp(probe)
-        if not math.isfinite(residual):
-            broken.append((inst.label, residual))
+    _refuse_non_finite(
+        "calibration instruments",
+        zip(_residual_keys(ordered), (inst.residual_bp(probe) for inst in ordered), strict=True),
+    )
+
+
+def _refuse_non_finite(what: str, residuals: Iterable[tuple[str, float]]) -> None:
+    """Refuse, naming each one, the instruments whose trial residual is not finite.
+
+    Shared by the bootstrap and the dual-curve solver, which each evaluate
+    their instruments on an ordinary trial curve first. A finite quote of
+    ordinary size gives a finite residual there; one that does not is NaN,
+    infinite, or so large the arithmetic overflows (a forward of 1e308 gives
+    a residual of -inf), and none of those is a number to solve for.
+
+    Args:
+        what: How the message names the instruments.
+        residuals: ``(key, residual in bp)`` per instrument, keys unique.
+
+    Raises:
+        ImplausibleInputError: Any residual is not finite.
+    """
+    broken = [(key, value) for key, value in residuals if not math.isfinite(value)]
     if broken:
         raise ImplausibleInputError(
-            "these calibration instruments have no finite residual, so a quote or a "
-            "term they are priced from is NaN or infinite: "
-            + ", ".join(f"{label!r} ({value!r} bp)" for label, value in broken)
+            f"these {what} have no finite residual on a trial curve, so a quote or a term "
+            "they are priced from is NaN, infinite, or too large to price: "
+            + ", ".join(f"{key!r} ({value!r} bp)" for key, value in broken)
             + ". Fix or drop them; a missing quote is not a number to solve for."
         )
 

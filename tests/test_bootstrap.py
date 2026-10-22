@@ -255,6 +255,31 @@ class TestNonFiniteQuotes:
         assert first.label in str(excinfo.value)
         assert second.label in str(excinfo.value)
 
+    def test_a_finite_quote_too_large_to_price_is_not_called_nan(self, as_of, strip):
+        """A forward of 1e308 is finite; its residual overflows to -inf. The
+        message used to call it "NaN or infinite", which sends the reader
+        looking for a NaN that is not there."""
+        huge = replace(strip[3], forward_rate=1e308)
+        with pytest.raises(ImplausibleInputError, match="too large to price"):
+            bootstrap_discount_curve(as_of, strip[:3] + (huge,) + strip[4:])
+
+    def test_the_dual_solver_refuses_with_the_same_guard(self):
+        """One guard for both solvers, so the two messages cannot drift."""
+        from rates_engine.curves.dual import BasisSwapNode, solve_dual_curve
+
+        as_of = date(2026, 1, 15)
+        end = date(2027, 1, 15)
+        ois = (RealizedStubNode(end=end, accrual_factor=1.04),)
+        broken = BasisSwapNode(((as_of, end),), float("nan"), label="basis_nan")
+        with pytest.raises(ImplausibleInputError) as dual:
+            solve_dual_curve(as_of, ois, (), (broken,))
+        with pytest.raises(ImplausibleInputError) as single:
+            bootstrap_discount_curve(
+                as_of, (RealizedStubNode(end=end, accrual_factor=float("nan")),)
+            )
+        shared = "have no finite residual on a trial curve"
+        assert shared in str(dual.value) and shared in str(single.value)
+
 
 class TestEvidence:
     """PRD-001 AC-3.5: the evidence carries everything needed to audit the fit."""

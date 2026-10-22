@@ -281,6 +281,31 @@ class TestTheSolverIsChecked:
         result = solve_dual_curve(AS_OF, _ois_instruments(), tenor, basis_nodes)
         assert result.evidence.fields["ois_max_abs_residual_bp"] < 0.01
 
+    def test_unlabelled_instruments_do_not_shadow_each_other(self):
+        """Alan Vazquez's PR #15 review: keyed by label, two unlabelled
+        ``TenorParSwapNode``s shared ``tenor_par_swap``, the second hid the
+        first in the residuals, and a miss on the first went unreported. They
+        are keyed as the bootstrap keys them now, with the node date."""
+        tenor, basis_nodes = _dual_instruments(0.0015)
+        unlabelled = tuple(
+            TenorParSwapNode(
+                start=node.start,
+                payment_dates=node.payment_dates,
+                year_fractions=node.year_fractions,
+                float_periods=node.float_periods,
+                quoted_rate=node.quoted_rate,
+            )
+            for node in tenor
+        )
+        result = solve_dual_curve(AS_OF, _ois_instruments(), unlabelled, basis_nodes)
+        assert len(result.residuals_bp) == len(unlabelled) + len(basis_nodes)
+        with pytest.raises(BootstrapResidualError) as excinfo:
+            solve_dual_curve(
+                AS_OF, _ois_instruments(), unlabelled, basis_nodes, tolerance_bp=1e-30
+            )
+        for node in unlabelled:
+            assert f"tenor_par_swap@{node.node_date.isoformat()}" in str(excinfo.value)
+
     @pytest.mark.parametrize("bad", [float("nan"), float("inf")])
     def test_a_non_finite_quote_refuses_by_name(self, bad):
         """It used to reach scipy, which raised a bare ``ValueError``."""
