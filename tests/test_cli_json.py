@@ -302,6 +302,20 @@ class TestTyposThroughTheCLI:
         # and that is not a typo.
         assert main([command, "--config", str(config_path), "--json"]) == 0
 
+    @pytest.mark.parametrize("command", ["bootstrap", "price", "hedge"])
+    def test_a_typo_in_any_block_stops_every_command(
+        self, command, config_path, tmp_path, capsys
+    ):
+        # With one desk file, `rateng price` used to accept hedge.shock_bps
+        # because price does not read the hedge block.
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        config["hedge"]["shock_bps"] = config["hedge"].pop("shocks_bp")
+        path = tmp_path / "typo.json"
+        path.write_text(json.dumps(config), encoding="utf-8")
+        assert main([command, "--config", str(path), "--json"]) == 1
+        message = json.loads(capsys.readouterr().out)["error"]["message"]
+        assert "hedge.shock_bps (did you mean shocks_bp?)" in message
+
 
 class TestConfigFormats:
     """JSON is native so the core install runs everything; YAML needs its extra."""

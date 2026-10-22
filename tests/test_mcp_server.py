@@ -188,15 +188,14 @@ class TestErrorsReachTheCallerNamed:
 
     def test_a_malformed_config_is_not_a_silent_success(self, config):
         """It must raise rather than come back as a curve built from what
-        parsed. It used to raise a bare ``KeyError('price')``; the command
-        table now answers a lookup of a key that is not there with a
-        refusal naming the path, which is what an agent can act on."""
+        parsed. It used to raise a bare ``KeyError('price')``; the config is
+        now checked against the schema first, and a required key that is
+        not there is a refusal naming the path, which an agent can act on."""
         broken = json.loads(json.dumps(config))
         del broken["curve"]["futures"][0]["price"]
         with pytest.raises(ConfigurationError) as excinfo:
             mcp_server.call_tool("bootstrap", broken)
         assert "curve.futures[0].price is missing" in str(excinfo.value)
-        assert isinstance(excinfo.value.__cause__, KeyError)
 
     def test_a_misspelt_key_is_refused_by_the_tool_as_by_the_cli(self, config):
         broken = json.loads(json.dumps(config))

@@ -8,22 +8,26 @@ import.
 **Every key is accounted for.** A misspelt key used to fall back to its
 default without a word: ``notionl`` priced a hundredth of the trade asked
 for, ``convexty`` switched the convexity adjustment off, and both exited 0.
-:func:`track_reads` wraps a config in a mapping that records which keys the
-command looked up, and :func:`refuse_unknown_keys` turns anything the command
-reached but neither read nor finds in :data:`CONFIG_SCHEMA` into a
-:class:`~rates_engine.core.errors.ConfigurationError` naming its path. The
-check is driven by what the code reads rather than by a list of allowed keys
-per command, so a key a command starts reading is accepted the moment it is
-read; the schema only decides whether a key the command did *not* read
-belongs to another command (one file serves ``bootstrap``, ``price`` and
-``hedge``) or to nobody.
+:func:`require_config`, which every handler that reads a config calls first,
+checks the whole document against :data:`CONFIG_SCHEMA` before anything is
+computed. A key the schema does not document is refused with its path and
+the closest accepted key -- anywhere in the file, including a block only
+another command reads, because one desk file serves every command.
+
+**Adding a key** is one entry in :data:`CONFIG_SCHEMA`, under the block that
+holds it, with a ``description`` that states its units; the schema's
+docstring lists the fields. Until the entry exists the key is refused as
+unknown, and ``tests/test_app_config.py`` fails for any key a handler looks
+up that the schema does not document.
 """
 
 from __future__ import annotations
 
+import copy
 import difflib
 import json
-from collections.abc import Iterator, Mapping
+import re
+from collections.abc import Mapping
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -36,17 +40,18 @@ __all__ = [
     "as_date",
     "require_config",
     "CONFIG_SCHEMA",
-    "track_reads",
-    "refuse_unknown_keys",
+    "key_refusal",
 ]
 
 _CURVE_COMMANDS = ["bootstrap", "price", "hedge"]
 _FX_COMMANDS = ["fx-forward", "hedge-structures"]
 
 _V03_PAR_SWAP = (
-    "the v0.3 par-swap shape (start, payment_dates, year_fractions) is refused with "
-    "the migration: give effective, maturity and rate, and the dates are generated "
-    "with the payment lag the old shape ignored"
+    "the v0.3 par-swap shape (start, payment_dates, year_fractions) is refused. A par "
+    "quote is given as the swap it quotes: effective, maturity and rate, with optional "
+    "frequency_months (12), payment_lag_days (2) and label; the dates and year fractions "
+    "are generated from those terms, payment lag included, which the old shape ignored "
+    "and so mispriced a SOFR OIS by several basis points"
 )
 
 CONFIG_SCHEMA: dict[str, Any] = {
@@ -125,8 +130,9 @@ CONFIG_SCHEMA: dict[str, Any] = {
                         "description": (
                             'Which future the entry is, "SR1" or "SR3". It sizes the hedge: '
                             "an SR1 is worth 41.67 USD per basis point and an SR3 25.00. "
-                            "Left out, the period decides: a calendar month is SR1, anything "
-                            "else is sized as SR3."
+                            "Left out, the period decides: a calendar month is SR1, an IMM "
+                            "quarter SR3, and anything else is sized as SR3 with a "
+                            "futures_contract_assumed degradation."
                         ),
                     },
                 },
@@ -283,7 +289,9 @@ CONFIG_SCHEMA: dict[str, Any] = {
                 "description": (
                     "USD per basis point for one contract, applied to every contract. Left "
                     "out, each futures entry is sized at its own tick: 41.67 for SR1, 25.00 "
-                    "for SR3. Refused if it contradicts an entry's declared contract."
+                    "for SR3. Refused if it contradicts an entry's declared contract, or "
+                    "the contract its period names (a calendar month is SR1, an IMM quarter "
+                    "SR3)."
                 ),
             },
             "require_full_coverage": {
@@ -297,7 +305,8 @@ CONFIG_SCHEMA: dict[str, Any] = {
             "shocks_bp": {
                 "default": list(DEFAULT_SHOCKS_BP),
                 "description": (
-                    "Parallel shocks for the hedged position's shock table, in basis points."
+                    "Parallel shocks for the hedged position's shock table, in basis points, "
+                    "none of them zero: a zero shock is refused."
                 ),
             },
         },
@@ -432,18 +441,44 @@ CONFIG_SCHEMA: dict[str, Any] = {
         },
     },
 }
-"""Every key a command reads, nested as the config nests them.
+"""Every key any command reads, nested as the config nests them.
 
-Each entry has a ``description`` stating units and conventions, and where
-they apply ``required``, ``default`` and ``used_by`` (the commands that read
-it; a nested key without one is read by its block's commands). ``keys`` holds
-a nested block and ``items`` the entries of a list. An entry with ``refused``
-is a key a command recognises in order to reject it with a migration.
+The contract :func:`require_config` checks a document against, and what
+``rateng describe --json`` publishes under ``config`` (as a copy). Each entry
+is a mapping with these fields:
 
-This is what ``rateng describe --json`` publishes under ``config``, and what
-:func:`refuse_unknown_keys` consults for a key the command did not read.
-``tests/test_app_config.py`` holds it to the code: every key a command asks
-for must be here, and ``used_by`` must be exactly the commands that read it.
+``description``
+    What the key holds, in a sentence that states its units and convention.
+    Every entry has one.
+``required``
+    ``True`` when a command that reads the block cannot run without the key.
+    Absent, or ``null``, it is refused by name.
+``default``
+    What an absent key means. A key whose default is a value is refused when
+    given as ``null``; one whose default is ``None`` reads ``null`` as absent.
+``used_by``
+    The commands that read the key; a nested key without it is read by its
+    block's commands. ``required`` and ``null`` are checked only for those
+    commands, while an unknown key is refused by every command.
+``keys`` / ``items``
+    A nested block, or a list of blocks, each a mapping of entries like this.
+``refused``
+    A key recognised in order to refuse it; the text is the migration.
+
+To add a key, add its entry where the config nests it. A new top-level
+block -- the ``fixings`` a seasoned trade needs, say -- is one entry::
+
+    "fixings": {
+        "used_by": ["price", "hedge"],
+        "description": "Published overnight fixings, as decimals, by ISO date.",
+        "keys": {...},  # one entry per key the block takes
+    },
+
+``tests/test_app_config.py`` holds the schema to the handlers: every key a
+handler looks up must be documented, ``used_by`` must be exactly the
+commands that read the key, a required key must be read by every command
+that requires it, and leaving out or nulling any key must end in a refusal
+or a result, never a ``KeyError`` or a ``TypeError``.
 """
 
 
@@ -499,24 +534,41 @@ def as_date(value: str | date) -> date:
     return date.fromisoformat(value)
 
 
-def require_config(config: dict[str, Any] | None, command: str) -> dict[str, Any]:
-    """The config, or a named refusal saying which command needed one.
+def require_config(config: Mapping[str, Any] | None, command: str) -> dict[str, Any]:
+    """The config checked against :data:`CONFIG_SCHEMA`, or a refusal naming what is wrong.
 
-    Every handler in :data:`~rates_engine.app.commands.COMMANDS` has the same
-    signature so that every interface can expose the table unchanged. Two of
-    them genuinely take no config; the others go through here, so that
-    calling them without one is a sentence rather than whichever ``KeyError``
-    happens to come first.
+    Every handler in :data:`~rates_engine.app.commands.COMMANDS` that reads a
+    config calls this first, so the check runs however the handler is reached
+    -- the CLI, the MCP server, or a caller of the function itself. Two
+    handlers genuinely take no config and do not call it.
+
+    The whole document is checked, not only the blocks ``command`` reads,
+    because one file serves several commands and a typo in the ``hedge``
+    block is as wrong when ``price`` reads the file as when ``hedge`` does:
+
+    - every key must be documented where it sits, or start with ``_`` (a
+      comment, at any depth); anything else is a typo or an invention;
+    - a key documented as ``refused`` is refused with its migration;
+    - a block documented as a mapping or a list must be one.
+
+    For the blocks ``command`` reads (``used_by``) it also checks that every
+    ``required`` key is there, and that a key whose default is a value is not
+    given as ``null``. A ``null`` for a key whose default is ``null`` is the
+    same as leaving it out.
 
     Args:
         config: The configuration mapping, or ``None``.
-        command: The command's name, for the message.
+        command: The command's name, as the CLI spells it (``"price"``).
 
     Returns:
-        The configuration mapping.
+        A copy of the config as plain ``dict`` and ``list`` values, without
+        comment keys and without the ``null`` values that mean "absent". The
+        caller's mapping is not modified.
 
     Raises:
-        ConfigurationError: ``config`` is ``None``.
+        ConfigurationError: ``config`` is ``None`` or not a mapping, or it
+            fails a check above. One refusal lists every problem, each with
+            its path, and for a misspelt key the closest accepted one.
     """
     if config is None:
         raise ConfigurationError(
@@ -524,115 +576,41 @@ def require_config(config: dict[str, Any] | None, command: str) -> dict[str, Any
             "describe and list-instruments are the two commands that answer "
             "without one."
         )
-    return config
+    if not isinstance(config, Mapping):
+        raise ConfigurationError(
+            f"{command} needs a configuration that is a mapping of keys; got "
+            f"{_kind(config)}."
+        )
+    problems = _Problems(command)
+    checked = _check_block(config, CONFIG_SCHEMA, "", None, problems)
+    if problems:
+        raise ConfigurationError(problems.message())
+    return checked
 
 
-class _ReadTracker(dict[Any, Any]):
-    """A config mapping that remembers which of its keys were looked up.
+def key_refusal(
+    where: str, *, refused: tuple[str, ...] = (), missing: tuple[str, ...] = ()
+) -> str:
+    """The words :func:`require_config` uses for refused or missing keys of one block.
 
-    A ``dict`` subclass rather than a ``Mapping``, so that a command body
-    checking ``isinstance(block, dict)`` or passing a block on as a ``dict``
-    behaves exactly as it does on the plain config. Nested mappings, and
-    mappings inside lists, are wrapped when the tracker is built, so a read
-    anywhere in the tree is recorded on the node it happened at.
-
-    A *read* is ``block[key]``, ``block.get(key)``, ``key in block`` for a key
-    that is present, ``pop`` and ``setdefault``. ``items()`` and ``values()``
-    read every key, and so does copying the block -- ``dict(block)``,
-    ``{**block}``, ``block.copy()``, ``copy.deepcopy`` -- because CPython
-    copies a ``dict`` subclass that overrides ``__iter__`` through
-    ``__getitem__``, and code that copies a block has taken responsibility for
-    all of it (``load_program`` refuses unknown programme keys itself).
-    Listing the keys -- iteration, ``keys()``, ``len`` -- is not a read: it is
-    what a validator does before it reads.
-    """
-
-    def __init__(self, source: Mapping[Any, Any], missing: list[tuple[Any, Any, KeyError]]) -> None:
-        super().__init__((key, _tracked(value, missing)) for key, value in source.items())
-        self._given: tuple[Any, ...] = tuple(dict.keys(self))
-        self._read: set[Any] = set()
-        self._asked: set[Any] = set()
-        self._missing = missing
-
-    def __getitem__(self, key: Any) -> Any:
-        self._asked.add(key)
-        if not dict.__contains__(self, key):
-            # Raised rather than re-raised from dict, so the dispatcher can
-            # tell this lookup's KeyError from any other by identity and turn
-            # only this one into a sentence naming the path.
-            error = KeyError(key)
-            self._missing.append((self, key, error))
-            raise error
-        self._read.add(key)
-        return dict.__getitem__(self, key)
-
-    def get(self, key: Any, default: Any = None) -> Any:
-        self._asked.add(key)
-        if dict.__contains__(self, key):
-            self._read.add(key)
-            return dict.__getitem__(self, key)
-        return default
-
-    def __contains__(self, key: object) -> bool:
-        self._asked.add(key)
-        present = dict.__contains__(self, key)
-        if present:
-            self._read.add(key)
-        return present
-
-    def pop(self, key: Any, *default: Any) -> Any:
-        self._asked.add(key)
-        self._read.add(key)
-        return dict.pop(self, key, *default)
-
-    def setdefault(self, key: Any, default: Any = None) -> Any:
-        self._asked.add(key)
-        self._read.add(key)
-        return dict.setdefault(self, key, default)
-
-    def __delitem__(self, key: Any) -> None:
-        self._read.add(key)
-        dict.__delitem__(self, key)
-
-    def items(self) -> Any:
-        self._read.update(self._given)
-        return dict.items(self)
-
-    def values(self) -> Any:
-        self._read.update(self._given)
-        return dict.values(self)
-
-    def __iter__(self) -> Iterator[Any]:
-        # Overridden only to exist: a dict subclass with its own __iter__ is
-        # copied by dict(), {**x} and .copy() through keys() and
-        # __getitem__, which is what records a copy as a read.
-        return dict.__iter__(self)
-
-
-def _tracked(value: Any, missing: list[tuple[Any, Any, KeyError]]) -> Any:
-    """``value`` with every mapping in it, at any depth, wrapped in a tracker."""
-    if isinstance(value, Mapping):
-        return _ReadTracker(value, missing)
-    if isinstance(value, list):
-        return [_tracked(element, missing) for element in value]
-    if isinstance(value, tuple):
-        return tuple(_tracked(element, missing) for element in value)
-    return value
-
-
-def track_reads(config: Mapping[str, Any]) -> dict[str, Any]:
-    """A copy of ``config`` that records which keys are read, for :func:`refuse_unknown_keys`.
-
-    The copy compares equal to ``config`` and leaves it untouched; nested
-    blocks, and blocks inside lists, are tracked too.
+    For a builder that checks a block itself, so that a caller who went round
+    :func:`require_config` reads the same refusal as one who did not.
 
     Args:
-        config: The configuration mapping, as loaded.
+        where: The block's path, with list indices (``"curve.par_swaps[0]"``).
+        refused: Keys present in the block that the schema refuses.
+        missing: Required keys absent from it.
 
     Returns:
-        The tracking copy, a ``dict``.
+        The refusal text.
     """
-    return _ReadTracker(config, [])
+    level = _level_at(where)
+    problems = _Problems(None)
+    for key in refused:
+        problems.refused.append((where, key, str((level.get(key) or {}).get("refused", ""))))
+    for key in missing:
+        problems.missing.append((_join(where, key), level.get(key) or {}))
+    return problems.message()
 
 
 def _is_comment(key: Any) -> bool:
@@ -644,58 +622,164 @@ def _join(path: str, key: Any) -> str:
     return f"{path}.{key}" if path else str(key)
 
 
-def _level(spec: Any, field: str) -> dict[str, Any] | None:
-    """The documented keys one level down from ``spec``, if it documents any."""
-    if isinstance(spec, dict) and isinstance(spec.get(field), dict):
-        return spec[field]
-    return None
+def _kind(value: Any) -> str:
+    """What a JSON reader would call ``value``."""
+    if isinstance(value, bool):
+        return "true or false"
+    if isinstance(value, (int, float)):
+        return f"the number {value!r}"
+    if isinstance(value, str):
+        return f"the string {value!r}"
+    if isinstance(value, Mapping):
+        return "a mapping"
+    if isinstance(value, (list, tuple)):
+        return "a list"
+    return type(value).__name__
 
 
-def _entered(
-    node: _ReadTracker,
-    level: dict[str, Any] | None = CONFIG_SCHEMA,
-    path: str = "",
-    pattern: str = "",
-) -> Iterator[tuple[str, str, _ReadTracker, dict[str, Any] | None]]:
-    """Every block the command entered, with its path and its documented keys.
+def _level_at(where: str) -> dict[str, Any]:
+    """The documented keys of the block at ``where``, list indices ignored."""
+    level: dict[str, Any] = CONFIG_SCHEMA
+    for name in re.sub(r"\[\d*\]", "", where).split(".") if where else ():
+        spec = level.get(name) or {}
+        level = spec.get("keys") or spec.get("items") or {}
+    return level
 
-    A block is entered when the command read the key holding it, so a block
-    it never touched -- another command's -- is not walked: what is in it is
-    that command's business. Comment keys are not walked either.
 
-    Yields:
-        ``(path, pattern, block, level)``: the path with list indices
-        (``curve.futures[2]``), the same with ``[]`` for every index, the
-        tracker, and the schema level documenting its keys (``None`` for a
-        block the schema does not describe).
-    """
-    yield path, pattern, node, level
-    for key in node._given:
-        if key not in node._read or _is_comment(key):
+class _Problems:
+    """Everything wrong with one config, gathered so that one refusal says all of it."""
+
+    def __init__(self, command: str | None) -> None:
+        self.command = command
+        self.unknown: list[tuple[str, dict[str, Any], Any]] = []
+        self.refused: list[tuple[str, str, str]] = []
+        self.missing: list[tuple[str, dict[str, Any]]] = []
+        self.nulls: list[tuple[str, dict[str, Any]]] = []
+        self.shapes: list[tuple[str, str, Any]] = []
+
+    def __bool__(self) -> bool:
+        return bool(self.unknown or self.refused or self.missing or self.nulls or self.shapes)
+
+    def applies(self, readers: list[str] | None) -> bool:
+        """Whether the command reads a block that ``readers`` read."""
+        return self.command is None or readers is None or self.command in readers
+
+    def message(self) -> str:
+        """The refusal, a sentence per problem, unknown keys first."""
+        sentences: list[str] = []
+        if self.unknown:
+            named = ", ".join(
+                f"{_join(path, key)}{_hint(key, _accepted(level), path)}"
+                for path, level, key in self.unknown
+            )
+            config = f"the {self.command} config" if self.command else "the config"
+            sentences.append(f"unknown key(s) in {config}: {named}.")
+            blocks = {path: level for path, level, _ in self.unknown}
+            for path, level in blocks.items():
+                where = f"in {path}" if path else "at the top level"
+                sentences.append(f"Accepted {where}: {', '.join(_accepted(level))}.")
+            sentences.append(
+                "A key that is quietly ignored is a setting that does nothing, which is "
+                "worse than a config that fails to load; keys starting with '_' are comments."
+            )
+        grouped: dict[tuple[str, str], list[str]] = {}
+        for path, key, text in self.refused:
+            grouped.setdefault((path, text), []).append(key)
+        for (path, text), keys in grouped.items():
+            sentences.append(f"{path or 'The top level'} uses {', '.join(keys)}: {text}.")
+        needs = f", and {self.command} needs it" if self.command else ""
+        for where, spec in self.missing:
+            sentences.append(f"{where} is missing{needs}{_about(spec)}.")
+        for where, spec in self.nulls:
+            sentences.append(
+                f"{where} is null: give a value, or leave the key out for its default, "
+                f"{json.dumps(spec.get('default'))}."
+            )
+        for where, expected, value in self.shapes:
+            sentences.append(f"{where} must be {expected}, not {_kind(value)}.")
+        sentences.append("`rateng describe --json` lists every key under `config`.")
+        return " ".join(sentences)
+
+
+def _about(spec: dict[str, Any]) -> str:
+    """`` (what the key holds)``, from its description."""
+    about = str(spec.get("description", ""))
+    if about[:1].isupper() and about[1:2].islower():
+        about = about[0].lower() + about[1:]
+    return f" ({about.rstrip('.')})" if about else ""
+
+
+def _check_block(
+    block: Mapping[Any, Any],
+    level: dict[str, Any],
+    path: str,
+    readers: list[str] | None,
+    problems: _Problems,
+) -> dict[str, Any]:
+    """One mapping checked against its documented keys, and its clean copy."""
+    checked: dict[str, Any] = {}
+    for key, value in block.items():
+        if _is_comment(key):
             continue
-        spec = level.get(key) if level is not None else None
-        value = dict.get(node, key)
-        child_path, child_pattern = _join(path, key), _join(pattern, key)
-        if isinstance(value, _ReadTracker):
-            yield from _entered(value, _level(spec, "keys"), child_path, child_pattern)
-        elif isinstance(value, (list, tuple)):
-            items = _level(spec, "items")
-            for index, element in enumerate(value):
-                if isinstance(element, _ReadTracker):
-                    yield from _entered(
-                        element, items, f"{child_path}[{index}]", f"{child_pattern}[]"
-                    )
+        spec = level.get(key) if isinstance(key, str) else None
+        if spec is None:
+            problems.unknown.append((path, level, key))
+            continue
+        if "refused" in spec:
+            problems.refused.append((path, key, spec["refused"]))
+            continue
+        uses = spec.get("used_by", readers)
+        where = _join(path, key)
+        if value is None:
+            # null is "absent" where absent means null. Anywhere else it
+            # would reach the handler as a value nobody can compute with --
+            # float(None) for a notional, bool(None) turning strict off.
+            if problems.applies(uses) and spec.get("required"):
+                problems.missing.append((where, spec))
+            elif problems.applies(uses) and spec.get("default") is not None:
+                problems.nulls.append((where, spec))
+            continue
+        checked[key] = _check_value(value, spec, where, uses, problems)
+    for key, spec in level.items():
+        uses = spec.get("used_by", readers)
+        if spec.get("required") and key not in block and problems.applies(uses):
+            problems.missing.append((_join(path, key), spec))
+    return checked
+
+
+def _check_value(
+    value: Any, spec: dict[str, Any], where: str, readers: list[str] | None, problems: _Problems
+) -> Any:
+    """A documented key's value, walked when the schema says it is a block or a list of them."""
+    if "keys" in spec:
+        if not isinstance(value, Mapping):
+            problems.shapes.append((where, "a mapping of keys", value))
+            return value
+        return _check_block(value, spec["keys"], where, readers, problems)
+    if "items" in spec:
+        if not isinstance(value, (list, tuple)):
+            problems.shapes.append((where, "a list", value))
+            return value
+        entries: list[Any] = []
+        for index, entry in enumerate(value):
+            at = f"{where}[{index}]"
+            if not isinstance(entry, Mapping):
+                problems.shapes.append((at, "a mapping of keys", entry))
+                continue
+            entries.append(_check_block(entry, spec["items"], at, readers, problems))
+        return entries
+    return copy.deepcopy(value)
 
 
 def _homes(level: dict[str, Any] = CONFIG_SCHEMA, prefix: str = "") -> dict[str, list[str]]:
-    """For every documented key name, the blocks that accept it."""
+    """For every accepted key name, the blocks that accept it."""
     found: dict[str, list[str]] = {}
     for key, spec in level.items():
         if "refused" not in spec:
             found.setdefault(key, []).append(prefix or "the top level")
         for field, suffix in (("keys", ""), ("items", "[]")):
-            nested = _level(spec, field)
-            if nested is not None:
+            nested = spec.get(field)
+            if isinstance(nested, dict):
                 for name, places in _homes(nested, f"{_join(prefix, key)}{suffix}").items():
                     found.setdefault(name, []).extend(places)
     return found
@@ -704,91 +788,23 @@ def _homes(level: dict[str, Any] = CONFIG_SCHEMA, prefix: str = "") -> dict[str,
 _HOMES = _homes()
 
 
-def _accepted(node: _ReadTracker, level: dict[str, Any] | None) -> list[str]:
-    """What a block accepts: its documented keys plus any the command asked for."""
-    documented = {key for key, spec in (level or {}).items() if "refused" not in spec}
-    asked = {str(key) for key in node._asked if not _is_comment(key)}
-    return sorted(documented | asked)
+def _accepted(level: dict[str, Any]) -> list[str]:
+    """The keys a block accepts. A refused key is documented and never suggested."""
+    return sorted(key for key, spec in level.items() if "refused" not in spec)
 
 
 def _hint(key: Any, accepted: list[str], here: str) -> str:
-    """The key probably meant, or the block the key belongs in."""
-    close = difflib.get_close_matches(str(key), accepted, n=1)
+    """The key probably meant, or the block the key belongs in.
+
+    The cutoff is 0.75 rather than difflib's 0.6: a transposition or a
+    dropped letter scores 0.75 or more (``rsik`` against ``risk`` is 0.75,
+    ``notionl`` against ``notional`` 0.93), while 0.6 also matched
+    ``strat`` to ``rate``, a guess that sends the caller the wrong way.
+    """
+    close = difflib.get_close_matches(str(key), accepted, n=1, cutoff=0.75)
     if close:
         return f" (did you mean {close[0]}?)"
     homes = [home for home in _HOMES.get(str(key), []) if home != (here or "the top level")]
     if homes:
         return f" (it belongs under {' or '.join(homes)})"
     return ""
-
-
-def refuse_unknown_keys(
-    config: Mapping[str, Any], command: str, *, failure: BaseException | None = None
-) -> None:
-    """Refuse any key the command reached without reading it or knowing it.
-
-    Walks every block the command entered. A key there passes if the command
-    read it, if it starts with ``_`` (a comment), or if :data:`CONFIG_SCHEMA`
-    documents it at that place -- a key some other command reads, or an
-    optional one that does not apply on this path. Anything else is a typo or
-    an invention, and is refused with its path, the closest accepted key and
-    the full list of what the block accepts. Blocks the command never entered
-    are left alone, because one file serves several commands.
-
-    With ``failure``, the command has already raised. A ``KeyError`` from one
-    of the tracker's own lookups becomes a refusal naming the missing path;
-    unknown keys are reported in preference to any other failure, because a
-    misspelt key is the likeliest reason a required one is missing. With
-    nothing to report the call returns and the caller re-raises ``failure``.
-
-    Args:
-        config: A mapping from :func:`track_reads`, after the command ran. Any
-            other mapping is accepted and not checked.
-        command: The command's name, for the message.
-        failure: What the command raised, if it raised.
-
-    Raises:
-        ConfigurationError: An unknown key, or a missing one the command looked
-            up. Chained to ``failure`` when there is one.
-    """
-    if not isinstance(config, _ReadTracker):
-        return
-    places: dict[int, tuple[str, dict[str, Any] | None]] = {}
-    unknown: list[tuple[str, _ReadTracker, dict[str, Any] | None, Any]] = []
-    for path, _, node, level in _entered(config):
-        places[id(node)] = (path, level)
-        documented = level or {}
-        unknown.extend(
-            (path, node, level, key)
-            for key in node._given
-            if key not in node._read and not _is_comment(key) and key not in documented
-        )
-    missing = [(node, key) for node, key, error in config._missing if error is failure]
-    if not unknown and not missing:
-        return
-
-    sentences: list[str] = []
-    for node, key in missing:
-        path, level = places.get(id(node), ("", None))
-        spec = (level or {}).get(key) if isinstance(key, str) else None
-        about = str(spec.get("description", "")) if isinstance(spec, dict) else ""
-        if about[:1].isupper() and about[1:2].islower():
-            about = about[0].lower() + about[1:]
-        detail = f" ({about.rstrip('.')})" if about else ""
-        sentences.append(f"{_join(path, key)} is missing, and {command} needs it{detail}.")
-    if unknown:
-        named = ", ".join(
-            f"{_join(path, key)}{_hint(key, _accepted(node, level), path)}"
-            for path, node, level, key in unknown
-        )
-        sentences.append(f"unknown key(s) in the {command} config: {named}.")
-        blocks = {path: (node, level) for path, node, level, _ in unknown}
-        for path, (node, level) in blocks.items():
-            where = f"in {path}" if path else "at the top level"
-            sentences.append(f"Accepted {where}: {', '.join(_accepted(node, level))}.")
-        sentences.append(
-            "A key that is quietly ignored is a setting that does nothing, which is "
-            "worse than a config that fails to load; keys starting with '_' are comments."
-        )
-    sentences.append("`rateng describe --json` lists every key under `config`.")
-    raise ConfigurationError(" ".join(sentences)) from failure

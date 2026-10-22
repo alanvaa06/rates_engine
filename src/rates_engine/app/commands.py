@@ -6,31 +6,23 @@ expose :data:`COMMANDS` unchanged. A failure raises the named refusal from
 :mod:`rates_engine.core.errors`; turning it into an exit code or a tool error
 is the adapter's job, not this module's.
 
-**The table checks the config, the functions do not.** Each entry of
-:data:`COMMANDS` runs its function on a config that records what it reads
-(:func:`rates_engine.app.config.track_reads`) and then refuses any key the
-function reached without reading or recognising. The function bodies know
-nothing about it, which is the point: a key a body starts reading is
-accepted the moment it is read, with no list of allowed keys to keep in step,
-and the CLI and the MCP server get the same refusal because they dispatch
-through the same table.
+**The config is checked before anything is computed.** Every function that
+reads a config starts with :func:`~rates_engine.app.config.require_config`,
+which checks the whole document against
+:data:`~rates_engine.app.config.CONFIG_SCHEMA` and hands back a clean copy, so
+the check holds however the function is reached: through :data:`COMMANDS`,
+or called directly.
 """
 
 from __future__ import annotations
 
-import functools
-from collections.abc import Callable, Mapping
+import copy
+from collections.abc import Callable
 from dataclasses import replace
 from typing import Any
 
 from rates_engine.app.builders import calibration_nodes, flat_curve, fx_inputs, ois_swap
-from rates_engine.app.config import (
-    CONFIG_SCHEMA,
-    as_date,
-    refuse_unknown_keys,
-    require_config,
-    track_reads,
-)
+from rates_engine.app.config import CONFIG_SCHEMA, as_date, require_config
 from rates_engine.conventions.currency_pair import USDMXN
 from rates_engine.conventions.indices import INDICES, UNRESOLVED_MXN
 from rates_engine.core.errors import ConfigurationError, UndefinedDurationError
@@ -206,13 +198,14 @@ def describe(_config: dict[str, Any] | None) -> dict[str, Any]:
             "format": "JSON; YAML with the config extra",
             "commands_without_config": sorted(CONFIG_FREE),
             "unknown_keys": (
-                "refused: a key a command reaches has to be one it reads or one "
+                "refused: every key in the file, in every block, has to be one "
                 "documented here, or the command raises ConfigurationError naming its "
-                "path and the closest accepted key. A block only another command uses "
-                "is not checked by this one."
+                "path and the closest accepted key, before computing anything."
             ),
             "comments": "keys starting with '_' are ignored at any depth",
-            "keys": CONFIG_SCHEMA,
+            # A copy: the payload is the caller's to edit, the schema is what
+            # every later config in the process is checked against.
+            "keys": copy.deepcopy(CONFIG_SCHEMA),
         },
         "evidence": None,
     }
@@ -427,43 +420,12 @@ Command = Callable[[dict[str, Any] | None], dict[str, Any]]
 CONFIG_FREE: frozenset[str] = frozenset({"describe", "list-instruments"})
 """The commands that answer from the build itself and read no configuration.
 
-The CLI does not open a ``--config`` passed to them, and the table does not
-check one, so a config handed to them over MCP is ignored as their
-docstrings say rather than refused.
+The CLI does not open a ``--config`` passed to them, and neither calls
+:func:`~rates_engine.app.config.require_config`, so a config handed to them
+over MCP is ignored, as their docstrings say, rather than checked.
 """
 
-
-def _reading_every_key(name: str, command: Command) -> Command:
-    """``command``, refusing any config key it reaches without reading or knowing.
-
-    The command runs on a copy of the config that records every lookup; after
-    it returns -- or raises -- :func:`~rates_engine.app.config.refuse_unknown_keys`
-    checks what it read. On success an unknown key turns the result into a
-    :class:`ConfigurationError`, because a result computed while a key the
-    caller wrote was ignored is a wrong number that looks right. On failure
-    the refusal, if there is one, replaces the failure and is chained to it;
-    otherwise the failure propagates unchanged.
-    """
-    if name in CONFIG_FREE:
-        return command
-
-    @functools.wraps(command)
-    def checked(config: dict[str, Any] | None) -> dict[str, Any]:
-        if not isinstance(config, Mapping):
-            return command(config)
-        tracked = track_reads(config)
-        try:
-            payload = command(tracked)
-        except Exception as exc:
-            refuse_unknown_keys(tracked, name, failure=exc)
-            raise
-        refuse_unknown_keys(tracked, name)
-        return payload
-
-    return checked
-
-
-_HANDLERS: dict[str, Command] = {
+COMMANDS: dict[str, Command] = {
     "describe": describe,
     "list-instruments": list_instruments,
     "bootstrap": bootstrap,
@@ -472,15 +434,8 @@ _HANDLERS: dict[str, Command] = {
     "fx-forward": fx_forward,
     "hedge-structures": hedge_structures,
 }
-
-COMMANDS: dict[str, Command] = {
-    name: _reading_every_key(name, handler) for name, handler in _HANDLERS.items()
-}
 """Every use case by the name each interface exposes it under.
 
 The CLI builds one subcommand per entry and the MCP server one tool per entry,
 so a command added here reaches both, and neither can drift from the other.
-Each entry checks its config's keys (see :func:`_reading_every_key`); the
-function under it is the module-level one of the same name, reachable as the
-entry's ``__wrapped__``.
 """

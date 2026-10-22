@@ -1,4 +1,4 @@
-"""Every key a command reaches is one it reads, one documented, or a refusal by name.
+"""The whole config is checked against the schema before any command computes.
 
 The review of 2026-10-15 ran four misspelt keys through ``rateng`` and got
 four exit codes of zero:
@@ -12,29 +12,28 @@ four exit codes of zero:
   asked for.
 
 Nothing in any of those documents said a key had been ignored, and an agent
-calling the MCP tool has no other way to find out. The fix is generic rather
-than a list per command, because the command bodies are where new keys
-appear: the dispatcher wraps the config in a mapping that records what was
-read, and anything the command reached but neither read nor recognises as
-the documented vocabulary is a :class:`ConfigurationError` naming its path.
+calling the MCP tool has no other way to find out. ``require_config``, which
+every handler that reads a config calls first, now checks the whole document
+against ``CONFIG_SCHEMA``: a key it does not document is refused by path,
+with the closest accepted key, whichever command reads the file.
 
 The expected values here are refusals and paths, not numbers, so the
-reference is the key the test misspelt rather than anything the engine
-computes.
+reference is the key each test misspells rather than anything the engine
+computes. The last class holds the schema to the handlers themselves, by
+recording what each handler body looks up on an unchecked config.
 """
 
 from __future__ import annotations
 
 import copy
-import inspect
 from datetime import timedelta
 
 import pytest
 
-from rates_engine.app import commands
-from rates_engine.app.config import CONFIG_SCHEMA, track_reads
+from rates_engine.app import builders, commands
+from rates_engine.app.config import CONFIG_SCHEMA, require_config
 from rates_engine.conventions.schedule import imm_date, next_imm_on_or_after
-from rates_engine.core.errors import ConfigurationError
+from rates_engine.core.errors import ConfigurationError, RatesEngineError
 
 CONFIG_COMMANDS = ("bootstrap", "price", "hedge", "fx-forward", "hedge-structures")
 
@@ -169,12 +168,43 @@ class TestTheFourTyposAreRefused:
         assert "hedge.shock_bps" in message
         assert "did you mean shocks_bp?" in message
 
-    @pytest.mark.parametrize("name", ["bootstrap", "price", "hedge"])
-    def test_the_convexity_typo_is_refused_by_every_command_that_builds_the_curve(
-        self, name, full
-    ):
-        full["curve"]["convexty"] = full["curve"].pop("convexity")
-        assert "curve.convexty" in _refusal(name, full)
+
+class TestTheWholeFileIsChecked:
+    """A typo in a block only another command reads is still a typo.
+
+    Read-tracking, the first version of this check, looked only at the
+    blocks the running command used, so with one desk file ``rateng price``
+    accepted ``hedge.shock_bps`` and ``rateng hedge`` accepted
+    ``risk.key_tenor``, both with exit 0 (Alan's review of #17).
+    """
+
+    @pytest.mark.parametrize(
+        ("name", "block", "typo", "meant"),
+        [
+            ("price", "hedge", "shock_bps", "shocks_bp"),
+            ("hedge", "risk", "key_tenor", "key_tenors"),
+            ("bootstrap", "swap", "notionl", "notional"),
+            ("fx-forward", "exposure", "hedge_ration", "hedge_ratio"),
+            ("hedge-structures", "curve", "convexty", "convexity"),
+        ],
+    )
+    def test_another_command_s_block(self, name, block, typo, meant, full):
+        full[block][typo] = full[block].pop(meant)
+        assert f"{block}.{typo} (did you mean {meant}?)" in _refusal(name, full)
+
+    @pytest.mark.parametrize("name", CONFIG_COMMANDS)
+    def test_every_command_refuses_the_same_typo(self, name, full):
+        full["curve"]["futures"][4]["prise"] = 96.0
+        assert "curve.futures[4].prise (did you mean price?)" in _refusal(name, full)
+
+    def test_nothing_is_computed_first(self, full, monkeypatch):
+        # The refusal comes from the check, before any curve is built.
+        def no_bootstrap(*args, **kwargs):
+            raise AssertionError("bootstrapped a curve for a config that is refused")
+
+        monkeypatch.setattr(commands, "bootstrap_discount_curve", no_bootstrap)
+        full["swap"]["notionl"] = 5.0
+        assert "swap.notionl" in _refusal("price", full)
 
 
 class TestTheMessage:
@@ -182,31 +212,30 @@ class TestTheMessage:
 
     def test_a_key_inside_a_list_entry_is_named_by_its_index(self, full):
         full["curve"]["futures"][2]["settle_note"] = "from the CME page"
-        message = _refusal("bootstrap", full)
-        assert "curve.futures[2].settle_note" in message
+        assert "curve.futures[2].settle_note" in _refusal("bootstrap", full)
 
     def test_a_typo_that_hides_a_required_key_names_both(self, full):
         full["curve"]["futures"][2]["prise"] = full["curve"]["futures"][2].pop("price")
         message = _refusal("bootstrap", full)
-        assert "curve.futures[2].price is missing" in message
+        assert "curve.futures[2].price is missing, and bootstrap needs it" in message
         assert "curve.futures[2].prise (did you mean price?)" in message
 
     def test_an_unknown_top_level_key(self, full):
         full["rsik"] = full.pop("risk")
-        message = _refusal("price", full)
-        assert "rsik (did you mean risk?)" in message
+        assert "rsik (did you mean risk?)" in _refusal("price", full)
 
     def test_a_key_at_the_wrong_level_says_where_it_belongs(self, full):
         full["notional"] = full["swap"].pop("notional")
-        message = _refusal("price", full)
-        assert "notional (it belongs under swap)" in message
+        assert "notional (it belongs under swap)" in _refusal("price", full)
 
-    def test_every_unknown_key_is_listed_at_once(self, full):
+    def test_every_problem_is_listed_at_once(self, full):
         full["swap"]["fixed_rte"] = 0.09
         full["risk"]["key_tenor"] = [5.0]
+        del full["as_of"]
         message = _refusal("price", full)
         assert "swap.fixed_rte" in message
         assert "risk.key_tenor" in message
+        assert "as_of is missing, and price needs it" in message
 
     def test_it_lists_what_the_block_accepts(self, full):
         full["swap"]["notionl"] = 5.0
@@ -214,8 +243,8 @@ class TestTheMessage:
         assert "Accepted in swap: effective, fixed_rate, frequency_months, index, " in message
 
     def test_it_imitates_the_hedge_programme_refusal(self, full):
-        # hedging/program.py:155-162 already refuses unknown keys; the CLI
-        # config is held to the same sentence rather than a second dialect.
+        # hedging/program.py:155-162 refuses unknown programme keys in this
+        # sentence; the config is held to the same one.
         full["swap"]["notionl"] = 5.0
         message = _refusal("price", full)
         assert message.startswith("unknown key(s) in the price config:")
@@ -225,11 +254,48 @@ class TestTheMessage:
         full["swap"]["notionl"] = 5.0
         assert "rateng describe --json" in _refusal("price", full)
 
-    def test_the_refusal_is_chained_to_the_failure_it_explains(self, full):
-        full["curve"]["futures"][2]["prise"] = full["curve"]["futures"][2].pop("price")
-        with pytest.raises(ConfigurationError) as excinfo:
-            commands.COMMANDS["bootstrap"](full)
-        assert isinstance(excinfo.value.__cause__, KeyError)
+
+class TestRefusedKeys:
+    """The v0.3 par-swap keys are documented in order to refuse them."""
+
+    def test_the_v03_shape_is_refused_with_the_migration(self, full):
+        full["curve"]["par_swaps"] = [
+            {"start": "2026-01-15", "payment_dates": ["2029-01-15"],
+             "year_fractions": [3.05], "rate": 0.041}
+        ]
+        message = _refusal("bootstrap", full)
+        assert "curve.par_swaps[0] uses start, payment_dates, year_fractions" in message
+        assert "effective, maturity and rate" in message
+
+    def test_a_refused_key_is_never_suggested(self, full):
+        # On #17 as first reviewed, `strat` was answered with "did you mean
+        # start?", the v0.3 key that is itself refused, and the accepted list
+        # included all three v0.3 keys (Alan's review, point 3).
+        full["curve"]["par_swaps"][0]["strat"] = "2026-01-15"
+        message = _refusal("bootstrap", full)
+        assert "did you mean start?" not in message
+        # Nor a weak guess at an accepted key: strat is 0.67 from rate.
+        assert "curve.par_swaps[0].strat." in message
+        accepted = message.split("Accepted in curve.par_swaps[0]: ")[1].split(".")[0]
+        for refused in ("start", "payment_dates", "year_fractions"):
+            assert refused not in accepted.split(", ")
+
+    def test_the_builder_refuses_in_the_same_words(self, as_of):
+        # calibration_nodes still checks a par swap itself, for a caller that
+        # skips require_config; the words are the validator's.
+        entry = {"start": "2026-01-15", "rate": 0.041}
+        config = {"curve": {"par_swaps": [entry]}}
+        with pytest.raises(ConfigurationError) as direct:
+            builders.calibration_nodes(config, as_of)
+        with pytest.raises(ConfigurationError) as checked:
+            require_config({"as_of": as_of.isoformat(), **config}, "bootstrap")
+        for sentence in (
+            "curve.par_swaps[0] uses start: the v0.3 par-swap shape",
+            "curve.par_swaps[0].effective is missing",
+            "curve.par_swaps[0].maturity is missing",
+        ):
+            assert sentence in str(direct.value)
+            assert sentence in str(checked.value)
 
 
 class TestNoFalsePositives:
@@ -239,22 +305,21 @@ class TestNoFalsePositives:
     def test_every_command_accepts_the_full_config(self, name, full):
         assert commands.COMMANDS[name](full)["schema_version"] == "1.0"
 
-    def test_bootstrap_ignores_the_blocks_it_does_not_use(self, full):
-        # swap, risk and hedge are price's and hedge's; the README's own
-        # workflow runs all three commands on one file.
-        assert commands.COMMANDS["bootstrap"](full)["command"] == "bootstrap"
-
     def test_price_accepts_curve_strict_which_only_bootstrap_reads(self, full):
         full["curve"]["strict"] = False
         assert commands.COMMANDS["price"](full)["command"] == "price"
-
-    def test_fx_forward_accepts_the_volatility_hedge_structures_reads(self, full):
-        assert commands.COMMANDS["fx-forward"](full)["result_type"] == "FXForwardResult"
 
     def test_a_proposed_instrument_without_a_programme_is_not_refused(self, full):
         del full["hedge_program"]
         payload = commands.COMMANDS["hedge-structures"](full)
         assert payload["result_type"] == "StructureComparison"
+
+    def test_a_required_key_of_another_command_s_block_is_not_demanded(self, full):
+        # bootstrap reads no swap, so a half-written swap block is the
+        # business of price and hedge, which refuse it.
+        del full["swap"]["fixed_rate"]
+        assert commands.COMMANDS["bootstrap"](full)["command"] == "bootstrap"
+        assert "swap.fixed_rate is missing, and price needs it" in _refusal("price", full)
 
     def test_underscore_keys_are_comments_at_any_depth(self, full):
         full["_comment"] = "desk config, 2026-01-15 close"
@@ -263,8 +328,15 @@ class TestNoFalsePositives:
         full["curve"]["convexity"]["_note"] = {"sigma": "realised, 60d"}
         assert commands.COMMANDS["price"](full)["command"] == "price"
 
+    def test_a_comment_in_the_hedge_programme_is_a_comment_too(self, full):
+        # load_program refuses any key it does not know, and the programme
+        # used to reach it with its comments: `_note` was exit 1 here while
+        # it passed in every other block (Alan's review, point 2).
+        full["hedge_program"]["_note"] = "approved by ALCO, 2026-09"
+        payload = commands.COMMANDS["hedge-structures"](full)
+        assert payload["program_audit"]["compliant"] is True
+
     def test_a_key_commented_out_with_an_underscore_is_not_read(self, full):
-        # The other half of the convention: a commented-out key is off.
         baseline = commands.COMMANDS["price"](copy.deepcopy(full))
         full["swap"]["_notional"] = full["swap"].pop("notional")
         commented = commands.COMMANDS["price"](full)
@@ -276,118 +348,92 @@ class TestNoFalsePositives:
     def test_the_configless_commands_ignore_whatever_they_are_given(self, name):
         assert commands.COMMANDS[name]({"anything": {"at": "all"}})["evidence"] is None
 
-    def test_the_caller_s_mapping_is_not_modified(self, full):
-        before = copy.deepcopy(full)
-        commands.COMMANDS["hedge-structures"](full)
-        assert full == before
-        assert type(full["fx"]) is dict
 
+class TestNullsAndShapes:
+    """``null`` means absent where absent means null, and is refused elsewhere."""
 
-class TestMissingKeys:
-    """A required key that is absent is a sentence, not a bare KeyError."""
-
-    def test_a_missing_futures_price_names_the_path(self, full):
-        del full["curve"]["futures"][0]["price"]
-        message = _refusal("bootstrap", full)
-        assert "curve.futures[0].price is missing, and bootstrap needs it" in message
-
-    def test_a_missing_block_is_named(self, full):
-        del full["swap"]
-        assert "swap is missing, and price needs it" in _refusal("price", full)
-
-    def test_it_says_what_the_key_holds(self, full):
-        del full["curve"]["futures"][0]["price"]
-        assert "100 minus the rate in percent" in _refusal("bootstrap", full)
-
-    def test_a_key_error_the_command_raises_itself_is_left_alone(self, monkeypatch, full):
-        # Only a lookup the tracker answered becomes a ConfigurationError; a
-        # KeyError from anywhere else is somebody else's bug and keeps its type.
-        def broken(config):
-            return {}["not-a-config-key"]
-
-        checked = commands._reading_every_key("price", broken)
-        monkeypatch.setitem(commands.COMMANDS, "price", checked)
-        with pytest.raises(KeyError):
-            commands.COMMANDS["price"](full)
-
-
-class TestTheTracker:
-    """Reading is recorded however the code reaches a value."""
-
-    def test_get_getitem_and_membership_are_reads(self):
-        tracked = track_reads({"a": 1, "b": 2, "c": 3, "d": 4})
-        seen = (tracked["a"], tracked.get("b"), "c" in tracked, "z" in tracked)
-        assert seen == (1, 2, True, False)
-        assert tracked._read == {"a", "b", "c"}
-        assert tracked._asked == {"a", "b", "c", "z"}
+    def test_null_where_the_default_is_null_is_the_same_as_absent(self, full):
+        # hedge.contract_dv01 defaults to null since fix/futures-strip-hedge.
+        # On this branch alone a null used to reach float(None) and exit 1
+        # with a TypeError (Alan's review, point 1).
+        absent = copy.deepcopy(full)
+        del absent["hedge"]["contract_dv01"]
+        full["hedge"]["contract_dv01"] = None
+        assert commands.COMMANDS["hedge"](full) == commands.COMMANDS["hedge"](absent)
 
     @pytest.mark.parametrize(
-        "consume",
-        [
-            dict,
-            lambda block: {**block},
-            lambda block: block.copy(),
-            copy.deepcopy,
-            lambda block: list(block.items()),
-            lambda block: list(block.values()),
-        ],
-        ids=["dict", "unpack", "copy", "deepcopy", "items", "values"],
+        ("block", "key", "default"),
+        [("swap", "notional", "1000000.0"), ("curve", "strict", "true"), ("hedge", "shocks_bp", "[")],
     )
-    def test_copying_a_block_counts_as_reading_all_of_it(self, consume):
-        # load_program(dict(block)) is how hedge-structures hands its
-        # programme over, and load_program refuses unknown keys itself.
-        tracked = track_reads({"a": 1, "b": {"c": 2}})
-        consume(tracked)
-        assert tracked._read == {"a", "b"}
+    def test_null_where_the_default_is_a_value_is_refused(self, block, key, default, full):
+        # notional: null reached float(None); strict: null read as false and
+        # quietly turned the residual check off.
+        full[block][key] = None
+        name = "bootstrap" if key == "strict" else "hedge"
+        message = _refusal(name, full)
+        assert f"{block}.{key} is null: give a value, or leave the key out" in message
+        assert f"its default, {default}" in message
 
-    def test_listing_the_keys_is_not_reading_them(self):
-        tracked = track_reads({"a": 1})
-        sorted(tracked)
-        list(tracked.keys())
-        len(tracked)
-        assert tracked._read == set()
+    def test_null_for_a_required_key_is_missing(self, full):
+        full["swap"]["fixed_rate"] = None
+        assert "swap.fixed_rate is missing, and price needs it" in _refusal("price", full)
 
-    def test_nested_mappings_and_list_entries_are_tracked(self):
-        tracked = track_reads({"a": {"b": 1}, "rows": [{"c": 2}, 3]})
-        assert type(tracked["a"]) is type(tracked)
-        assert type(tracked["rows"][0]) is type(tracked)
-        assert tracked["rows"][1] == 3
-
-    def test_it_compares_equal_to_what_it_wraps(self):
-        source = {"a": {"b": [{"c": 1}]}}
-        assert track_reads(source) == source
-
-
-def _commands_reads(name: str, config: dict) -> tuple[set[str], set[str]]:
-    """The documented paths a command asked for, and the ones it read.
-
-    Paths use ``[]`` for a list entry, so ``curve.futures[].price`` is one path
-    however many futures there are.
-    """
-    from rates_engine.app.config import _entered
-
-    tracked = track_reads(copy.deepcopy(config))
-    inspect.unwrap(commands.COMMANDS[name])(tracked)
-    asked: set[str] = set()
-    read: set[str] = set()
-    for _, pattern, node, _ in _entered(tracked):
-        prefix = f"{pattern}." if pattern else ""
-        asked |= {f"{prefix}{key}" for key in node._asked}
-        read |= {f"{prefix}{key}" for key in node._read}
-    return asked, read
+    @pytest.mark.parametrize(
+        ("change", "said"),
+        [
+            (lambda c: c.__setitem__("swap", 5), "swap must be a mapping of keys, not the number 5"),
+            (lambda c: c["curve"].__setitem__("futures", {}), "curve.futures must be a list"),
+            (
+                lambda c: c["curve"]["futures"].__setitem__(3, "SR3"),
+                "curve.futures[3] must be a mapping of keys, not the string 'SR3'",
+            ),
+        ],
+        ids=["block", "list", "list-entry"],
+    )
+    def test_a_block_of_the_wrong_shape_is_refused(self, change, said, full):
+        change(full)
+        assert said in _refusal("hedge", full)
 
 
-def _documented(level=CONFIG_SCHEMA, prefix="") -> dict[str, dict]:
-    """Every documented path, flattened, with its specification."""
-    found: dict[str, dict] = {}
+class TestTheCheckedCopy:
+    """What the handler reads is a clean copy, and the caller's mapping is untouched."""
+
+    def test_comments_and_absent_nulls_are_gone(self, full):
+        full["_comment"] = "x"
+        full["curve"]["futures"][0]["_source"] = "y"
+        checked = require_config(full, "price")
+        assert "_comment" not in checked
+        assert "_source" not in checked["curve"]["futures"][0]
+        assert "long_end_source" not in checked["curve"]
+        assert "kappa" not in checked["curve"]["convexity"]
+
+    def test_the_caller_s_mapping_is_not_modified(self, full):
+        before = copy.deepcopy(full)
+        checked = require_config(full, "hedge-structures")
+        checked["fx"]["spot"] = 0.0
+        checked["risk"]["key_tenors"].append(9.0)
+        assert full == before
+
+    def test_a_config_that_is_not_a_mapping_is_refused(self):
+        with pytest.raises(ConfigurationError, match="mapping of keys; got a list"):
+            require_config([1, 2], "price")
+
+
+def _documented(level=CONFIG_SCHEMA, prefix="", readers=None) -> dict[str, tuple[dict, list]]:
+    """Every documented path, flattened: its specification and who reads it."""
+    found: dict[str, tuple[dict, list]] = {}
     for key, spec in level.items():
         path = f"{prefix}{key}"
-        found[path] = spec
+        uses = spec.get("used_by", readers)
+        found[path] = (spec, uses)
         if "keys" in spec:
-            found |= _documented(spec["keys"], f"{path}.")
+            found |= _documented(spec["keys"], f"{path}.", uses)
         if "items" in spec:
-            found |= _documented(spec["items"], f"{path}[].")
+            found |= _documented(spec["items"], f"{path}[].", uses)
     return found
+
+
+DOCUMENTED = _documented()
 
 
 def _given(value, prefix="") -> set[str]:
@@ -404,15 +450,86 @@ def _given(value, prefix="") -> set[str]:
     return found
 
 
-class TestDescribeDocumentsTheConfig:
-    """``rateng describe --json`` is the shape every refusal points at."""
+class _Recorder(dict):
+    """A test-only mapping that notes every key a handler looks up, by path.
 
-    def test_describe_carries_the_schema(self):
+    Paths use ``[]`` for a list entry. ``asked`` collects lookups of present
+    and absent keys alike, ``read`` only the present ones; copying the block
+    (``dict(block)``) reads all of it, as CPython copies a dict subclass that
+    overrides ``__iter__`` through ``__getitem__``.
+    """
+
+    def __init__(self, source, pattern, asked, read):
+        super().__init__(
+            (key, _recorded(value, f"{pattern}.{key}" if pattern else key, asked, read))
+            for key, value in source.items()
+        )
+        self._pattern, self._asked, self._read = pattern, asked, read
+
+    def _note(self, key):
+        path = f"{self._pattern}.{key}" if self._pattern else str(key)
+        self._asked.add(path)
+        if dict.__contains__(self, key):
+            self._read.add(path)
+
+    def __getitem__(self, key):
+        self._note(key)
+        return dict.__getitem__(self, key)
+
+    def get(self, key, default=None):
+        self._note(key)
+        return dict.get(self, key, default)
+
+    def __contains__(self, key):
+        self._note(key)
+        return dict.__contains__(self, key)
+
+    def __iter__(self):
+        return dict.__iter__(self)
+
+
+def _recorded(value, pattern, asked, read):
+    if isinstance(value, dict):
+        return _Recorder(value, pattern, asked, read)
+    if isinstance(value, list):
+        return [_recorded(element, f"{pattern}[]", asked, read) for element in value]
+    return value
+
+
+def _lookups(name: str, config: dict, monkeypatch) -> tuple[set[str], set[str]]:
+    """What a handler body looks up on ``config`` when nothing checks it first."""
+    asked: set[str] = set()
+    read: set[str] = set()
+    monkeypatch.setattr(commands, "require_config", lambda config, command: config)
+    commands.COMMANDS[name](_recorded(copy.deepcopy(config), "", asked, read))
+    monkeypatch.undo()
+    return asked, read
+
+
+class TestTheSchemaMatchesTheHandlers:
+    """``describe`` is the shape every refusal points at, so it has to be true.
+
+    The reference is the handler bodies: what each one looks up on a config
+    nothing has checked, recorded key by key.
+    """
+
+    def test_describe_carries_a_copy_of_the_schema(self):
         payload = commands.COMMANDS["describe"](None)
         assert payload["config"]["keys"] == CONFIG_SCHEMA
+        assert payload["config"]["keys"] is not CONFIG_SCHEMA
+
+    def test_editing_the_describe_payload_does_not_change_the_check(self, full):
+        # describe used to hand out CONFIG_SCHEMA itself, so a caller editing
+        # the payload changed validation for the rest of the process (Alan's
+        # review, point 5).
+        payload = commands.COMMANDS["describe"](None)
+        payload["config"]["keys"]["swap"]["keys"]["notionl"] = {"description": "x" * 20}
+        full["swap"]["notionl"] = 5.0
+        assert "swap.notionl" in _refusal("price", full)
 
     def test_the_fx_block_is_documented(self):
-        # builders.py:212-213 sends the caller to describe for this shape.
+        # builders.py's refusal of an empty fx block sends the caller to
+        # describe for this shape.
         fx = CONFIG_SCHEMA["fx"]["keys"]
         assert set(fx) == {"spot", "delivery", "r_domestic", "r_foreign", "basis_bp", "volatility"}
 
@@ -423,26 +540,80 @@ class TestDescribeDocumentsTheConfig:
         assert "ACT/365F" in description
 
     def test_the_full_config_is_every_documented_key(self, full):
-        documented = {
-            path for path, spec in _documented().items() if "refused" not in spec
-        }
-        assert _given(full) == documented
+        accepted = {path for path, (spec, _) in DOCUMENTED.items() if "refused" not in spec}
+        assert _given(full) == accepted
 
     @pytest.mark.parametrize("name", CONFIG_COMMANDS)
-    def test_every_key_a_command_asks_for_is_documented(self, name, full):
-        # The drift this catches: a command body starts reading a key that
-        # describe does not mention. The runtime check would still accept it
-        # (it was read), but describe would be lying by omission, and a
-        # second command that does not read it would refuse it as unknown.
-        asked, _ = _commands_reads(name, full)
-        assert asked - set(_documented()) == set()
+    def test_every_key_a_handler_looks_up_is_documented(self, name, full, monkeypatch):
+        # A key a handler starts reading without an entry here is refused as
+        # unknown by every command; this names it before a user meets it.
+        asked, _ = _lookups(name, full, monkeypatch)
+        assert asked - set(DOCUMENTED) == set()
 
-    @pytest.mark.parametrize("path", sorted(p for p, s in _documented().items() if "used_by" in s))
-    def test_used_by_is_exactly_the_commands_that_read_it(self, path, full):
-        readers = {name for name in CONFIG_COMMANDS if path in _commands_reads(name, full)[1]}
-        assert readers == set(_documented()[path]["used_by"]), path
+    @pytest.mark.parametrize(
+        "path", sorted(p for p, (s, _) in DOCUMENTED.items() if "used_by" in s)
+    )
+    def test_used_by_is_exactly_the_commands_that_read_it(self, path, full, monkeypatch):
+        readers = {
+            name for name in CONFIG_COMMANDS if path in _lookups(name, full, monkeypatch)[1]
+        }
+        assert readers == set(DOCUMENTED[path][0]["used_by"]), path
+
+    @pytest.mark.parametrize("name", CONFIG_COMMANDS)
+    def test_every_required_key_is_read_by_the_commands_that_require_it(
+        self, name, full, monkeypatch
+    ):
+        _, read = _lookups(name, full, monkeypatch)
+        required = {
+            path
+            for path, (spec, uses) in DOCUMENTED.items()
+            if spec.get("required") and name in (uses or ())
+        }
+        assert required - read == set()
 
     def test_every_description_is_a_sentence(self):
-        for path, spec in _documented().items():
+        for path, (spec, _) in DOCUMENTED.items():
             text = spec.get("description") or spec.get("refused") or ""
             assert len(text) > 15, path
+
+
+def _without(config: dict, path: str, *, null: bool) -> dict:
+    """``config`` with one documented key removed, or set to null; lists at entry 0."""
+    changed = copy.deepcopy(config)
+    node = changed
+    *parents, last = path.split(".")
+    for part in parents:
+        node = node[part.removesuffix("[]")]
+        if part.endswith("[]"):
+            node = node[0]
+    if null:
+        node[last] = None
+    else:
+        node.pop(last, None)
+    return changed
+
+
+_CASES = [
+    (name, path)
+    for path, (spec, uses) in DOCUMENTED.items()
+    if "refused" not in spec
+    for name in CONFIG_COMMANDS
+    if name in (uses or ())
+]
+
+
+class TestNoKeyCrashesAHandler:
+    """Leaving any key out, or nulling it, ends in a refusal or a result.
+
+    Never in ``KeyError`` or ``TypeError``: the schema's ``required`` and
+    ``default`` have to match what the handlers need, and this is where a
+    key a handler cannot do without, but the schema calls optional, shows.
+    """
+
+    @pytest.mark.parametrize("null", [False, True], ids=["absent", "null"])
+    @pytest.mark.parametrize(("name", "path"), _CASES, ids=[f"{n}:{p}" for n, p in _CASES])
+    def test_it_is_a_refusal_or_a_result(self, name, path, null, full):
+        try:
+            commands.COMMANDS[name](_without(full, path, null=null))
+        except (RatesEngineError, ValueError):
+            pass
