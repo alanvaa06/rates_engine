@@ -298,6 +298,11 @@ point to the author's private knowledge base and do not resolve here.
 Planned for v1.1: `FixedRateBond`, which brings Macaulay and modified
 duration with it, and a real quote source for the dual-curve solver.
 
+## Authors
+
+Alan Vazquez ([@alanvaa06](https://github.com/alanvaa06)) and Eduardo Ramos, CFA
+([@EERamos](https://github.com/EERamos)).
+
 ## License
 
 MIT. See `LICENSE`.
