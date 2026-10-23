@@ -26,6 +26,18 @@ from rates_engine.models.gaussian import standard_normal_cdf, standard_normal_pd
 __all__ = ["price", "implied_lognormal_vol", "vega", "delta"]
 
 
+def _require_finite(**values: float) -> None:
+    """Refuse a NaN or an infinity by name before any comparison reads it.
+
+    Every comparison with NaN is false, so ``sigma < 0`` let a NaN through to
+    a NaN price, and an inversion with a NaN target walked its bisection to
+    the top of the bracket and returned that as a volatility.
+    """
+    for name, value in values.items():
+        if not math.isfinite(value):
+            raise ValueError(f"{name} must be a finite number, got {value!r}")
+
+
 def _check_positive(forward: float, strike: float) -> None:
     if forward <= 0.0:
         raise ShiftRequiredError(
@@ -66,8 +78,10 @@ def price(
     Raises:
         ShiftRequiredError: The forward is not positive, or the strike is
             negative.
-        ValueError: ``sigma`` or ``expiry`` is negative.
+        ValueError: ``sigma`` or ``expiry`` is negative, or an input is not
+            a finite number.
     """
+    _require_finite(forward=forward, strike=strike, expiry=expiry, sigma=sigma)
     if sigma < 0.0:
         raise ValueError(f"sigma must be non-negative, got {sigma!r}")
     if expiry < 0.0:
@@ -103,15 +117,26 @@ def vega(
         annuity: The numeraire.
 
     Returns:
-        ``d(price) / d(sigma)``, the same for a call and a put.
+        ``d(price) / d(sigma)``, the same for a call and a put. At
+        ``sigma = 0`` it is the limit from above: ``annuity F sqrt(T) n(0)``
+        at the money and zero away from it.
 
     Raises:
         ShiftRequiredError: The forward is not positive or the strike negative.
     """
     _check_positive(forward, strike)
-    dispersion = sigma * math.sqrt(expiry)
-    if dispersion == 0.0 or strike == 0.0:
+    if strike == 0.0:
+        # The price is the forward whatever the volatility.
         return 0.0
+    dispersion = sigma * math.sqrt(expiry)
+    if dispersion == 0.0:
+        # The limit sigma -> 0+. ``d1 = ln(F/K) / (sigma sqrt T) + sigma sqrt T / 2``
+        # runs to +-infinity off the money and to zero at it, so vega tends
+        # to zero there and to F sqrt(T) n(0) here -- not to zero, which is
+        # what this returned at the money.
+        if forward != strike:
+            return 0.0
+        return annuity * forward * math.sqrt(expiry) * standard_normal_pdf(0.0)
     d1 = (math.log(forward / strike) + 0.5 * dispersion * dispersion) / dispersion
     return annuity * forward * math.sqrt(expiry) * standard_normal_pdf(d1)
 
@@ -184,9 +209,13 @@ def implied_lognormal_vol(
 
     Raises:
         ShiftRequiredError: The forward is not positive or the strike negative.
-        ValueError: The expiry, annuity or strike is not positive, or the
-            target is below the intrinsic value.
+        ValueError: The expiry, annuity or strike is not positive, the
+            target is below the intrinsic value, or an input is not a finite
+            number.
     """
+    _require_finite(
+        target=target, forward=forward, strike=strike, expiry=expiry, annuity=annuity
+    )
     if expiry <= 0.0:
         raise ValueError(f"implied volatility needs a positive expiry, got {expiry!r}")
     if annuity <= 0.0:

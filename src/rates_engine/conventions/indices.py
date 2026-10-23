@@ -97,6 +97,12 @@ UNRESOLVED_MXN: tuple[tuple[str, str], ...] = (
         "banking calendar is a different list and the two have not been diffed.",
     ),
     (
+        "tiie_28_fixing_lag",
+        "TIIE 28 is read on the first day of the period it sets, a fixing lag of "
+        "zero business days. The market convention may be one Mexican banking "
+        "day before the period; it has not been confirmed against Banxico.",
+    ),
+    (
         "mxn_collateral_rate",
         "Peso flows are discounted on the assumption that MXN collateral is "
         "remunerated at TIIE de Fondeo, the overnight rate. The CSA convention for "
@@ -155,6 +161,12 @@ class RateIndex:
         unresolved: Names from :data:`UNRESOLVED_MXN` (or its successors) that
             any valuation on this index inherits as assumptions. Empty when
             every convention was verified against its administrator.
+        fixing_lag_days: Business days of :attr:`calendar` from the day a
+            term rate is fixed to the start of the period it sets: two for
+            Term SOFR, the ARRC's convention. Zero for an overnight rate,
+            compounded in arrears over its own period. The one place the lag
+            is stated: the linear pricer and the caps both read it, so an
+            IRS, a FRA and a caplet on one period fix on one day.
     """
 
     name: str
@@ -166,6 +178,18 @@ class RateIndex:
     calendar: HolidayCalendar
     administrator: str
     unresolved: tuple[str, ...] = ()
+    fixing_lag_days: int = 0
+
+    def __post_init__(self) -> None:
+        # A whole number of days, checked by type: a bool is an int to Python
+        # and 1.5 passes ``lag < 0``, and add_business_days' countdown never
+        # reaches zero on either -- it walks back until the calendar runs out.
+        lag = self.fixing_lag_days
+        if isinstance(lag, bool) or not isinstance(lag, int) or lag < 0:
+            raise UnsupportedConventionError(
+                f"{self.name}: fixing_lag_days must be a whole number of business days, "
+                f"zero or more, got {lag!r}"
+            )
 
     @property
     def is_verified(self) -> bool:
@@ -183,7 +207,25 @@ SOFR = RateIndex(
     calendar=SIFMA_US,
     administrator="Federal Reserve Bank of New York",
 )
-"""The Secured Overnight Financing Rate, compounded in arrears on ACT/360."""
+"""The Secured Overnight Financing Rate, compounded in arrears on ACT/360.
+
+``unresolved`` is empty, so :attr:`RateIndex.is_verified` is true, and since
+v0.4 that rests on a check rather than on an omission. Until then the index
+claimed to be verified while the calendar it fixes on recorded its Saturday
+rule as an unchecked assumption -- and the rule was wrong for two of its
+five holidays, as was Memorial Day in ten years of twenty-three. The
+calendar, ``SIFMA_US``, now agrees with the New York Fed's publication
+record on every weekday from ``SIFMAUSCalendar.VERIFIED_FROM`` to
+``SIFMAUSCalendar.VERIFIED_THROUGH``, and
+``tests/test_sifma_publication_record.py`` holds the two to it.
+
+Beyond that stretch the calendar is its rules, each of them exercised by the
+record except Juneteenth on a Saturday, which first happens on 19 June 2027
+and is observed on the Friday like Independence Day and Christmas. That is
+not an unresolved convention in this field's sense. What no rule can supply
+is an unscheduled closure, such as the national day of mourning of 5
+December 2018, and no calendar knows those in advance.
+"""
 
 TIIE_FONDEO = RateIndex(
     name="TIIE_FONDEO",
@@ -216,10 +258,17 @@ TIIE_28 = RateIndex(
         "tiie_day_count",
         "tiie_period_days",
         "tiie_fondeo_vs_28",
+        "tiie_28_fixing_lag",
         "mxn_calendar_is_bmv_not_banxico",
     ),
 )
-"""The historical 28-day interbank rate."""
+"""The historical 28-day interbank rate, read on the start of its period.
+
+``fixing_lag_days`` is zero, which is what this package has always done and
+is recorded as the unresolved convention ``tiie_28_fixing_lag``: the market
+may fix it a Mexican banking day earlier, and nothing reachable from here
+has settled it.
+"""
 
 
 def _term_sofr(tenor: IndexTenor) -> RateIndex:
@@ -232,6 +281,9 @@ def _term_sofr(tenor: IndexTenor) -> RateIndex:
         day_count=DayCount.ACT_360,
         calendar=SIFMA_US,
         administrator="CME Group Benchmark Administration",
+        # Set two US Government Securities business days before the interest
+        # period begins: the ARRC's convention for Term SOFR.
+        fixing_lag_days=2,
     )
 
 

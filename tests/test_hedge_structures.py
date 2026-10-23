@@ -79,6 +79,9 @@ class TestTheTableHasWhatWasAskedFor:
         ]
 
     def test_each_row_reports_the_five_columns(self, payable):
+        """Every column is present on every row. The two bounds are `None`
+        where the structure leaves that side open, which
+        `TestTheBoundsAreTheStructuresNotTheGrids` pins row by row."""
         for structure in payable.structures:
             payload = structure.payload_fields()
             for column in (
@@ -89,6 +92,7 @@ class TestTheTableHasWhatWasAskedFor:
                 "payoff_grid",
             ):
                 assert column in payload
+            for column in ("upfront_cost", "upside_participation", "payoff_grid"):
                 assert payload[column] is not None
 
     def test_the_payoff_grid_matches_the_spot_grid(self, payable):
@@ -121,10 +125,11 @@ class TestTheBaselineRows:
         assert row.upside_participation == pytest.approx(1.0)
 
     def test_unhedged_is_the_widest_spread_of_outcomes(self, payable):
+        """Over the grid, since the unhedged row has no bound on either side."""
         row = payable.by_name("unhedged")
-        span = row.worst_case_rate - row.best_case_rate
+        span = max(row.payoff_grid) - min(row.payoff_grid)
         for other in payable.structures:
-            assert abs(other.worst_case_rate - other.best_case_rate) <= span + 1e-9
+            assert max(other.payoff_grid) - min(other.payoff_grid) <= span + 1e-9
 
     def test_the_forward_costs_nothing_and_fixes_everything(self, payable):
         row = payable.by_name("forward")
@@ -196,7 +201,10 @@ class TestThePremiumOrdering:
         collar = payable.by_name("collar_zero_cost")
         assert seagull.legs[-1][1] < collar.legs[-1][1]
         assert seagull.best_case_rate < collar.best_case_rate
-        assert seagull.worst_case_rate > collar.worst_case_rate
+        # Re-opened above the sold call: no bound at all, where the collar has one.
+        assert seagull.worst_case_rate is None
+        assert collar.worst_case_rate is not None
+        assert max(seagull.payoff_grid) > max(collar.payoff_grid)
 
     def test_ordering_by_cost_sorts_rather_than_ranks(self, payable):
         ordered = payable.ordered_by_cost()
@@ -254,8 +262,10 @@ class TestTheZeroCostCollar:
     def test_it_bounds_the_outcome_on_both_sides(self, payable):
         row = payable.by_name("collar_zero_cost")
         unhedged = payable.by_name("unhedged")
-        assert row.worst_case_rate < unhedged.worst_case_rate
-        assert row.best_case_rate > unhedged.best_case_rate
+        assert row.worst_case_rate is not None and row.best_case_rate is not None
+        assert unhedged.worst_case_rate is None and unhedged.best_case_rate is None
+        assert row.worst_case_rate < max(unhedged.payoff_grid)
+        assert row.best_case_rate > min(unhedged.payoff_grid)
 
 
 class TestTheTradeOff:
@@ -273,32 +283,95 @@ class TestTheTradeOff:
         assert collar.upfront_cost < otm.upfront_cost
         assert collar.upside_participation < otm.upside_participation
 
-    def test_participation_is_the_ratio_it_claims_to_be(self, payable):
-        """Asserting only `0 <= p <= 1` was vacuous: the clamp in
-        `_summarise` guarantees it, and a mutation replacing the whole
-        computation with the constant 0.5 passed. This recomputes the ratio
-        from the reported grids instead, so it tests the quantity."""
-        grid = payable.spot_grid
-        for structure in payable.structures:
-            rates = structure.payoff_grid
-            # For a payable the favourable direction is a lower spot.
-            open_span = max(grid) - min(grid)
-            kept = rates[grid.index(max(grid))] - rates[grid.index(min(grid))]
-            assert structure.upside_participation == pytest.approx(
-                max(0.0, min(1.0, kept / open_span)), abs=1e-12
+    @staticmethod
+    def _kept_by_slope(structure, direction, forward, width):
+        """The share of the favourable move a row keeps, from its legs alone.
+
+        Integrates the row's slope in the spot over the favourable move --
+        from the forward down to `(1 - width) F` for a payable, up to
+        `(1 + width) F` for a receivable -- with the strikes as breakpoints.
+        The slope is the open share of the exposure plus or minus each leg
+        in the money; nothing here reads the payoff grid or calls the code
+        under test.
+        """
+        payable = direction is ExposureDirection.PAYABLE
+        edge = forward * (1.0 - width) if payable else forward * (1.0 + width)
+        low, high = min(edge, forward), max(edge, forward)
+        helped = -1.0 if payable else 1.0
+
+        def slope(s):
+            value = 1.0 - abs(structure.forward_amount) / 1_000_000.0
+            for kind, strike, quantity in structure.legs:
+                if kind == "call" and s > strike:
+                    value += helped * quantity
+                if kind == "put" and s < strike:
+                    value -= helped * quantity
+            return value
+
+        points = sorted({low, high, *(k for _, k, _ in structure.legs if low < k < high)})
+        moved = sum(
+            slope(0.5 * (a + b)) * (b - a) for a, b in zip(points, points[1:], strict=False)
+        )
+        # For a payable the favourable move is downwards: what is kept is
+        # the fall in the rate, which is the integral of the slope.
+        return moved / (high - low)
+
+    @pytest.mark.parametrize("direction", list(ExposureDirection))
+    def test_participation_is_the_ratio_it_claims_to_be(self, direction):
+        """The share of a favourable move from the forward the structure keeps,
+        worked out from each row's legs rather than from what the code
+        computed.
+
+        Two earlier definitions are pinned out by this. The first read the
+        two ends of the grid and gave an at-the-money call on a payable,
+        which keeps every peso of a fall, 0.533. The second measured from
+        today's spot, and with USD/MXN carry putting the forward above the
+        spot, a receivable's at-the-money put kept nothing of the rise until
+        the forward: 0.7279 at one year (0.9333 at three months) where the
+        payable's mirror-image call read 1.0.
+        """
+        comparison = compare_structures(_exposure(direction), QUOTE)
+        for structure in comparison.structures:
+            expected = self._kept_by_slope(structure, direction, QUOTE.forward, 0.20)
+            assert structure.upside_participation == pytest.approx(expected, abs=1e-12), (
+                structure.name
             )
 
+    def test_mirror_image_structures_keep_the_same_share(self):
+        """Alan Vazquez's case on PR #13: one year, 9.5%/4.2%."""
+        quote = StructureQuote(18.5, 1.0, 0.095, 0.042, 0.115)
+        payable = compare_structures(_exposure(), quote)
+        receivable = compare_structures(_exposure(ExposureDirection.RECEIVABLE), quote)
+        for name in ("unhedged", "forward", "protective_option_atm",
+                     "protective_option_otm", "collar", "option_spread"):
+            assert payable.by_name(name).upside_participation == pytest.approx(
+                receivable.by_name(name).upside_participation, abs=1e-12
+            ), name
+        assert receivable.by_name("protective_option_atm").upside_participation == pytest.approx(1.0)
+
+    def test_the_closed_forms(self, payable):
+        """The collar sells its put 8% under the forward, and the move is 20%
+        of the forward, so it keeps exactly 0.08 / 0.20 of it; the seagull
+        keeps the stretch between the forward and its sold put."""
+        got = {s.name: s.upside_participation for s in payable.structures}
+        assert got["protective_option_atm"] == pytest.approx(1.0)
+        assert got["option_spread"] == pytest.approx(1.0)
+        assert got["collar"] == pytest.approx(0.40, abs=1e-12)
+        sold_put = payable.by_name("seagull").legs[-1][1]
+        assert got["seagull"] == pytest.approx(
+            (QUOTE.forward - sold_put) / (0.20 * QUOTE.forward), abs=1e-12
+        )
+        assert got["seagull"] < got["collar"]
+
     def test_the_clamp_never_binds_on_these_structures(self, payable, receivable):
-        """So the assertion above is testing the ratio and not the guard.
-        If a structure ever needs the clamp, this fails and says so rather
-        than hiding it behind a range check that always passes."""
+        """So the assertions above test the ratio and not the guard. If a
+        structure ever needs the clamp, this fails and says so rather than
+        hiding it behind a range check that always passes."""
         for comparison in (payable, receivable):
-            grid = comparison.spot_grid
+            direction = comparison.exposure.direction
             for structure in comparison.structures:
-                rates = structure.payoff_grid
-                span = max(grid) - min(grid)
-                kept = abs(rates[grid.index(max(grid))] - rates[grid.index(min(grid))])
-                assert -1e-12 <= kept / span <= 1.0 + 1e-12
+                ratio = self._kept_by_slope(structure, direction, QUOTE.forward, 0.20)
+                assert -1e-12 <= ratio <= 1.0 + 1e-12, structure.name
 
     def test_the_unhedged_and_forward_rows_bracket_participation(self, payable):
         assert payable.by_name("unhedged").upside_participation == pytest.approx(1.0)
@@ -397,6 +470,43 @@ class TestTheVarianceDecomposition:
             math.sqrt(decomposed["total_variance_unhedged"])
         )
 
+    @pytest.mark.parametrize("hedge_ratio", [0.2, 0.5, 0.8])
+    def test_a_partial_hedge_leaves_the_variance_of_what_is_left(self, hedge_ratio):
+        """The hedged return is the asset's plus the unhedged share of the
+        currency's, `r_a + (1 - h) r_x`, so its variance is
+        `s_a^2 + (1 - h)^2 s_x^2 + 2 (1 - h) rho s_a s_x` -- quadratic in h.
+        The engine subtracted `h (s_x^2 + 2 rho s_a s_x)`, linear in h, which
+        is right only at h = 0 and h = 1, the two points tested. At h = 0.8
+        it gave 0.011265 against 0.009149 (a two-million-path Monte Carlo in
+        `REVISION-rates_engine-2026-10-15-repro/risk-app/r04_fx_cli.py`
+        gives 0.009143)."""
+        result = compare_structures(
+            _exposure(), QUOTE, hedge_ratio=hedge_ratio, correlation=-0.30,
+            foreign_asset_volatility=0.10,
+        ).residual_variance
+        sa, sx, rho, left = 0.10, 0.115, -0.30, 1.0 - hedge_ratio
+        closed_form = sa**2 + left**2 * sx**2 + 2.0 * left * rho * sa * sx
+        assert result["residual_variance_at_hedge_ratio"] == pytest.approx(closed_form, rel=1e-12)
+        assert result["residual_volatility_at_hedge_ratio"] == pytest.approx(
+            math.sqrt(closed_form), rel=1e-12
+        )
+
+    def test_the_partial_hedge_matches_a_simulation(self):
+        """The same number without the algebra: simulate the two correlated
+        returns and measure the variance of what the hedge leaves."""
+        import numpy as np
+
+        h, sa, sx, rho = 0.8, 0.10, 0.115, -0.30
+        z1, z2 = np.random.default_rng(20261015).standard_normal((2, 400_000))
+        asset = sa * z1
+        currency = sx * (rho * z1 + math.sqrt(1.0 - rho * rho) * z2)
+        simulated = float(np.var(asset + (1.0 - h) * currency))
+        result = compare_structures(
+            _exposure(), QUOTE, hedge_ratio=h, correlation=rho, foreign_asset_volatility=sa
+        ).residual_variance
+        assert result["residual_variance_at_hedge_ratio"] == pytest.approx(simulated, rel=0.01)
+        assert result["residual_variance_at_hedge_ratio"] == pytest.approx(0.009149, abs=5e-7)
+
     def test_it_is_absent_rather_than_assumed_when_not_asked_for(self, payable):
         assert payable.residual_variance is None
 
@@ -457,7 +567,10 @@ class TestItDoesNotRecommend:
         spread = payable.by_name("option_spread")
         collar = payable.by_name("collar_zero_cost")
         assert spread.upfront_cost > collar.upfront_cost
-        assert spread.worst_case_rate > collar.worst_case_rate
+        # Its sold far call re-opens the tail: no worst case at all.
+        assert spread.worst_case_rate is None
+        assert collar.worst_case_rate is not None
+        assert max(spread.payoff_grid) > collar.worst_case_rate
         assert TRADE_OFF_FRAME["monotone"] == "no"
 
     def test_participation_is_not_monotone_in_cost_either(self, payable):
@@ -594,3 +707,309 @@ class TestTheUnderlyingPricesAreRight:
         assert row.upfront_cost == pytest.approx(
             QUOTE.price(bought[1], OptionKind.CALL) - QUOTE.price(sold[1], OptionKind.CALL)
         )
+
+
+class TestTheBasisReachesTheStructures:
+    """A cross-currency basis moves the forward every structure is struck on.
+
+    The basis is a spread on the quote leg (`pricing.fx_forward.BASIS_LEG`):
+    the peso rate between spot and delivery is `r_d + b`. That moves the
+    outright exactly as `forward_from_curves` does, and the peso premium is
+    carried on the same shifted rate. Before, `StructureQuote` had no basis
+    at all and the CLI dropped the config's, so hedge-structures' forward row
+    sat 1,941 pips from fx-forward at one year on -100 bp.
+    """
+
+    BASIS = -25.0
+
+    @pytest.fixture
+    def quote(self):
+        return StructureQuote(18.50, 0.25, 0.0950, 0.0420, 0.115, basis_bp=self.BASIS)
+
+    def test_the_forward_carries_the_basis(self, quote):
+        assert quote.forward == pytest.approx(
+            18.50 * math.exp((0.0950 - 0.0025 - 0.0420) * 0.25), rel=1e-14
+        )
+
+    def test_the_forward_row_locks_there(self, quote):
+        row = compare_structures(_exposure(), quote).by_name("forward")
+        assert row.worst_case_rate == pytest.approx(quote.forward)
+        assert row.best_case_rate == pytest.approx(quote.forward)
+        assert quote.forward < QUOTE.forward  # a negative basis lowers it
+
+    def test_an_option_is_priced_on_the_shifted_peso_rate(self, quote):
+        strike = 18.80
+        assert quote.price(strike, OptionKind.CALL) == pytest.approx(
+            gk.price(18.50, strike, 0.25, 0.0925, 0.0420, 0.115, OptionKind.CALL), rel=1e-14
+        )
+
+    def test_the_payload_states_the_basis_and_its_leg(self, quote):
+        stored = quote.to_dict()
+        assert stored["basis_bp"] == self.BASIS
+        assert stored["basis_leg"] == "quote"
+        assert stored["r_domestic"] == 0.0950
+        assert stored["r_domestic_effective"] == pytest.approx(0.0925)
+
+    def test_no_basis_changes_nothing(self):
+        assert QUOTE.basis_bp == 0.0
+        assert QUOTE.forward == gk.forward(18.50, 0.25, 0.0950, 0.0420)
+
+    def test_an_implausible_basis_refuses(self):
+        with pytest.raises(ImplausibleInputError, match="500 bp"):
+            StructureQuote(18.50, 0.25, 0.0950, 0.0420, 0.115, basis_bp=-900.0)
+
+
+class TestTheBoundsAreTheStructuresNotTheGrids:
+    """The review's finding 3.3: a bound was the edge of the grid.
+
+    `worst_case_rate` and `best_case_rate` were the largest and smallest
+    rates on the reported grid, so a structure with no bound reported the
+    grid's edge -- a number that moved with `grid_width` -- and the promised
+    `None` never appeared (`REVISION-rates_engine-2026-10-15-repro/risk-app/
+    r04_fx_cli.py`: the unhedged payable's worst case was 22.20 on the
+    default grid and 27.75 on a 50% one). A bound is now worked out from the
+    legs over every spot, and `None` means that side is open: the rate keeps
+    moving with the spot past the outermost strike.
+    """
+
+    def _carried(self, row):
+        return row.upfront_cost * math.exp(QUOTE.r_domestic * QUOTE.expiry)
+
+    def test_which_rows_are_open_on_which_side_for_a_payable(self, payable):
+        open_sides = {
+            s.name: (s.worst_case_rate is None, s.best_case_rate is None)
+            for s in payable.structures
+        }
+        assert open_sides == {
+            "unhedged": (True, True),
+            "forward": (False, False),
+            "protective_option_atm": (False, True),
+            "protective_option_otm": (False, True),
+            "collar": (False, False),
+            "collar_zero_cost": (False, False),
+            "option_spread": (True, True),
+            "seagull": (True, False),
+        }
+
+    def test_a_protective_call_caps_a_payable_at_strike_plus_premium(self, payable):
+        """Above the strike the call pays the excess, so the payable never
+        costs more than the strike plus the premium carried to settlement."""
+        for name in ("protective_option_atm", "protective_option_otm"):
+            row = payable.by_name(name)
+            strike = row.legs[0][1]
+            assert row.worst_case_rate == pytest.approx(strike + self._carried(row), rel=1e-14)
+
+    def test_a_collar_is_bounded_by_its_two_strikes(self, payable):
+        for name in ("collar", "collar_zero_cost"):
+            row = payable.by_name(name)
+            (_, call_strike, _), (_, put_strike, _) = row.legs
+            assert row.worst_case_rate == pytest.approx(call_strike + self._carried(row), rel=1e-14)
+            assert row.best_case_rate == pytest.approx(put_strike + self._carried(row), rel=1e-14)
+
+    def test_a_seagulls_floor_is_its_sold_put(self, payable):
+        row = payable.by_name("seagull")
+        sold_put = row.legs[-1][1]
+        assert row.best_case_rate == pytest.approx(sold_put + self._carried(row), rel=1e-14)
+
+    def test_a_partial_forward_is_open_on_both_sides(self):
+        row = compare_structures(_exposure(), QUOTE, hedge_ratio=0.8).by_name("forward")
+        assert row.worst_case_rate is None and row.best_case_rate is None
+
+    def test_a_receivable_is_floored_by_its_put(self, receivable):
+        row = receivable.by_name("protective_option_atm")
+        strike = row.legs[0][1]
+        assert row.worst_case_rate == pytest.approx(strike - self._carried(row), rel=1e-14)
+        assert row.best_case_rate is None
+        assert receivable.by_name("unhedged").worst_case_rate is None
+
+    def test_the_bounds_do_not_move_with_the_grid(self):
+        narrow = compare_structures(_exposure(), QUOTE, grid_width=0.20)
+        wide = compare_structures(_exposure(), QUOTE, grid_width=0.50)
+        for a, b in zip(narrow.structures, wide.structures, strict=True):
+            assert a.worst_case_rate == b.worst_case_rate, a.name
+            assert a.best_case_rate == b.best_case_rate, a.name
+
+    def test_a_bound_the_grid_does_not_reach_is_still_reported(self):
+        """On a grid one percent wide the 8% collar's strikes are off the
+        grid, and its bounds are still the strikes, not the grid's edge."""
+        tight = compare_structures(_exposure(), QUOTE, grid_width=0.01).by_name("collar")
+        (_, call_strike, _), (_, put_strike, _) = tight.legs
+        assert max(tight.payoff_grid) < call_strike
+        assert tight.worst_case_rate == pytest.approx(call_strike + self._carried(tight), rel=1e-14)
+        assert tight.best_case_rate == pytest.approx(put_strike + self._carried(tight), rel=1e-14)
+
+    def test_an_open_side_serialises_as_null(self, payable):
+        payload = json.loads(json.dumps(payable.by_name("unhedged").to_dict()))
+        assert payload["worst_case_rate"] is None
+        assert payload["best_case_rate"] is None
+
+
+class TestTheMarketIsCheckedBeforeItIsUsed:
+    """The review's finding on FX inputs: every one of these was priced.
+
+    `REVISION-rates_engine-2026-10-15-repro/risk-app/r14_fx_inputs.py`: a
+    volatility typed in percent (11.5) priced an at-the-money call at about
+    eight pesos a dollar; a negative one priced it as if it were zero; a
+    settlement three months in the past gave an intrinsic value; a rate
+    typed in percent (9.5) gave an absurd forward. The README's promise --
+    a volatility is never a bare float, and the magnitude band catches what
+    is left -- now holds here too.
+    """
+
+    @staticmethod
+    def _quote(**kw):
+        args = {"spot": 18.50, "expiry": 0.25, "r_domestic": 0.0950, "r_foreign": 0.0420,
+                "volatility": 0.115}
+        args.update(kw)
+        return StructureQuote(**args)
+
+    def test_a_volatility_in_percent_refuses(self):
+        from rates_engine.core.errors import VolUnitsError
+
+        with pytest.raises(VolUnitsError, match="lognormal"):
+            self._quote(volatility=11.5)
+
+    def test_a_percent_divided_twice_refuses(self):
+        """11.5% arriving as 0.00115, below MIN_PLAUSIBLE_FX_VOLATILITY."""
+        from rates_engine.core.errors import VolUnitsError
+
+        with pytest.raises(VolUnitsError, match="0.2%"):
+            self._quote(volatility=0.00115)
+
+    @pytest.mark.parametrize("low", [0.03, 0.0115, 0.006])
+    def test_a_low_but_real_fx_volatility_is_accepted(self, low):
+        """A quiet G10 pair trades near 3% and a pegged one below 1%. The
+        first version applied the 5% rates floor here and refused them
+        (Alan Vazquez on PR #13, finding 5)."""
+        from rates_engine.hedging.fx_structures import MIN_PLAUSIBLE_FX_VOLATILITY
+
+        assert MIN_PLAUSIBLE_FX_VOLATILITY == 0.002
+        assert self._quote(volatility=low).vol_at(18.8) == low
+
+    @pytest.mark.parametrize("bad", [0.0, -0.115, float("nan"), float("inf")])
+    def test_a_volatility_that_is_not_one_refuses(self, bad):
+        with pytest.raises(ValueError, match="volatility"):
+            self._quote(volatility=bad)
+
+    @pytest.mark.parametrize("bad", [-0.25, 0.0, float("nan")])
+    def test_a_settlement_that_is_not_ahead_refuses(self, bad):
+        with pytest.raises(ValueError, match="expiry"):
+            self._quote(expiry=bad)
+
+    @pytest.mark.parametrize("bad", [0.0, -18.5, float("nan")])
+    def test_a_spot_that_is_not_positive_refuses(self, bad):
+        with pytest.raises(ValueError, match="spot"):
+            self._quote(spot=bad)
+
+    @pytest.mark.parametrize(
+        ("key", "bad"),
+        [("r_domestic", 9.5), ("r_foreign", 4.2), ("r_domestic", -1.5), ("r_foreign", float("nan"))],
+    )
+    def test_a_rate_outside_the_band_refuses(self, key, bad):
+        with pytest.raises(ImplausibleInputError, match=key):
+            self._quote(**{key: bad})
+
+    def test_the_escape_is_an_unchecked_volatility(self):
+        """Zero, or any market outside the band, is passed on purpose as a
+        `Volatility` built with `unchecked`. At zero the call is worth its
+        discounted intrinsic value on the forward."""
+        from rates_engine.volatility.units import Volatility, VolUnits
+
+        zero = self._quote(volatility=Volatility.unchecked(0.0, VolUnits.LOGNORMAL_DECIMAL))
+        assert zero.price(18.0, OptionKind.CALL) == pytest.approx(
+            math.exp(-0.095 * 0.25) * (zero.forward - 18.0)
+        )
+        huge = self._quote(volatility=Volatility.unchecked(6.0, VolUnits.LOGNORMAL_DECIMAL))
+        assert huge.vol_at(18.8) == 6.0
+
+    def test_a_volatility_in_percent_units_is_read_as_a_decimal(self):
+        from rates_engine.volatility.units import Volatility
+
+        quote = self._quote(volatility=Volatility.lognormal_percent(11.5))
+        assert quote.vol_at(18.8) == pytest.approx(0.115)
+        assert quote.to_dict()["volatility"] == pytest.approx(0.115)
+
+    def test_a_normal_volatility_refuses(self):
+        from rates_engine.core.errors import VolUnitsError
+        from rates_engine.volatility.units import Volatility
+
+        with pytest.raises(VolUnitsError):
+            self._quote(volatility=Volatility.normal_bp(80.0))
+
+    def test_a_callable_volatility_is_the_escape_hatch_and_is_not_banded(self):
+        assert self._quote(volatility=lambda k: 0.115).price(18.8, OptionKind.CALL) > 0.0
+
+    @pytest.mark.parametrize("bad", [1.5, -1.01, float("nan")])
+    def test_a_correlation_outside_minus_one_to_one_refuses(self, bad):
+        with pytest.raises(ValueError, match="correlation"):
+            compare_structures(_exposure(), QUOTE, correlation=bad, foreign_asset_volatility=0.10)
+
+    @pytest.mark.parametrize("bad", [-0.10, float("nan")])
+    def test_a_foreign_asset_volatility_that_is_not_one_refuses(self, bad):
+        with pytest.raises(ValueError, match="foreign_asset_volatility"):
+            compare_structures(_exposure(), QUOTE, correlation=-0.3, foreign_asset_volatility=bad)
+
+    def test_a_nan_amount_refuses(self):
+        with pytest.raises(ValueError, match="positive size"):
+            Exposure(float("nan"), ExposureDirection.PAYABLE, SETTLEMENT, USDMXN)
+
+
+class TestTheSmileHasToSitOnTheLegsForward:
+    """Alan Vazquez on PR #13, finding 6: a `VannaVolgaSmile` passed as the
+    volatility keeps its own rates, so with a basis on the quote its
+    at-the-money and delta pillars sat on a forward about one percent of
+    strike from the legs' at -100 bp, and nothing said so. A smile that
+    reports its forward is now held to the quote's; one that does not is
+    marked."""
+
+    @staticmethod
+    def _smile(r_domestic):
+        from rates_engine.models.fx_delta import DeltaBasis, DeltaConvention, PremiumAdjustment
+        from rates_engine.volatility.fx_smile import ATMConvention, SmileQuotes, VannaVolgaSmile
+
+        return VannaVolgaSmile(
+            spot=18.50, expiry=0.25, r_domestic=r_domestic, r_foreign=0.0420,
+            quotes=SmileQuotes(atm=0.1150, risk_reversal_25=0.0180, butterfly_25=0.0035),
+            delta_convention=DeltaConvention(DeltaBasis.SPOT, PremiumAdjustment.UNADJUSTED),
+            atm_convention=ATMConvention.DELTA_NEUTRAL_STRADDLE,
+        )
+
+    def test_a_smile_without_the_basis_refuses(self):
+        with pytest.raises(ValueError, match="with the basis on it"):
+            StructureQuote(18.50, 0.25, 0.0950, 0.0420, self._smile(0.0950), basis_bp=-100.0)
+
+    def test_a_smile_on_the_basis_adjusted_rate_is_accepted(self):
+        quote = StructureQuote(18.50, 0.25, 0.0950, 0.0420, self._smile(0.0850), basis_bp=-100.0)
+        assert quote.volatility.forward == pytest.approx(quote.forward, rel=1e-14)
+        compare_structures(_exposure(), quote, otm_offset=0.02, spread_offset=0.04)
+
+    def test_a_smile_on_another_expiry_refuses(self):
+        from dataclasses import replace
+
+        with pytest.raises(ValueError, match="expiry"):
+            StructureQuote(18.50, 0.25, 0.0950, 0.0420, replace(self._smile(0.0950), expiry=0.5))
+
+    def test_a_smile_that_cannot_say_its_forward_is_marked(self):
+        from rates_engine.core.evidence import DataQuality
+
+        class StandIn:
+            def volatility_at(self, strike):
+                from rates_engine.core.evidence import Evidence
+
+                class Reading:
+                    volatility = 0.115
+                    evidence = Evidence(produced_by="test.stand_in")
+
+                return Reading()
+
+        result = compare_structures(_exposure(), StructureQuote(18.50, 0.25, 0.0950, 0.0420, StandIn()))
+        codes = set()
+
+        def walk(evidence):
+            codes.update(w.code for w in evidence.warnings)
+            for source in evidence.sources:
+                walk(source)
+
+        walk(result.evidence)
+        assert "smile_forward_unverified" in codes
+        assert result.evidence.worst_quality is DataQuality.ASSUMED

@@ -37,13 +37,20 @@ from typing import Any, Protocol, runtime_checkable
 
 from rates_engine.conventions.currency_pair import CurrencyPair
 from rates_engine.conventions.option_kind import OptionKind
-from rates_engine.core.errors import ImplausibleInputError
-from rates_engine.core.evidence import Evidence
+from rates_engine.core.errors import ImplausibleInputError, VolUnitsError
+from rates_engine.core.evidence import DataQuality, Degradation, Evidence
 from rates_engine.core.results import EngineResult
 from rates_engine.models import garman_kohlhagen as gk
+from rates_engine.pricing.fx_forward import (
+    BASIS_LEG,
+    require_plausible_basis,
+    require_plausible_rate,
+)
+from rates_engine.volatility.units import LOGNORMAL_MAX_DECIMAL, Volatility
 
 __all__ = [
     "STRUCTURE_NAMES",
+    "MIN_PLAUSIBLE_FX_VOLATILITY",
     "ExposureDirection",
     "Exposure",
     "StructureQuote",
@@ -148,7 +155,7 @@ class Exposure:
     pair: CurrencyPair
 
     def __post_init__(self) -> None:
-        if self.amount <= 0.0:
+        if not 0.0 < self.amount < math.inf:
             raise ValueError(
                 f"an exposure's amount is a positive size in {self.pair.base.value}; "
                 f"its direction says which way it hurts. Got {self.amount!r}."
@@ -178,44 +185,189 @@ class ReadableSmile(Protocol):
         ...
 
 
+MIN_PLAUSIBLE_FX_VOLATILITY = 0.002
+"""Below this, as a decimal a year, a single FX volatility is refused.
+
+0.2%. FX volatility has no normal-volatility convention to be confused with,
+so the 5% lognormal floor :class:`~rates_engine.volatility.units.Volatility`
+applies to rates — which exists to catch a basis-point normal vol passed as
+a lognormal one — would refuse real markets here: a quiet G10 pair trades
+near 3%, and a pegged one below 1%. What a floor can still catch is a
+percent figure divided by one hundred twice, 11.5% arriving as 0.00115.
+The ceiling is the lognormal one, 500%, which catches 11.5 for 11.5%. Both
+are plausibility bands, not measurements; a market outside them is passed
+as ``Volatility.unchecked(value, VolUnits.LOGNORMAL_DECIMAL)``.
+"""
+
+
+def _check_volatility(value: float) -> None:
+    """A single float volatility, held to the FX band.
+
+    Positive, finite, and inside ``[MIN_PLAUSIBLE_FX_VOLATILITY, 500%]``.
+    Zero is refused: it is no market, and the hedge comparison priced every
+    option at its intrinsic value on it. A smile, a callable and a
+    :class:`~rates_engine.volatility.units.Volatility` are not checked here:
+    the smile carries its own evidence, the callable is an escape hatch, and
+    a ``Volatility`` has had its own band applied — or was built with
+    ``Volatility.unchecked`` on purpose.
+    """
+    if not 0.0 < value < math.inf:
+        raise ValueError(
+            f"volatility is a lognormal FX volatility as a positive decimal; got "
+            f"{value!r}. For the deterministic limit, or any market outside the band, "
+            "pass Volatility.unchecked(value, VolUnits.LOGNORMAL_DECIMAL)."
+        )
+    if not MIN_PLAUSIBLE_FX_VOLATILITY <= value <= LOGNORMAL_MAX_DECIMAL:
+        raise VolUnitsError(
+            f"an FX volatility of {value!r} is {value:.4%}, outside the plausible "
+            f"{MIN_PLAUSIBLE_FX_VOLATILITY:.1%} to {LOGNORMAL_MAX_DECIMAL:.0%} band. An FX "
+            "volatility is a lognormal decimal: 0.115 for 11.5%, not 11.5 and not "
+            "0.00115. A market genuinely outside the band is passed as "
+            "Volatility.unchecked(value, VolUnits.LOGNORMAL_DECIMAL)."
+        )
+
+
+_UNVERIFIED_SMILE = Evidence(
+    produced_by="hedging_structures.smile_check",
+    warnings=(
+        Degradation(
+            code="smile_forward_unverified",
+            message=(
+                "The smile does not report the forward it was built on, so it could not "
+                "be checked against the forward the legs are struck on, basis included. "
+                "A smile on another forward reads each leg from the wrong part of it."
+            ),
+            data_quality=DataQuality.ASSUMED,
+        ),
+    ),
+)
+
+
 @dataclass(frozen=True)
 class StructureQuote:
     """The market a comparison is struck on.
 
     Attributes:
-        spot: Spot rate.
-        expiry: Time to settlement in years.
-        r_domestic: Quote currency rate.
-        r_foreign: Base currency rate.
-        volatility: One of three things. A ``float`` is a single lognormal
-            volatility for every leg. A :class:`ReadableSmile` — anything
-            with ``volatility_at(strike)`` returning a reading, which is
-            what :class:`~rates_engine.volatility.fx_smile.VannaVolgaSmile` is —
+        spot: Spot rate, quote currency per unit of base.
+        expiry: Years from the spot date — when an option premium is paid —
+            to settlement. Measured from the spot date rather than the
+            valuation date so that the forward these rates imply is the one
+            :func:`~rates_engine.pricing.fx_forward.forward_from_curves`
+            returns; an option delivering on the settlement date expires the
+            spot lag before it, so the same span is its life.
+        r_domestic: Quote currency rate, continuously compounded, as a
+            decimal a year on the same time basis as ``expiry``.
+        r_foreign: Base currency rate, the same convention.
+        volatility: One of four things. A ``float`` is a single lognormal
+            volatility for every leg, as a decimal, held to the FX band
+            (:data:`MIN_PLAUSIBLE_FX_VOLATILITY` to 500%; zero refused). A
+            lognormal :class:`~rates_engine.volatility.units.Volatility` is
+            the same with its own units, and is how a market outside the
+            band, or the zero-volatility limit, is passed:
+            ``Volatility.unchecked(value, VolUnits.LOGNORMAL_DECIMAL)``. A
+            :class:`ReadableSmile` — anything with ``volatility_at(strike)``
+            returning a reading, which is what
+            :class:`~rates_engine.volatility.fx_smile.VannaVolgaSmile` is —
             prices each leg on its own point of the smile *and* carries
             that reading's evidence, which is the honest way to price a
-            collar. A bare callable returning a float also works and is the
-            escape hatch, but its evidence cannot be collected because it
-            has none to give; the payload says which of the three was used.
+            collar; it has to be built on the forward the legs are struck
+            on, basis included (see :meth:`__post_init__`). A bare callable
+            returning a float also works and is the escape hatch, but its
+            evidence cannot be collected because it has none to give; the
+            payload says which was used.
         evidence: Evidence of where the rates and the spot came from — the
             curves, typically. Without it a structure priced on an MXN curve
             does not inherit that curve's ASSUMED quality, which two places
             in this package promise it does.
+        basis_bp: Cross-currency basis in basis points, a spread on the
+            quote currency leg as in :mod:`rates_engine.pricing.fx_forward`
+            (:data:`~rates_engine.pricing.fx_forward.BASIS_LEG`). The quote
+            currency's rate becomes ``r_domestic + basis``: the forward
+            moves exactly as ``forward_from_curves`` moves it, and the
+            options and the premium carry use the same shifted rate, which
+            is the curve that forward implicitly discounts on. Zero, the
+            default, is the parity forward.
     """
 
     spot: float
     expiry: float
     r_domestic: float
     r_foreign: float
-    volatility: float | ReadableSmile | Callable[[float], float]
+    volatility: float | Volatility | ReadableSmile | Callable[[float], float]
     evidence: tuple[Evidence, ...] = ()
+    basis_bp: float = 0.0
+
+    def __post_init__(self) -> None:
+        """Refuse a market no quote produces, and a smile on another forward.
+
+        A smile that reports its ``forward`` (and ``expiry``) has to match
+        this quote's, basis included: its at-the-money and delta pillars are
+        placed on its own forward, and a smile built without the basis read
+        every leg about one percent of strike away from the strike priced at
+        -100 bp. A smile that reports no forward cannot be checked, and its
+        readings carry a ``smile_forward_unverified`` degradation instead.
+
+        Raises:
+            ValueError: A non-positive or non-finite spot, expiry or float
+                volatility, a normal :class:`Volatility`, or a smile on a
+                different forward or expiry.
+            VolUnitsError: A float volatility outside the FX band, or a
+                normal-units :class:`Volatility`.
+            ImplausibleInputError: A rate or the basis outside its band.
+        """
+        # Every number here used to be priced whatever it was: a volatility
+        # typed in percent, a negative one, a settlement in the past, a rate
+        # typed in percent (REVISION risk-app/r14_fx_inputs.py).
+        if not 0.0 < self.spot < math.inf:
+            raise ValueError(f"a spot rate is positive and finite; got spot={self.spot!r}")
+        if not 0.0 < self.expiry < math.inf:
+            raise ValueError(
+                f"expiry is the years from the spot date to settlement and must be "
+                f"positive; got expiry={self.expiry!r}. A settlement on or before the "
+                "spot date has nothing left to hedge."
+            )
+        require_plausible_rate(self.r_domestic, "r_domestic")
+        require_plausible_rate(self.r_foreign, "r_foreign")
+        require_plausible_basis(self.basis_bp)
+        source = self.volatility
+        if isinstance(source, Volatility):
+            source.as_lognormal_decimal()  # a normal volatility raises VolUnitsError
+        elif isinstance(source, ReadableSmile):
+            self._check_smile(source)
+        elif not callable(source):
+            _check_volatility(float(source))
+
+    def _check_smile(self, smile: ReadableSmile) -> None:
+        forward = getattr(smile, "forward", None)
+        if forward is None:
+            return
+        expiry = getattr(smile, "expiry", None)
+        same_forward = math.isclose(float(forward), self.forward, rel_tol=1e-12)
+        same_expiry = expiry is None or math.isclose(float(expiry), self.expiry, rel_tol=1e-12)
+        if not (same_forward and same_expiry):
+            raise ValueError(
+                f"the smile is built on a forward of {float(forward):.6f} (expiry "
+                f"{expiry!r}) and the legs on {self.forward:.6f} (expiry {self.expiry!r}), "
+                "so its at-the-money and delta pillars sit on another forward and every "
+                "leg would read a volatility from the wrong part of it. Build the smile "
+                "with the same spot and expiry and r_domestic = "
+                f"{self.r_domestic_effective!r}, the quote currency rate with the basis on it."
+            )
+
+    @property
+    def r_domestic_effective(self) -> float:
+        """The quote currency rate with the basis on it, as a decimal a year."""
+        return self.r_domestic + self.basis_bp * 1e-4
 
     @property
     def _smile(self) -> ReadableSmile | None:
         return self.volatility if isinstance(self.volatility, ReadableSmile) else None
 
     def vol_at(self, strike: float) -> float:
-        """The volatility for a leg struck at ``strike``."""
+        """The volatility for a leg struck at ``strike``, as a lognormal decimal."""
         source = self.volatility
+        if isinstance(source, Volatility):
+            return source.as_lognormal_decimal()
         if isinstance(source, ReadableSmile):
             return float(source.volatility_at(strike).volatility)
         if callable(source):
@@ -233,6 +385,8 @@ class StructureQuote:
         """
         collected = list(self.evidence)
         smile = self._smile
+        if smile is not None and getattr(smile, "forward", None) is None:
+            collected.append(_UNVERIFIED_SMILE)
         if smile is not None:
             collected.extend(
                 smile.volatility_at(strike).evidence for strike in dict.fromkeys(strikes)
@@ -241,15 +395,27 @@ class StructureQuote:
 
     @property
     def forward(self) -> float:
-        """The outright forward these rates imply."""
-        return gk.forward(self.spot, self.expiry, self.r_domestic, self.r_foreign)
+        """The outright forward these rates and the basis imply."""
+        return gk.forward(self.spot, self.expiry, self.r_domestic_effective, self.r_foreign)
 
     def price(self, strike: float, kind: OptionKind) -> float:
-        """One option, per unit of base currency."""
+        """One option, per unit of base currency, on the basis-adjusted forward."""
         return gk.price(
-            self.spot, strike, self.expiry, self.r_domestic, self.r_foreign,
+            self.spot, strike, self.expiry, self.r_domestic_effective, self.r_foreign,
             self.vol_at(strike), kind,
         )
+
+    def carried(self, premium: float) -> float:
+        """A premium paid on the spot date, carried to settlement.
+
+        Args:
+            premium: Quote currency per unit of base, paid on the spot date.
+
+        Returns:
+            The same amount at settlement, grown at the basis-adjusted quote
+            currency rate.
+        """
+        return premium * math.exp(self.r_domestic_effective * self.expiry)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialise the market, saying whether a smile was used."""
@@ -259,12 +425,20 @@ class StructureQuote:
             "expiry": self.expiry,
             "r_domestic": self.r_domestic,
             "r_foreign": self.r_foreign,
+            "rate_convention": "continuously compounded, decimal a year",
+            "basis_bp": self.basis_bp,
+            "basis_leg": BASIS_LEG,
+            "r_domestic_effective": self.r_domestic_effective,
             "volatility_source": (
                 "smile"
                 if self._smile is not None
                 else "callable" if callable(self.volatility) else "single"
             ),
-            "volatility": None if callable(self.volatility) else self.volatility,
+            "volatility": (
+                None
+                if callable(self.volatility) or isinstance(self.volatility, ReadableSmile)
+                else self.vol_at(self.spot)
+            ),
         }
 
 
@@ -289,12 +463,30 @@ class StructureResult(EngineResult):
         upfront_cost: Net premium in quote currency, per unit of base.
             Positive is paid, negative is received.
         total_cost: The same, scaled by the exposure.
-        worst_case_rate: The least favourable effective rate achievable, in
-            quote per base. ``None`` when the structure leaves the exposure
-            unbounded, which is information rather than a gap.
-        best_case_rate: The most favourable, or ``None`` when unbounded.
+        worst_case_rate: The least favourable effective rate the structure
+            can produce at any spot on the settlement date, in quote per
+            base. Worked out from the legs, not read off the grid, so it does
+            not move with ``grid_width`` and is reported even when the grid
+            stops short of the strike that sets it. ``None`` when the
+            structure leaves that side open — the rate keeps moving with the
+            spot past the outermost strike, so the extreme is set by how far
+            the spot goes rather than by the structure — which is
+            information rather than a gap.
+        best_case_rate: The most favourable, on the same terms, or ``None``
+            when that side is open. For a payable the favourable side runs
+            down towards a spot of zero, and that floor is not a bound any
+            structure bought.
         upside_participation: Fraction of a favourable move retained, in
-            ``[0, 1]``, measured over the reported spot grid.
+            ``[0, 1]``: the change in the effective rate as the spot at
+            settlement moves from the forward to ``grid_width`` times the
+            forward away from it in the favourable direction (down for a
+            payable, up for a receivable), over the change in spot. One is
+            fully open in the good direction, as the unhedged row is; zero
+            is fully fixed, as a full forward is. Measured from the forward
+            because every strike here is set off the forward, so mirror-image
+            structures — a payable's call and a receivable's put at the same
+            offset — keep the same share; a structure that sells a wing
+            inside the move reads lower on a wider ``grid_width``.
         hedge_ratio: The fraction of the exposure covered *by a forward*.
             An option structure covers the whole exposure by a different
             mechanism, so this is ``None`` there rather than ``0.0`` —
@@ -385,7 +577,7 @@ def zero_cost_collar_strike(
                 f"no put strike up to {high:.4f} raises the {target:.6f} needed to pay "
                 f"for the {protective_kind.value} at {protective_strike:.4f}. The "
                 "protection asked for is worth more than the whole opposite wing, so "
-                "there is no zero-cost collar here — widen the protective strike."
+                "there is no zero-cost collar here; widen the protective strike."
             )
         for _ in range(400):
             mid = 0.5 * (low + high)
@@ -400,7 +592,7 @@ def zero_cost_collar_strike(
         raise ImplausibleInputError(
             f"no call strike down to {low:.4f} raises the {target:.6f} needed to pay "
             f"for the {protective_kind.value} at {protective_strike:.4f}. There is no "
-            "zero-cost collar here — widen the protective strike."
+            "zero-cost collar here; widen the protective strike."
         )
     for _ in range(400):
         mid = 0.5 * (low + high)
@@ -430,11 +622,11 @@ def _effective_rate(
     for a receivable it is what each unit fetches, and higher is better.
 
     The premium is carried forward to settlement at the quote currency's
-    rate, because it is paid today and the exposure settles later, and
-    comparing a cost paid now with one paid then without that step
-    understates every option structure.
+    rate, because it is paid on the spot date and the exposure settles
+    later, and comparing a cost paid now with one paid then without that
+    step understates every option structure.
     """
-    carried = upfront * math.exp(quote.r_domestic * quote.expiry)
+    carried = quote.carried(upfront)
     hedged_fraction = abs(forward_amount) / exposure.amount
     open_fraction = 1.0 - hedged_fraction
     rate = open_fraction * spot + hedged_fraction * forward_rate
@@ -447,31 +639,103 @@ def _effective_rate(
     return rate + option_payoff - carried
 
 
-def _summarise(
-    exposure: Exposure, grid: tuple[float, ...], rates: tuple[float, ...]
-) -> tuple[float, float, float]:
-    """Worst case, best case and participation over the grid.
+def _participation(
+    exposure: Exposure,
+    forward: float,
+    width: float,
+    rate_at: Callable[[float], float],
+) -> float:
+    """The share of a favourable move from the forward that the structure keeps.
 
-    Participation is measured against the unhedged position: what fraction
-    of the favourable move the structure keeps. One means fully open in the
+    Measured against the unhedged position, which keeps all of it: the
+    favourable move is the spot at settlement going from the forward to
+    ``width`` times the forward away from it — down for a payable, up for a
+    receivable — and the structure keeps whatever its effective rate moves
+    by on the way, over what the spot moves by. One means fully open in the
     good direction, zero means fully fixed.
+
+    Two earlier versions were wrong. The first took the rate at the
+    *adverse* edge of the grid minus the rate at the favourable one, which
+    mixes the protection bought against an adverse move into the share of a
+    favourable one: an at-the-money call on a payable, which keeps every
+    peso of a fall, read 0.533. The second measured from today's spot to the
+    grid's edge, which with USD/MXN's carry puts the forward well above the
+    spot: a receivable's at-the-money put, struck at the forward, kept
+    nothing of the rise until the forward and read 0.73 at one year where
+    the payable's mirror-image call read 1.
     """
     if exposure.direction is ExposureDirection.PAYABLE:
-        worst, best = max(rates), min(rates)
-        favourable = min(grid)
-        unhedged_gain = exposure_spot = None
-        del unhedged_gain, exposure_spot
-        reference = max(grid)
-        open_span = reference - favourable
-        kept = rates[grid.index(reference)] - rates[grid.index(favourable)]
+        favourable = forward * (1.0 - width)
+        move, kept = forward - favourable, rate_at(forward) - rate_at(favourable)
     else:
-        worst, best = min(rates), max(rates)
-        favourable = max(grid)
-        reference = min(grid)
-        open_span = favourable - reference
-        kept = rates[grid.index(favourable)] - rates[grid.index(reference)]
-    participation = 0.0 if open_span <= 0.0 else max(0.0, min(1.0, kept / open_span))
-    return worst, best, participation
+        favourable = forward * (1.0 + width)
+        move, kept = favourable - forward, rate_at(favourable) - rate_at(forward)
+    if move <= 0.0:
+        return 0.0
+    return max(0.0, min(1.0, kept / move))
+
+
+_FLAT = 1e-12
+"""A tail slope this close to zero is flat: quantities are whole units."""
+
+
+def _bounds(
+    exposure: Exposure,
+    legs: tuple[_Leg, ...],
+    forward_amount: float,
+    rate_at: Callable[[float], float],
+) -> tuple[float | None, float | None]:
+    """The worst and best effective rate over every spot, or ``None`` where open.
+
+    The effective rate is piecewise linear in the spot at settlement, with
+    kinks at the strikes, so its extremes over ``(0, inf)`` are at a kink
+    unless a tail keeps moving. Past the highest strike only calls are in
+    the money, and below the lowest only puts, so the two tail slopes come
+    straight from the legs: the open fraction of the exposure, plus or minus
+    each in-the-money leg's quantity. A tail that is not flat is open on the
+    side it moves towards — upwards without limit past the top strike, or
+    down to the spot's floor at zero below the bottom one, which no
+    structure bought — and that side reports ``None``.
+
+    This read the grid's largest and smallest rates, so every open side
+    reported the grid's edge: the unhedged payable's worst case was 22.20
+    on the default grid and 27.75 on a fifty-percent one.
+    """
+    open_fraction = 1.0 - abs(forward_amount) / exposure.amount
+    helped = 1.0 if exposure.direction is ExposureDirection.RECEIVABLE else -1.0
+    upper = open_fraction + helped * sum(
+        leg.quantity for leg in legs if leg.kind is OptionKind.CALL
+    )
+    lower = open_fraction - helped * sum(
+        leg.quantity for leg in legs if leg.kind is OptionKind.PUT
+    )
+    strikes = sorted({leg.strike for leg in legs})
+    if not strikes:
+        # Linear in the spot: constant when fully forward, open both ways
+        # otherwise. Any spot serves as the evaluation point of a constant.
+        if abs(open_fraction) <= _FLAT:
+            fixed = rate_at(1.0)
+            return fixed, fixed
+        return None, None
+    values = [rate_at(strike) for strike in strikes]
+    highest = None if upper > _FLAT or lower < -_FLAT else max(values)
+    lowest = None if upper < -_FLAT or lower > _FLAT else min(values)
+    if exposure.direction is ExposureDirection.PAYABLE:
+        return highest, lowest
+    return lowest, highest
+
+
+def _summarise(
+    exposure: Exposure,
+    forward: float,
+    width: float,
+    legs: tuple[_Leg, ...],
+    forward_amount: float,
+    rate_at: Callable[[float], float],
+) -> tuple[float | None, float | None, float]:
+    """Worst case, best case and participation."""
+    worst, best = _bounds(exposure, legs, forward_amount, rate_at)
+    return worst, best, _participation(exposure, forward, width, rate_at)
 
 
 def _structure(
@@ -479,6 +743,7 @@ def _structure(
     exposure: Exposure,
     quote: StructureQuote,
     grid: tuple[float, ...],
+    width: float,
     *,
     legs: tuple[_Leg, ...] = (),
     forward_amount: float = 0.0,
@@ -489,11 +754,14 @@ def _structure(
     upfront = sum(leg.quantity * quote.price(leg.strike, leg.kind) for leg in legs)
     sources = quote.sources(tuple(leg.strike for leg in legs))
     outright = quote.forward if forward_rate is None else forward_rate
-    rates = tuple(
-        _effective_rate(exposure, quote, legs, forward_amount, outright, upfront, spot)
-        for spot in grid
+
+    def rate_at(spot: float) -> float:
+        return _effective_rate(exposure, quote, legs, forward_amount, outright, upfront, spot)
+
+    rates = tuple(rate_at(spot) for spot in grid)
+    worst, best, participation = _summarise(
+        exposure, quote.forward, width, legs, forward_amount, rate_at
     )
-    worst, best, participation = _summarise(exposure, grid, rates)
     evidence = Evidence(
         produced_by=f"hedging_structures.{name}",
         fields={
@@ -506,8 +774,7 @@ def _structure(
             ],
             "forward_amount": forward_amount,
             "forward_rate": outright,
-            "premium_carried_to_settlement": upfront
-            * math.exp(quote.r_domestic * quote.expiry),
+            "premium_carried_to_settlement": quote.carried(upfront),
             **quote.to_dict(),
             **exposure.to_dict(),
         },
@@ -631,7 +898,9 @@ def compare_structures(
 
     Raises:
         ValueError: ``hedge_ratio`` is outside ``[0, 1]``, an offset is not
-            positive, or only one of the two variance inputs was given.
+            positive, only one of the two variance inputs was given, the
+            correlation is outside ``[-1, 1]``, or the asset volatility is
+            negative or not finite.
     """
     if not 0.0 <= hedge_ratio <= 1.0:
         raise ValueError(f"a hedge ratio is a fraction in [0, 1]; got {hedge_ratio!r}")
@@ -648,6 +917,13 @@ def compare_structures(
             "foreign asset's volatility, or neither. Supplying one and defaulting "
             "the other would report a number nobody asked for."
         )
+    if correlation is not None and not -1.0 <= correlation <= 1.0:
+        raise ValueError(f"a correlation is in [-1, 1]; got correlation={correlation!r}")
+    if foreign_asset_volatility is not None and not 0.0 <= foreign_asset_volatility < math.inf:
+        raise ValueError(
+            "foreign_asset_volatility is a volatility as a decimal, zero or more; got "
+            f"{foreign_asset_volatility!r}"
+        )
 
     grid = _grid(quote.spot, grid_points, grid_width)
     outright = quote.forward
@@ -662,12 +938,13 @@ def compare_structures(
     )
 
     rows: list[StructureResult] = [
-        _structure("unhedged", exposure, quote, grid, hedge_ratio=0.0),
+        _structure("unhedged", exposure, quote, grid, grid_width, hedge_ratio=0.0),
         _structure(
             "forward",
             exposure,
             quote,
             grid,
+            grid_width,
             forward_amount=signed * hedge_ratio,
             hedge_ratio=hedge_ratio,
         ),
@@ -676,6 +953,7 @@ def compare_structures(
             exposure,
             quote,
             grid,
+            grid_width,
             legs=(_Leg(protective, atm_strike, 1.0),),
         ),
         _structure(
@@ -683,6 +961,7 @@ def compare_structures(
             exposure,
             quote,
             grid,
+            grid_width,
             legs=(_Leg(protective, otm_strike, 1.0),),
         ),
     ]
@@ -702,6 +981,7 @@ def compare_structures(
             exposure,
             quote,
             grid,
+            grid_width,
             legs=(
                 _Leg(protective, otm_strike, 1.0),
                 _Leg(protective.opposite, collar_sold, -1.0),
@@ -716,6 +996,7 @@ def compare_structures(
             exposure,
             quote,
             grid,
+            grid_width,
             legs=(
                 _Leg(protective, otm_strike, 1.0),
                 _Leg(protective.opposite, sold_strike, -1.0),
@@ -728,6 +1009,7 @@ def compare_structures(
             exposure,
             quote,
             grid,
+            grid_width,
             legs=(
                 _Leg(protective, otm_strike, 1.0),
                 _Leg(protective, far_strike, -1.0),
@@ -749,6 +1031,7 @@ def compare_structures(
             exposure,
             quote,
             grid,
+            grid_width,
             legs=(
                 _Leg(protective, otm_strike, 1.0),
                 _Leg(protective, far_strike, -1.0),
@@ -764,7 +1047,14 @@ def compare_structures(
         currency = float(quote.vol_at(outright))
         cross = 2.0 * float(correlation) * asset * currency
         total = asset * asset + currency * currency + cross
-        hedged = total - hedge_ratio * (currency * currency + cross)
+        # A hedge ratio h leaves (1 - h) of the currency return in the
+        # domestic return, R_FC + (1 - h) R_FX, so the currency variance
+        # scales with (1 - h)^2 and the cross term with (1 - h). This
+        # subtracted h (sigma^2(RFX) + cross), linear in h: right at h = 0
+        # and h = 1, the two ends the tests checked, and 0.011265 against
+        # 0.009149 at h = 0.8 on the PRD's market.
+        left = 1.0 - hedge_ratio
+        hedged = asset * asset + left * left * currency * currency + left * cross
         decomposition = {
             "asset_variance": asset * asset,
             "currency_variance": currency * currency,

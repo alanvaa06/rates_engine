@@ -48,7 +48,8 @@ class Swaption:
         strike: The fixed rate the option is struck at, as a decimal.
         side: ``"payer"`` for the right to pay fixed, ``"receiver"`` for the
             right to receive it.
-        notional: Notional in USD.
+        notional: Notional in the underlying swap's currency, which its
+            index fixes: USD on SOFR, MXN on TIIE.
     """
 
     expiry: date
@@ -62,10 +63,13 @@ class Swaption:
             raise ValueError(
                 f"side must be '{Side.PAYER}' or '{Side.RECEIVER}', got {self.side!r}"
             )
-        if self.expiry > self.underlying.effective:
+        # The underlying's span, not its effective date: the schedule rolls a
+        # Saturday start back to the Friday, and the swap accrues from there.
+        starts = self.underlying.span[0]
+        if self.expiry > starts:
             raise ValueError(
                 f"the option expires at {self.expiry}, after the underlying swap starts "
-                f"at {self.underlying.effective}; a swaption cannot be exercised into a "
+                f"at {starts}; a swaption cannot be exercised into a "
                 "swap that has already begun accruing"
             )
 
@@ -86,8 +90,8 @@ class Swaption:
 
     @property
     def span(self) -> tuple[date, date]:
-        """Option expiry through the underlying's maturity."""
-        return self.expiry, self.underlying.maturity
+        """Option expiry through the underlying's last accrual end."""
+        return self.expiry, self.underlying.span[1]
 
     def time_to_expiry(self, as_of: date, *, day_count: DayCount = CURVE_TIME_BASIS) -> float:
         """Years from a valuation date to expiry.

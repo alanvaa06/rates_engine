@@ -272,3 +272,99 @@ class TestTheCurrencyPair:
 
     def test_the_pip_travels_in_the_payload(self):
         assert USDMXN.to_dict()["pip"] == 1e-4
+
+
+class TestNegativeInputsAreNotLimits:
+    """Zero expiry and zero volatility are limits the formula has; negative
+    ones are not. `price` used to read a volatility of -0.115 as zero and an
+    expiry three months gone as the intrinsic value today
+    (`REVISION-rates_engine-2026-10-15-repro/risk-app/r14_fx_inputs.py`)."""
+
+    FUNCTIONS = ("price", "delta_spot", "vega", "gamma", "vanna", "volga", "theta")
+
+    @pytest.mark.parametrize("name", FUNCTIONS)
+    def test_a_negative_volatility_refuses(self, name):
+        with pytest.raises(ValueError, match="volatility"):
+            getattr(gk, name)(SPOT, 19.0, EXPIRY, R_MXN, R_USD, -0.115)
+
+    @pytest.mark.parametrize("name", FUNCTIONS)
+    def test_a_negative_expiry_refuses(self, name):
+        with pytest.raises(ValueError, match="expiry"):
+            getattr(gk, name)(SPOT, 19.0, -0.25, R_MXN, R_USD, VOL)
+
+    @pytest.mark.parametrize("name", FUNCTIONS)
+    @pytest.mark.parametrize("field", ["expiry", "volatility"])
+    def test_a_nan_refuses_rather_than_pricing_nan(self, name, field):
+        args = {"expiry": EXPIRY, "volatility": VOL, field: float("nan")}
+        with pytest.raises(ValueError, match=field):
+            getattr(gk, name)(SPOT, 19.0, args["expiry"], R_MXN, R_USD, args["volatility"])
+
+    def test_the_zero_limits_still_hold(self):
+        assert gk.price(SPOT, 18.0, 0.0, R_MXN, R_USD, VOL) == pytest.approx(0.5)
+        assert gk.vega(SPOT, 18.0, EXPIRY, R_MXN, R_USD, 0.0) == 0.0
+
+
+class TestTheZeroVolatilityDelta:
+    """The review's minor finding: `delta_spot` at zero volatility compared
+    the spot with the strike, at magnitude one.
+
+    With no volatility the option ends in the money exactly when the
+    *forward* does, and its value is `e^{-r_d T} (F - K)+`, whose derivative
+    in the spot is `e^{-r_d T} F / S = e^{-r_f T}`. The reference is
+    QuantLib 1.44, `ql.BlackCalculator(PlainVanillaPayoff(Call, K), F, 0.0,
+    e^{-r_d T}).delta(S)`, at `S = 18.0, K = 18.2, T = 1, r_d = 9%, r_f = 4%`:
+    0.9607894391523233, where this returned 0 (spot below strike) --
+    `REVISION-rates_engine-2026-10-15-repro/options/08_fx_gk_delta_vs_ql.py`.
+    """
+
+    QUANTLIB_CALL_DELTA = 0.9607894391523233
+    ARGS = (18.0, 18.2, 1.0, 0.09, 0.04, 0.0)
+
+    def test_a_call_whose_forward_is_in_the_money_has_the_discounted_delta(self):
+        assert gk.delta_spot(*self.ARGS) == pytest.approx(self.QUANTLIB_CALL_DELTA, rel=1e-15)
+
+    def test_the_spot_being_above_the_strike_does_not_make_it_one(self):
+        """Spot 18.3 above the strike: the old answer was 1, the limit is still
+        the discount factor (QuantLib: 0.9607894391523233)."""
+        assert gk.delta_spot(18.3, 18.2, 1.0, 0.09, 0.04, 0.0) == pytest.approx(
+            self.QUANTLIB_CALL_DELTA, rel=1e-15
+        )
+
+    def test_a_put_whose_forward_is_out_of_the_money_has_none(self):
+        """Spot below the strike and forward above it. The old answer was -1;
+        parity, `delta_call - delta_put = e^{-r_f T}`, makes it zero."""
+        assert gk.delta_spot(*self.ARGS, kind=OptionKind.PUT) == 0.0
+
+    def test_a_put_whose_forward_is_in_the_money(self):
+        """QuantLib at K = 19.5, above the forward 18.9229: -0.9607894391523233."""
+        assert gk.delta_spot(18.0, 19.5, 1.0, 0.09, 0.04, 0.0, OptionKind.PUT) == pytest.approx(
+            -self.QUANTLIB_CALL_DELTA, rel=1e-15
+        )
+
+    def test_it_is_the_limit_of_a_vanishing_volatility(self):
+        for strike in (17.0, 18.2, 19.5, 21.0):
+            for kind in OptionKind:
+                at_zero = gk.delta_spot(18.0, strike, 1.0, 0.09, 0.04, 0.0, kind)
+                tiny = gk.delta_spot(18.0, strike, 1.0, 0.09, 0.04, 1e-9, kind)
+                assert at_zero == pytest.approx(tiny, abs=1e-12), (strike, kind)
+
+    def test_it_is_the_slope_of_the_zero_volatility_price(self):
+        step = 1e-6
+        slope = (
+            gk.price(18.0 + step, 18.2, 1.0, 0.09, 0.04, 0.0)
+            - gk.price(18.0 - step, 18.2, 1.0, 0.09, 0.04, 0.0)
+        ) / (2.0 * step)
+        assert gk.delta_spot(*self.ARGS) == pytest.approx(slope, rel=1e-8)
+
+    def test_at_the_forward_it_is_half_the_discount_factor(self):
+        """`d1 -> 0` as the volatility vanishes there, so `N(d1) -> 1/2`, the
+        value QuantLib's `BlackCalculator` also takes when forward and strike
+        coincide."""
+        strike = gk.forward(18.0, 1.0, 0.09, 0.04)
+        assert gk.delta_spot(18.0, strike, 1.0, 0.09, 0.04, 0.0) == pytest.approx(
+            0.5 * self.QUANTLIB_CALL_DELTA, rel=1e-15
+        )
+
+    def test_at_expiry_it_is_still_the_intrinsic_delta(self):
+        assert gk.delta_spot(18.3, 18.2, 0.0, 0.09, 0.04, 0.115) == 1.0
+        assert gk.delta_spot(18.0, 18.2, 0.0, 0.09, 0.04, 0.115) == 0.0

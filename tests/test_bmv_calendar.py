@@ -149,23 +149,26 @@ class TestNoWeekendObservance:
     """The rule this calendar does *not* have, asserted so nobody adds one."""
 
     def test_a_saturday_holiday_is_not_moved_to_friday(self):
-        """1 January 2022 was a Saturday. SIFMA observes it on the Friday;
-        the BMV rules carry no such roll, so 31 December 2021 stays a
-        business day. Inventing an observance rule here would be the same
-        error as renaming the calendar."""
+        """1 January 2022 was a Saturday. The BMV rules carry no roll, so 31
+        December 2021 stays a business day. Inventing an observance rule here
+        would be the same error as renaming the calendar."""
         assert date(2022, 1, 1) in BMV.holidays(2022)
         assert date(2022, 1, 1).weekday() == 5
         assert date(2021, 12, 31) not in BMV.holidays(2021)
         assert BMV.is_business_day(date(2021, 12, 31))
 
     def test_sifma_does_roll_and_the_two_therefore_differ(self):
-        """SIFMA observes New Year 2022 on Friday 31 December 2021 — a date
-        that belongs to `holidays(2022)`, not `holidays(2021)`, which is the
-        boundary the base class has to handle. The BMV calendar has no such
-        rule, so the same Friday is an ordinary business day there."""
-        assert date(2021, 12, 31) in SIFMA_US.holidays(2022)
-        assert not SIFMA_US.is_business_day(date(2021, 12, 31))
-        assert BMV.is_business_day(date(2021, 12, 31))
+        """Christmas 2021 was a Saturday. SIFMA observes it on Friday 24
+        December -- FRED has no SOFR that day -- while the BMV calendar has
+        no roll, so the same Friday is an ordinary business day there.
+
+        This used to be New Year's Day 2022, on the belief that SIFMA closes
+        the Friday before a Saturday 1 January. It does not: SOFR was
+        published on 31 December 2021, and SIFMA_US no longer closes it."""
+        assert date(2021, 12, 25).weekday() == 5
+        assert date(2021, 12, 24) in SIFMA_US.holidays(2021)
+        assert not SIFMA_US.is_business_day(date(2021, 12, 24))
+        assert BMV.is_business_day(date(2021, 12, 24))
 
 
 class TestDerivedBehaviour:

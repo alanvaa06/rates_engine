@@ -25,7 +25,11 @@ from datetime import date
 from functools import cached_property
 
 from rates_engine.conventions.daycount import CURVE_TIME_BASIS, DayCount, year_fraction
-from rates_engine.core.errors import CurveArbitrageError, UnsupportedConventionError
+from rates_engine.core.errors import (
+    CurveArbitrageError,
+    MissingFixingError,
+    UnsupportedConventionError,
+)
 from rates_engine.core.evidence import Degradation
 from rates_engine.core.money import Currency, require_same_currency
 from rates_engine.curves.interpolation import MonotoneConvex
@@ -44,8 +48,12 @@ INTERPOLATIONS = ("log_linear_df", "monotone_convex")
     interpolation error inside the period.
 ``monotone_convex``
     Hagan and West (2006). Continuous forwards that still integrate back to
-    the discrete ones exactly, so every calibration instrument reprices
-    either way and the two can be compared on the same fit.
+    the discrete ones exactly. Every calibration instrument reprices either
+    way, so the two can be compared on the same quotes -- but under this one
+    only because the bootstrap sweeps the curve to a fixed point: the
+    forward at a node depends on the interval after it, so an instrument
+    reading a factor inside an interval (a payment lag, an intermediate
+    coupon) is disturbed by every later node until the sweeps settle.
 """
 
 
@@ -290,11 +298,25 @@ class DiscountCurve:
 
         Raises:
             UnsupportedConventionError: ``compounding`` is not implemented.
+            MissingFixingError: ``start`` is before :attr:`as_of`. The part
+                of the period before it is history, which no curve holds:
+                :meth:`df` reads one there, and the ratio it returned was
+                nobody's rate -- 2.61% for a quarter begun a month ago on a
+                flat 4% curve.
             ValueError: ``end`` is not after ``start``.
         """
         if compounding not in _COMPOUNDING:
             raise UnsupportedConventionError(
                 f"compounding {compounding!r} is not implemented; supported: {_COMPOUNDING}"
+            )
+        if start < self.as_of:
+            raise MissingFixingError(
+                f"a forward from {start} to {end} starts before this curve's valuation date "
+                f"{self.as_of}. The part before it is history -- published fixings -- and a "
+                "curve holds none: it reads its discount factors there as one, and the rate "
+                "that comes out is nobody's. Value a period that has started from its "
+                "fixings: fixings= on the pricers, risk measures and hedges, or a "
+                "RealizedStubNode for the realised part of a bootstrap."
             )
         tau = year_fraction(start, end, day_count)
         if tau <= 0.0:
@@ -387,6 +409,40 @@ class DiscountCurve:
         return extended._seeded(
             self.node_times + (self.time(node),),
             self._log_dfs + (math.log(df),),
+        )
+
+    def with_factor(self, node: date, df: float) -> DiscountCurve:
+        """A copy with the factor at an existing node replaced, every other node kept.
+
+        :meth:`with_node` only appends or replaces the last node, which is all
+        a one-pass bootstrap needs. The sweeps that settle a monotone convex
+        bootstrap re-solve interior nodes with the later ones in place, and
+        this is the operation they repeat.
+
+        Args:
+            node: One of :attr:`nodes`.
+            df: The new discount factor there, dimensionless.
+
+        Returns:
+            The curve with that one factor changed.
+
+        Raises:
+            ValueError: ``node`` is not a node of this curve.
+        """
+        if node not in self.nodes:
+            raise ValueError(f"{node} is not a node of this curve; with_factor only replaces")
+        index = self.nodes.index(node)
+        replaced = DiscountCurve(
+            self.as_of,
+            self.nodes,
+            self.dfs[:index] + (df,) + self.dfs[index + 1 :],
+            self.interpolation,
+            currency=self.currency,
+            provenance=self.provenance,
+        )
+        logs = self._log_dfs
+        return replaced._seeded(
+            self.node_times, logs[:index] + (math.log(df),) + logs[index + 1 :]
         )
 
     def _seeded(

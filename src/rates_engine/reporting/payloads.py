@@ -12,10 +12,40 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from rates_engine.core.errors import RatesEngineError
+from rates_engine.core.errors import (
+    BootstrapResidualError,
+    CalibrationError,
+    IncompleteStripError,
+    KeyTenorOutOfRangeError,
+    MissingForwardError,
+    RatesEngineError,
+    ShiftRequiredError,
+    SliceNotQuotedError,
+    UnderdeterminedCurveError,
+)
 from rates_engine.core.results import SCHEMA_VERSION, EngineResult
 
 __all__ = ["result_payload", "error_payload", "dumps"]
+
+_RECOVERABLE_ON_EXIT_TWO: tuple[type[RatesEngineError], ...] = (
+    BootstrapResidualError,
+    UnderdeterminedCurveError,
+    IncompleteStripError,
+    KeyTenorOutOfRangeError,
+    ShiftRequiredError,
+    MissingForwardError,
+    SliceNotQuotedError,
+    CalibrationError,
+)
+"""The exit-code-2 refusals ``docs/ERRORS.md`` heads "Recoverable".
+
+Exit code 2 says the calculation is impossible on these inputs, not that
+nothing the caller does can help: a strip with a hole is fixed by supplying
+the contract, a key tenor past the curve by asking for one inside it. The
+field used to be ``exit_code == 1``, which told an agent to give up on all
+eight. ``tests/test_payloads.py`` reads each heading from the document and
+holds this tuple to it, in both directions.
+"""
 
 
 def result_payload(result: EngineResult, **extra: Any) -> dict[str, Any]:
@@ -42,7 +72,9 @@ def error_payload(exc: BaseException) -> dict[str, Any]:
     Returns:
         A mapping with ``schema_version``, ``error`` and ``exit_code``. The
         traceback is deliberately absent: it goes to stderr, so that stdout
-        stays a single parseable document.
+        stays a single parseable document. ``error.recoverable`` is what
+        ``docs/ERRORS.md`` says of the exception: true for every exit code 1,
+        and for the exit-code-2 refusals the document heads "Recoverable".
     """
     exit_code = exc.exit_code if isinstance(exc, RatesEngineError) else 1
     return {
@@ -51,7 +83,7 @@ def error_payload(exc: BaseException) -> dict[str, Any]:
         "error": {
             "type": type(exc).__name__,
             "message": str(exc),
-            "recoverable": exit_code == 1,
+            "recoverable": exit_code == 1 or isinstance(exc, _RECOVERABLE_ON_EXIT_TWO),
         },
         "exit_code": exit_code,
     }

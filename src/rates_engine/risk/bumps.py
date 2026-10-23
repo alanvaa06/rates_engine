@@ -12,6 +12,11 @@ moves the continuously compounded zero curve by a constant or by a function
 of time, on the discount and projection curves alike. A parallel basis point
 is the constant ``1e-4``; a key-rate shock is a tent (:func:`tent_weights`).
 
+**History does not move.** A trade that has started has a floating coupon
+partly decided by published fixings; :func:`repriced` hands them to the
+pricer, so a bump moves the forecast and the discounting and leaves the
+history where it is. Without them such a trade is refused, as by ``pv``.
+
 **Central differences.** ``(PV(y - h) - PV(y + h)) / 2``, not a one-sided
 bump. The symmetric form cancels the second-order term exactly, which is what
 lets a receiver and a payer agree in magnitude to machine precision and what
@@ -25,6 +30,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from rates_engine.curves.discount import CurveSet
+from rates_engine.market.snapshot import MarketSnapshot
 from rates_engine.pricing.linear import discounted_value
 from rates_engine.pricing.projection import Priceable
 
@@ -129,15 +135,28 @@ def shifted(curve_set: CurveSet, shift: Shift) -> CurveSet:
     return curve_set.shifted(shift)
 
 
-def repriced(instrument: Priceable, curve_set: CurveSet, shift: Shift) -> float:
+def repriced(
+    instrument: Priceable,
+    curve_set: CurveSet,
+    shift: Shift,
+    *,
+    fixings: MarketSnapshot | None = None,
+) -> float:
     """Present value after shifting both curves of ``curve_set`` by ``shift``.
 
     Args:
         instrument: Anything with cashflows.
         curve_set: The unshifted curves.
         shift: A constant decimal shift or a function of time in years.
+        fixings: Published fixings for a floating coupon already decided,
+            as for :func:`~rates_engine.pricing.linear.pv`. The same history
+            enters every reprice: a curve bump does not move it.
 
     Returns:
         The present value on the shifted curves, in their currency.
+
+    Raises:
+        MissingFixingError: A floating coupon is already decided and
+            ``fixings`` does not cover it.
     """
-    return discounted_value(instrument, shifted(curve_set, shift))
+    return discounted_value(instrument, shifted(curve_set, shift), fixings=fixings)

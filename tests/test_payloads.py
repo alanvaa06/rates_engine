@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from dataclasses import replace
 from datetime import date, timedelta
 from pathlib import Path
@@ -382,6 +383,67 @@ class TestErrorPayloads:
         except ValueError as exc:
             payload = error_payload(exc)
         assert "Traceback" not in json.dumps(payload)
+
+
+ERRORS_MD = Path(__file__).resolve().parents[1] / "docs" / "ERRORS.md"
+
+
+def _headings() -> list[tuple[str, int, bool]]:
+    """Each exception's heading in ``docs/ERRORS.md``: name, exit code, recoverable.
+
+    The document opens each section with a bold line, ``**Exit code 2.
+    Recoverable: supply the missing contract, or waive the check.**`` or
+    ``**Exit code 2. Not recoverable by retrying: ...**``. That line is the
+    contract the ``recoverable`` field has to agree with, so it is read from
+    the document rather than restated here.
+    """
+    text = ERRORS_MD.read_text(encoding="utf-8")
+    found = re.findall(r"^### `(\w+)`\s*\n\s*\n\*\*Exit code (\d)\.([^*]*)\*\*", text, re.MULTILINE)
+    return [(name, int(code), "Recoverable:" in rest) for name, code, rest in found]
+
+
+HEADINGS = _headings()
+
+
+class TestRecoverableFollowsTheDocument:
+    """The ``recoverable`` field said ``exit_code == 1``, and ERRORS.md disagrees.
+
+    ``IncompleteStripError`` (ERRORS.md:314) and ``KeyTenorOutOfRangeError``
+    (:370) are headed "Recoverable" with exit code 2 — supply the contract,
+    ask for a tenor the curve covers — and the review's ``r12_recoverable.py``
+    got ``"recoverable": false`` for both. Six more exit-2 refusals are
+    headed the same way.
+    """
+
+    def test_the_document_was_read(self):
+        assert len(HEADINGS) >= 25
+        assert ("IncompleteStripError", 2, True) in HEADINGS
+        assert ("CurveArbitrageError", 2, False) in HEADINGS
+
+    @pytest.mark.parametrize(
+        ("name", "exit_code", "recoverable"), HEADINGS, ids=[h[0] for h in HEADINGS]
+    )
+    def test_the_payload_says_what_the_heading_says(self, name, exit_code, recoverable):
+        from rates_engine.core import errors
+
+        payload = error_payload(getattr(errors, name)("x"))
+        assert payload["exit_code"] == exit_code
+        assert payload["error"]["recoverable"] is recoverable
+
+    @pytest.mark.parametrize("name", ["IncompleteStripError", "KeyTenorOutOfRangeError"])
+    def test_the_two_the_review_found(self, name):
+        from rates_engine.core import errors
+
+        payload = error_payload(getattr(errors, name)("x"))
+        assert (payload["exit_code"], payload["error"]["recoverable"]) == (2, True)
+
+    def test_a_subclass_inherits_its_parent_s_answer(self):
+        from rates_engine.core.errors import IncompleteStripError
+
+        class NarrowerStripError(IncompleteStripError):
+            """A stand-in for a refusal added later under a recoverable parent."""
+
+        assert error_payload(NarrowerStripError("x"))["error"]["recoverable"] is True
 
 
 class TestSerialisation:

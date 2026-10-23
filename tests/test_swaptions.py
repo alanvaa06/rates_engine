@@ -231,6 +231,94 @@ class TestImpliedVol:
         with pytest.raises(ValueError, match="expiry"):
             bachelier.implied_normal_vol(0.1, 0.04, 0.04, 0.0)
 
+    @pytest.mark.parametrize("target", [float("nan"), float("inf")])
+    def test_a_target_that_is_not_a_finite_price_refuses(self, target):
+        # Every comparison with NaN is false, so the bracket never grew, each
+        # Newton step was rejected, and the bisection walked to the top of the
+        # bracket: a NaN price came back as 100 bp normal or 10% lognormal.
+        with pytest.raises(ValueError, match="finite"):
+            bachelier.implied_normal_vol(target, 0.04, 0.045, 5.0, annuity=4.2)
+        with pytest.raises(ValueError, match="finite"):
+            black.implied_lognormal_vol(target, 0.04, 0.045, 5.0, annuity=4.2)
+
+    @pytest.mark.parametrize(
+        "forward,strike,expiry",
+        [(float("nan"), 0.045, 5.0), (0.04, float("nan"), 5.0), (0.04, 0.045, float("nan"))],
+    )
+    def test_an_inversion_input_that_is_not_a_number_refuses(self, forward, strike, expiry):
+        target = 0.01
+        with pytest.raises(ValueError, match="finite"):
+            bachelier.implied_normal_vol(target, forward, strike, expiry)
+        with pytest.raises(ValueError, match="finite"):
+            black.implied_lognormal_vol(target, forward, strike, expiry)
+
+
+class TestVegaAtZeroVolatility:
+    """Vega at sigma = 0 is the limit sigma -> 0+, which depends on moneyness.
+
+    The references are the closed forms of the limits, not the code: for
+    Bachelier ``d = (F - K) / (sigma sqrt T)`` runs to +-infinity off the money
+    and is 0 at it, so vega tends to 0 and to ``A sqrt(T) n(0)``; for Black
+    ``d1`` does the same, so vega tends to 0 and to ``A F sqrt(T) n(0)``.
+    """
+
+    FORWARD, EXPIRY, ANNUITY = 0.03, 2.0, 4.2
+    N0 = 1.0 / math.sqrt(2.0 * math.pi)
+
+    def test_bachelier_off_the_money_tends_to_zero(self):
+        # It used to return the at-the-money value, 0.5642 per unit annuity
+        # here, whatever the strike.
+        for strike in (self.FORWARD + 0.01, self.FORWARD - 0.01):
+            assert bachelier.vega(
+                self.FORWARD, strike, self.EXPIRY, 0.0, annuity=self.ANNUITY
+            ) == 0.0
+
+    def test_bachelier_at_the_money_is_the_closed_form(self):
+        expected = self.ANNUITY * math.sqrt(self.EXPIRY) * self.N0
+        assert bachelier.vega(
+            self.FORWARD, self.FORWARD, self.EXPIRY, 0.0, annuity=self.ANNUITY
+        ) == pytest.approx(expected, rel=1e-15)
+
+    def test_black_at_the_money_is_the_closed_form(self):
+        # It used to return 0.
+        expected = self.ANNUITY * self.FORWARD * math.sqrt(self.EXPIRY) * self.N0
+        assert black.vega(
+            self.FORWARD, self.FORWARD, self.EXPIRY, 0.0, annuity=self.ANNUITY
+        ) == pytest.approx(expected, rel=1e-15)
+
+    def test_black_off_the_money_tends_to_zero(self):
+        for strike in (self.FORWARD + 0.01, self.FORWARD - 0.01):
+            assert black.vega(
+                self.FORWARD, strike, self.EXPIRY, 0.0, annuity=self.ANNUITY
+            ) == 0.0
+
+    @pytest.mark.parametrize("model", [bachelier, black])
+    def test_the_value_at_zero_is_where_a_tiny_sigma_goes(self, model):
+        # Continuity, which is what "the limit" means: at sigma = 1e-12 the
+        # formula is already within machine noise of the sigma = 0 answer.
+        for strike in (self.FORWARD, self.FORWARD + 0.01):
+            at_zero = model.vega(self.FORWARD, strike, self.EXPIRY, 0.0)
+            near_zero = model.vega(self.FORWARD, strike, self.EXPIRY, 1e-12)
+            assert near_zero == pytest.approx(at_zero, rel=1e-9, abs=1e-300)
+
+    def test_a_zero_expiry_has_no_vega_either_way(self):
+        assert bachelier.vega(self.FORWARD, self.FORWARD, 0.0, 0.01) == 0.0
+        assert black.vega(self.FORWARD, self.FORWARD, 0.0, 0.2) == 0.0
+
+
+class TestNotANumber:
+    """A NaN input is refused by name, never priced into a NaN."""
+
+    @pytest.mark.parametrize("position", range(4))
+    def test_both_pricers_refuse_a_nan_input(self, position):
+        arguments = [0.04, 0.045, 5.0, 0.008]
+        arguments[position] = float("nan")
+        with pytest.raises(ValueError, match="finite"):
+            bachelier.price(*arguments)
+        arguments[3] = 0.20 if position != 3 else float("nan")
+        with pytest.raises(ValueError, match="finite"):
+            black.price(*arguments)
+
 
 class TestSwaptionPricing:
     """The contract, the numeraire, and the model that follows from the units."""
@@ -306,6 +394,68 @@ class TestSwaptionPricing:
                 strike=0.04,
                 side="long",
             )
+
+    @pytest.mark.parametrize("days_after", [0, 1, 400])
+    def test_an_expired_swaption_refuses(self, atm_swaption, option_curve_set, days_after):
+        # Expiring on the valuation date counts as expired: an exercise dated
+        # that day has happened, as a payment dated that day has been made --
+        # QuantLib's default, includeReferenceDateEvents = False, under
+        # which such a swaption is worth nothing. One rule for every event.
+        # It used to price an expired option at its intrinsic value, as if
+        # the right to exercise still existed.
+        from datetime import timedelta
+
+        with pytest.raises(ValueError, match="expired"):
+            swaption_pv(
+                atm_swaption, option_curve_set, Volatility.normal_bp(80.0),
+                as_of=atm_swaption.expiry + timedelta(days=days_after),
+            )
+
+    def test_the_day_before_expiry_it_prices_and_theta_takes_the_last_day(
+        self, atm_swaption, option_curve_set
+    ):
+        from datetime import timedelta
+
+        vol = Volatility.normal_bp(80.0)
+        day_before = atm_swaption.expiry - timedelta(days=1)
+        value = swaption_pv(atm_swaption, option_curve_set, vol, as_of=day_before).value
+        greeks = option_greeks(atm_swaption, option_curve_set, vol, as_of=day_before)
+        # At the money the intrinsic value is zero, so a day's decay from the
+        # last day is the whole remaining value -- and theta must not trip
+        # over the expiry it decays into.
+        assert value > 0.0
+        assert greeks.theta == pytest.approx(-value, rel=1e-12)
+
+    def test_a_peso_swaption_says_its_value_is_in_pesos(self):
+        # The payload said "unit": "USD" for every option, while the greeks
+        # of the same TIIE swaption said MXN_per_bp.
+        from datetime import date, timedelta
+
+        from rates_engine.conventions.indices import TIIE_FONDEO
+        from rates_engine.core.money import Currency
+        from rates_engine.curves.discount import CurveSet, DiscountCurve
+
+        as_of = date(2026, 1, 15)
+        nodes = tuple(as_of + timedelta(days=365 * k) for k in range(1, 11))
+        pesos = CurveSet(
+            DiscountCurve(
+                as_of, nodes, tuple(math.exp(-0.085 * k) for k in range(1, 11)),
+                currency=Currency.MXN,
+            )
+        )
+        swap = OISSwap(
+            date(2027, 1, 15), date(2032, 1, 15), 0.085, 100_000_000.0, index=TIIE_FONDEO
+        )
+        swaption = Swaption(date(2027, 1, 15), swap, 0.085, Side.PAYER, 100_000_000.0)
+        vol = Volatility.normal_bp(120.0)
+        payload = swaption_pv(swaption, pesos, vol).to_dict()
+        assert payload["unit"] == "MXN"
+        assert option_greeks(swaption, pesos, vol).to_dict()["vega_unit"].startswith("MXN_")
+
+    def test_a_dollar_swaption_still_says_usd(self, atm_swaption, option_curve_set):
+        result = swaption_pv(atm_swaption, option_curve_set, Volatility.normal_bp(80.0))
+        assert result.to_dict()["unit"] == "USD"
+        assert result.currency == "USD"
 
     def test_the_payload_carries_every_model_input(self, atm_swaption, option_curve_set):
         payload = swaption_pv(
@@ -405,6 +555,116 @@ class TestGreeks:
         under_black = option_greeks(atm_swaption, option_curve_set, equivalent).vega
         under_bachelier = option_greeks(atm_swaption, option_curve_set, normal).vega
         assert under_black == pytest.approx(under_bachelier, rel=0.05)
+
+    @pytest.mark.parametrize("years,lognormal", [(1, 0.30), (5, 0.30), (10, 0.30), (10, 0.45)])
+    def test_a_lognormal_quote_has_the_vega_of_the_normal_quote_at_the_same_price(
+        self, years, lognormal
+    ):
+        # The bump used to be converted with sigma_LN * F, the leading term:
+        # on a 10y10y at the money that gave 0.893 of the Bachelier vega at
+        # 30% and 0.775 at 45%. Converted exactly -- the normal vol that
+        # reproduces the price, bumped, and inverted back -- the two quotes
+        # of one price have one vega. At the money Bachelier is linear in
+        # sigma, so A sqrt(T) n(0) per unit of vol is the exact reference.
+        from datetime import date, timedelta
+
+        from rates_engine.curves.discount import CurveSet, DiscountCurve
+        from rates_engine.instruments.swaps import IRSwap
+
+        as_of = date(2026, 1, 15)
+        nodes = tuple(as_of + timedelta(days=365 * k) for k in range(1, 26))
+        curves = CurveSet(
+            DiscountCurve(as_of, nodes, tuple(math.exp(-0.04 * k) for k in range(1, 26)))
+        )
+        effective = date(2026 + years, 1, 15)
+        swap = IRSwap(effective, date(2036 + years, 1, 15), 0.04, 1e7)
+        forward = forward_swap_rate(Swaption(effective, swap, 0.04, Side.PAYER, 1e7), curves)
+        swaption = Swaption(effective, swap, forward, Side.PAYER, 1e7)
+        annuity = swaption_annuity(swaption, curves)
+        expiry = swaption.time_to_expiry(as_of)
+
+        quoted = Volatility(lognormal, VolUnits.LOGNORMAL_DECIMAL)
+        price = swaption_pv(swaption, curves, quoted).value
+        normal = bachelier.implied_normal_vol(price, forward, forward, expiry, annuity=annuity)
+        under_black = option_greeks(swaption, curves, quoted).vega
+        under_bachelier = option_greeks(swaption, curves, Volatility.normal_bp(normal * 1e4)).vega
+
+        closed_form = annuity * math.sqrt(expiry) / math.sqrt(2.0 * math.pi) * 1e-4
+        assert under_black == pytest.approx(closed_form, rel=1e-8, abs=0.0)
+        assert under_black == pytest.approx(under_bachelier, rel=1e-8, abs=0.0)
+
+    @pytest.mark.parametrize("offset", [-0.01, 0.015])
+    def test_the_match_holds_away_from_the_money(
+        self, underlying_swap, option_curve_set, forward_swap_rate, offset
+    ):
+        from datetime import timedelta
+
+        from conftest import AS_OF
+
+        swaption = Swaption(
+            expiry=AS_OF + timedelta(days=365 * 5), underlying=underlying_swap,
+            strike=forward_swap_rate + offset, side=Side.PAYER, notional=1e8,
+        )
+        quoted = Volatility.lognormal_percent(30.0)
+        price = swaption_pv(swaption, option_curve_set, quoted).value
+        normal = bachelier.implied_normal_vol(
+            price, forward_swap_rate, swaption.strike, swaption.time_to_expiry(AS_OF),
+            annuity=swaption_annuity(swaption, option_curve_set),
+        )
+        under_black = option_greeks(swaption, option_curve_set, quoted).vega
+        under_bachelier = option_greeks(
+            swaption, option_curve_set, Volatility.normal_bp(normal * 1e4)
+        ).vega
+        assert under_black == pytest.approx(under_bachelier, rel=1e-8, abs=0.0)
+
+    def test_a_long_dated_swaption_at_a_high_lognormal_vol_has_a_vega(self):
+        # A 10y20y at 200% lognormal used to raise: the bumped Bachelier price
+        # was past what any Black volatility reaches. QuantLib 1.44
+        # reference, independent of this package: ATM payer on a VanillaSwap
+        # 2036-01-15 to 2056-01-15 (fixed annual ACT/360, Term SOFR 3M),
+        # notional 10M, on FlatForward(4%, continuous, ACT/365F) as of
+        # 2026-01-15; annuity from fixedLegBPS, sigma_N from
+        # bachelierBlackFormulaImpliedVol of the Black price, vega =
+        # annuity * [Bachelier(sigma_N + 1 bp) - Bachelier(sigma_N)].
+        # Script: work-fix-options-vol/ql_vega_high.py.
+        from datetime import date, timedelta
+
+        from rates_engine.curves.discount import CurveSet, DiscountCurve
+        from rates_engine.instruments.swaps import IRSwap
+
+        as_of = date(2026, 1, 15)
+        nodes = tuple(as_of + timedelta(days=365 * k) for k in range(1, 36))
+        curves = CurveSet(
+            DiscountCurve(as_of, nodes, tuple(math.exp(-0.04 * k) for k in range(1, 36)))
+        )
+        swap = IRSwap(
+            date(2036, 1, 15), date(2056, 1, 15), 0.04, 1e7,
+            fixed_frequency_months=12, float_frequency_months=3,
+        )
+        atm = forward_swap_rate(Swaption(date(2036, 1, 15), swap, 0.04, Side.PAYER, 1e7), curves)
+        swaption = Swaption(date(2036, 1, 15), swap, atm, Side.PAYER, 1e7)
+        quoted = Volatility(2.0, VolUnits.LOGNORMAL_DECIMAL)
+        assert swaption_pv(swaption, curves, quoted).value == pytest.approx(
+            3687324.264956336, rel=1e-13, abs=0.0
+        )
+        greeks = option_greeks(swaption, curves, quoted)
+        assert greeks.vega == pytest.approx(11577.763622012644, rel=1e-9, abs=0.0)
+        assert all(math.isfinite(g) for g in (greeks.delta, greeks.gamma, greeks.theta))
+
+    def test_a_deep_out_of_the_money_swaption_has_no_negative_vega(
+        self, underlying_swap, option_curve_set
+    ):
+        # A one-month payer struck at 8% on a 4% forward at 20% lognormal:
+        # its price inverts to a zero normal vol, and the Black round trip
+        # used to put the vega at -4e-30. Bachelier is monotone in sigma.
+        from datetime import date
+
+        from rates_engine.instruments.swaps import OISSwap
+
+        swap = OISSwap(date(2026, 2, 17), date(2036, 2, 17), 0.04, 1e7)
+        swaption = Swaption(date(2026, 2, 13), swap, 0.08, Side.PAYER, 1e7)
+        vega = option_greeks(swaption, option_curve_set, Volatility.lognormal_percent(20.0)).vega
+        assert 0.0 <= vega < 1e-20
 
     def test_a_non_positive_bump_refuses(self, atm_swaption, option_curve_set):
         with pytest.raises(ValueError, match="bumps must be positive"):

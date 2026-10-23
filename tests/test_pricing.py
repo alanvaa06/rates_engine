@@ -18,6 +18,13 @@ from rates_engine.pricing.projection import float_leg, fra_fair_rate
 from rates_engine.risk.sensitivities import dv01
 
 
+def _unfixed(as_of: date) -> date:
+    """A week after ``as_of``: late enough that a Term SOFR period starting
+    then has not fixed (it fixes two business days before it starts), so an
+    IRS from here is all forecast and needs no published fixing."""
+    return as_of + timedelta(days=7)
+
+
 def _flat(as_of: date, rate: float, years: int = 6) -> DiscountCurve:
     nodes = tuple(as_of + timedelta(days=365 * k) for k in range(1, years + 1))
     return DiscountCurve(as_of, nodes, tuple(math.exp(-rate * k) for k in range(1, years + 1)))
@@ -94,14 +101,14 @@ class TestMultiCurve:
         curve = _flat(as_of, 0.04)
         single = CurveSet(curve)
         ois = OISSwap(
-            effective=as_of,
+            effective=_unfixed(as_of),
             maturity=as_of + timedelta(days=365 * 4),
             fixed_rate=0.04,
             notional=10_000_000.0,
             payment_lag_days=0,
         )
         irs = IRSwap(
-            effective=as_of,
+            effective=_unfixed(as_of),
             maturity=as_of + timedelta(days=365 * 4),
             fixed_rate=0.04,
             notional=10_000_000.0,
@@ -118,13 +125,13 @@ class TestMultiCurve:
         dual = CurveSet(discount, projection)
         single = CurveSet(discount)
         irs = IRSwap(
-            effective=as_of,
+            effective=_unfixed(as_of),
             maturity=as_of + timedelta(days=365 * 4),
             fixed_rate=0.04,
             notional=10_000_000.0,
         )
         ois = OISSwap(
-            effective=as_of,
+            effective=_unfixed(as_of),
             maturity=as_of + timedelta(days=365 * 4),
             fixed_rate=0.04,
             notional=10_000_000.0,
@@ -136,7 +143,7 @@ class TestMultiCurve:
     def test_the_evidence_says_which_curve_projected(self, as_of):
         dual = CurveSet(_flat(as_of, 0.04), _flat(as_of, 0.045))
         irs = IRSwap(
-            effective=as_of, maturity=as_of + timedelta(days=730), fixed_rate=0.04
+            effective=_unfixed(as_of), maturity=as_of + timedelta(days=730), fixed_rate=0.04
         )
         fields = pv(irs, dual).evidence.fields
         assert fields["dual_curve"] is True
