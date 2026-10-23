@@ -1,5 +1,8 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+# 77 is the first setuptools that reads an SPDX string in `license` and a
+# `license-files` list (PEP 639). Older ones reject the string, and newer
+# ones warn on the table form it replaces and stop accepting it in 2027.
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,7 +10,8 @@ name = "finport-ratesengine"
 version = "0.3.0"
 description = "Deterministic SOFR rates engine: curves, futures convexity, swaps, swaptions and caps under Black and Bachelier, a SABR volatility cube, parametric curves, risk and futures-strip hedging, each result carrying the evidence it rests on."
 readme = "README.md"
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
 # 3.11 rather than optengine's 3.9 (PRD-001 decision D1): 3.9 reached
 # end of life in October 2025 and pins the stack to numpy 1.x, which
 # costs modern typing syntax for nothing this package gains.
@@ -16,31 +20,50 @@ authors = [{ name = "Alan Vazquez" }]
 keywords = ["sofr", "rates", "curve", "swap", "swaption", "sabr", "volatility", "futures", "convexity", "dv01", "quant"]
 classifiers = [
     "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
+    # One per version CI runs the suite on; a version listed here and not in
+    # the matrix is a promise nothing checks.
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    # Beta rather than Production/Stable: before 1.0 a minor release may
+    # break the API, and the CHANGELOG says when one does.
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Financial and Insurance Industry",
     "Operating System :: OS Independent",
     "Topic :: Office/Business :: Financial :: Investment",
+    # The package ships py.typed.
+    "Typing :: Typed",
 ]
 # Three, and no more. Everything the library computes is arithmetic over
 # dates and discount factors: numpy carries the vectors, scipy supplies the
 # one root solver the bootstrap needs, and pandas is the shock table's
 # return type. A fourth entry here would have to earn a line explaining
 # what a caller gains that they cannot already reach.
+#
+# The floors are the oldest releases that install together, not the oldest
+# whose API would do. numpy 2.0 is the base, and pandas 2.2.2 and scipy 1.13
+# are the first releases built for it: pandas 2.2.0 requires numpy<2 and
+# scipy 1.11 numpy<1.28, so the floors this replaced (pandas>=2.2,
+# scipy>=1.11) admitted combinations no resolver can install. CI's
+# minimum-versions job installs exactly numpy 2.0.0, pandas 2.2.2 and
+# scipy 1.13.0 and runs the suite on them.
 dependencies = [
     "numpy>=2.0",
-    "pandas>=2.2",
-    "scipy>=1.11",
+    "pandas>=2.2.2",
+    "scipy>=1.13",
 ]
 
 [project.urls]
 Homepage = "https://github.com/alanvaa06/rates_engine"
 Repository = "https://github.com/alanvaa06/rates_engine"
+# The API reference docs.yml renders from the docstrings on every push to main.
+Documentation = "https://alanvaa06.github.io/rates_engine/"
 Issues = "https://github.com/alanvaa06/rates_engine/issues"
 Changelog = "https://github.com/alanvaa06/rates_engine/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
-# Parquet snapshots. The file provider reads and writes CSV without it;
-# only a .parquet path reaches pyarrow.
-data = ["pyarrow>=14.0"]
 # YAML configs for the CLI. JSON is the native format precisely so that
 # the core install can run every command; --config c.yaml needs this.
 config = ["pyyaml>=6.0"]
