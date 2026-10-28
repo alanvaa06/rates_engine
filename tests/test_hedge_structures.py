@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import math
+from dataclasses import replace
 from datetime import date
 
 import pytest
@@ -1066,3 +1067,91 @@ class TestTheSmileHasToSitOnTheLegsForward:
         walk(result.evidence)
         assert "smile_forward_unverified" in codes
         assert result.evidence.worst_quality is DataQuality.ASSUMED
+
+
+class TestTheSmileCheckReadsWhatTheSmileReports:
+    """Alan Vazquez's round-3 finding 3 on PR #13: the check read
+    ``getattr(smile, "forward")`` and passed it to ``float``, so a smile that
+    exposes its forward as a method raised a bare ``TypeError``; and it
+    compared only the forward and the expiry. A smile on the same forward
+    with another spot or another dollar rate places its spot-delta pillars
+    elsewhere (a spot delta carries ``exp(-r_f T)``), and was accepted."""
+
+    @staticmethod
+    def _stand_in(**reported):
+        from rates_engine.core.evidence import Evidence
+
+        class Reading:
+            volatility = 0.115
+            evidence = Evidence(produced_by="test.stand_in")
+
+        class StandIn:
+            def volatility_at(self, strike):
+                return Reading()
+
+        smile = StandIn()
+        for name, value in reported.items():
+            setattr(smile, name, value)
+        return smile
+
+    @staticmethod
+    def _codes(evidence):
+        codes = {w.code for w in evidence.warnings}
+        for source in evidence.sources:
+            codes |= TestTheSmileCheckReadsWhatTheSmileReports._codes(source)
+        return codes
+
+    def test_a_forward_method_is_called(self):
+        smile = self._stand_in(forward=lambda: QUOTE.forward, expiry=lambda: 0.25)
+        quote = StructureQuote(18.50, 0.25, 0.0950, 0.0420, smile)
+        result = compare_structures(_exposure(), quote)
+        assert "smile_forward_unverified" not in self._codes(result.evidence)
+
+    def test_a_forward_method_on_another_forward_refuses(self):
+        smile = self._stand_in(forward=lambda: QUOTE.forward * 1.01)
+        with pytest.raises(ValueError, match="forward"):
+            StructureQuote(18.50, 0.25, 0.0950, 0.0420, smile)
+
+    def test_a_forward_method_that_needs_arguments_refuses_by_name(self):
+        smile = self._stand_in(forward=lambda expiry: QUOTE.forward)
+        with pytest.raises(ValueError, match="smile's forward is a method that needs arguments"):
+            StructureQuote(18.50, 0.25, 0.0950, 0.0420, smile)
+
+    def test_a_forward_that_is_not_a_number_refuses_by_name(self):
+        smile = self._stand_in(forward=object())
+        with pytest.raises(ValueError, match="smile reports forward"):
+            StructureQuote(18.50, 0.25, 0.0950, 0.0420, smile)
+
+    def test_the_same_forward_on_another_dollar_rate_refuses(self):
+        """Both rates up a point: the forward is the legs', the spot deltas
+        are not. Accepted before."""
+        smile = replace(
+            TestTheSmileHasToSitOnTheLegsForward._smile(0.1050), r_foreign=0.0520
+        )
+        assert smile.forward == pytest.approx(QUOTE.forward, rel=1e-14)
+        with pytest.raises(ValueError, match="r_foreign"):
+            StructureQuote(18.50, 0.25, 0.0950, 0.0420, smile)
+
+    def test_the_same_forward_from_another_spot_refuses(self):
+        r_domestic = 0.0420 + math.log(QUOTE.forward / 18.40) / 0.25
+        smile = replace(
+            TestTheSmileHasToSitOnTheLegsForward._smile(r_domestic), spot=18.40
+        )
+        assert smile.forward == pytest.approx(QUOTE.forward, rel=1e-14)
+        with pytest.raises(ValueError, match="spot"):
+            StructureQuote(18.50, 0.25, 0.0950, 0.0420, smile)
+
+    def test_the_refusal_names_every_input_to_rebuild_with(self):
+        smile = self._stand_in(forward=QUOTE.forward, spot=18.40, r_foreign=0.05)
+        with pytest.raises(ValueError) as caught:
+            StructureQuote(18.50, 0.25, 0.0950, 0.0420, smile)
+        message = str(caught.value)
+        for piece in ("spot 18.4", "r_foreign 0.05", "spot=18.5", "r_foreign=0.042"):
+            assert piece in message
+        assert message.isascii()
+
+    def test_a_smile_on_the_legs_inputs_is_accepted(self):
+        smile = TestTheSmileHasToSitOnTheLegsForward._smile(0.0950)
+        quote = StructureQuote(18.50, 0.25, 0.0950, 0.0420, smile)
+        result = compare_structures(_exposure(), quote, otm_offset=0.02, spread_offset=0.04)
+        assert "smile_forward_unverified" not in self._codes(result.evidence)
