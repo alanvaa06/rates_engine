@@ -402,7 +402,7 @@ def price(config: dict[str, Any] | None) -> dict[str, Any]:
     )
     curve_set = CurveSet(boot.curve)
     sources = (boot.evidence,)
-    fixings = fixings_snapshot(config, as_of)
+    fixings = fixings_snapshot(config, as_of, boot.curve)
     try:
         return _price_measures(config, swap, curve_set, sources, fixings)
     except MissingFixingError as error:
@@ -534,13 +534,23 @@ def hedge(config: dict[str, Any] | None) -> dict[str, Any]:
         except ConfigurationError as error:
             entry = f"curve.futures[{number}]" + (".contract" if node.contract else "")
             raise ConfigurationError(f"hedge.contract_dv01 contradicts {entry}: {error}") from error
-    fixings = fixings_snapshot(config, as_of)
+    long_end_source = (config.get("curve") or {}).get("long_end_source")
+    # The fixings are checked against the curve before the hedge is sized on
+    # them, which takes the curve: one bootstrap more, only when the file
+    # carries fixings, against the two per contract the sizing makes.
+    fixings = fixings_snapshot(
+        config,
+        as_of,
+        bootstrap_discount_curve(as_of, instruments, long_end_source=long_end_source).curve
+        if config.get("fixings")
+        else None,
+    )
     try:
         result = strip_hedge(
             swap,
             instruments,
             as_of=as_of,
-            long_end_source=(config.get("curve") or {}).get("long_end_source"),
+            long_end_source=long_end_source,
             contract_dv01=float(contract_dv01) if contract_dv01 is not None else None,
             require_full_coverage=require_full_coverage,
             fixings=fixings,

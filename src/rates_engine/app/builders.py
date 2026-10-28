@@ -13,10 +13,11 @@ from datetime import date, timedelta
 from typing import Any, NamedTuple
 
 from rates_engine.app.config import as_date, require_block
+from rates_engine.conventions.calendar import HolidayCalendar
 from rates_engine.conventions.daycount import CURVE_TIME_BASIS, year_fraction
 from rates_engine.conventions.indices import SOFR, index_named
 from rates_engine.conventions.side import Side
-from rates_engine.core.errors import ConfigurationError
+from rates_engine.core.errors import ConfigurationError, ImplausibleInputError
 from rates_engine.core.evidence import DataQuality, Provenance
 from rates_engine.core.money import Currency
 from rates_engine.curves.bootstrap import FuturesContract, FuturesNode, RealizedStubNode
@@ -27,7 +28,61 @@ from rates_engine.models.convexity import ConvexityModel, convexity_adjustment
 from rates_engine.pricing.calibration import SwapQuoteNode
 from rates_engine.pricing.fx_forward import require_plausible_rate
 
-__all__ = ["calibration_nodes", "ois_swap", "fixings_snapshot", "flat_curve", "fx_inputs"]
+__all__ = [
+    "calibration_nodes",
+    "ois_swap",
+    "fixings_snapshot",
+    "flat_curve",
+    "fx_inputs",
+    "MAX_PLAUSIBLE_OVERNIGHT_FIXING",
+    "FIXING_CURVE_FACTOR",
+    "FIXING_CURVE_GAP",
+]
+
+MAX_PLAUSIBLE_OVERNIGHT_FIXING = 0.20
+"""Beyond this, as a decimal a year, an overnight fixing in a config is refused.
+
+SOFR has printed between 0.01% and 5.40% since it began in April 2018, its
+one spike 5.25% on 17 September 2019, and the effective federal funds rate
+was last above 20% in 1981. A fixing beyond the band is almost always a typo
+or a unit: 0.43 typed for 0.043 priced the review's seasoned payer at
+14,200,798 USD instead of 255,311, marked ``observed``. A plausibility band
+and not a measurement, named and adjustable like
+:data:`~rates_engine.pricing.fx_forward.MAX_PLAUSIBLE_RATE`, which it narrows
+for this one kind of rate.
+
+No band catches a file in percent from the years SOFR sat near zero: 0.05
+meaning 0.05% reads as 5%, a rate SOFR has printed. That is what the
+cross-check against the curve is for (:data:`FIXING_CURVE_FACTOR`).
+"""
+
+FIXING_CURVE_FACTOR = 4.0
+"""How many times off the curve's overnight rate the latest fixing may be.
+
+The latest fixing a ``fixings`` series gives on or before ``as_of`` is
+compared with the curve's forward from ``as_of`` to the next business day:
+the one day of history and the one day of forecast that are closest. It is
+refused when it is both this many times larger or smaller and further than
+:data:`FIXING_CURVE_GAP`. A rate written in the wrong unit is a hundred
+times off (0.05 for 0.05%), and a typo ten (0.43 for 0.043). The market's
+worst day since SOFR began, the repo spike of 17 September 2019, printed
+5.25% against about 2.2%, 2.4 times; the emergency cut of Sunday 15 March
+2020 left Friday's print some six times above Monday's curve, and a curve
+valued that Monday, against Friday's fixing, is refused with it.
+"""
+
+FIXING_CURVE_GAP = 0.005
+"""How far, as a decimal a year, the latest fixing may sit from the curve's overnight rate.
+
+Fifty basis points. With :data:`FIXING_CURVE_FACTOR` it keeps the check off
+the noise near zero, where 0.01% against 0.05% is five times off and
+nothing at all: a fixing is refused only when it is both.
+"""
+
+_OVERNIGHT_CONVENTION = (
+    "A fixing is a decimal a year, as the administrator publishes it on ACT/360: 4.30% is "
+    "0.043, not 4.30."
+)
 
 
 def calibration_nodes(config: dict[str, Any], as_of: date) -> tuple[Any, ...]:
@@ -196,28 +251,44 @@ def ois_swap(config: dict[str, Any]) -> OISSwap:
     )
 
 
-def fixings_snapshot(config: dict[str, Any], as_of: date) -> MarketSnapshot | None:
+def fixings_snapshot(
+    config: dict[str, Any], as_of: date, curve: DiscountCurve | None = None
+) -> MarketSnapshot | None:
     """The ``fixings`` block of a config as the snapshot the pricers read, or ``None``.
 
     Each series becomes a :class:`~rates_engine.market.snapshot.Series` under
     the index's name, with a provenance saying where the block says the
-    numbers came from and how good they are. The rates are checked here,
-    where the file can still be named: a rate of 1 or more is a percent
-    written where a decimal was meant -- 4.30 for 4.30% -- and would price
-    every coupon a hundredfold; a date given twice cannot be resolved.
+    numbers came from and how good they are. Everything is checked here,
+    where the file can still be named, and every refusal starts with the
+    path of the value at fault:
+
+    - a date must be ISO 8601 and a business day of the index's calendar:
+      a rate is published for business days only, and a row for a Saturday
+      or a holiday was read by nothing, silently;
+    - a date may appear once in a series;
+    - a rate must be a number within :data:`MAX_PLAUSIBLE_OVERNIGHT_FIXING`
+      (20%): 4.30 for 4.30%, or 0.43 for 0.043, is a unit or a typo;
+    - with ``curve``, the latest rate on or before ``as_of`` must be within
+      :data:`FIXING_CURVE_FACTOR` or :data:`FIXING_CURVE_GAP` of the curve's
+      overnight rate, which catches what no band can, a percent file from
+      the years near zero;
+    - ``data_quality`` must be one of observed, synthetic, proxy, assumed.
 
     Args:
         config: The whole configuration mapping.
         as_of: Valuation date; the snapshot serves nothing dated after it.
+        curve: The curve the trade is valued on, for the cross-check; left
+            out, it is skipped.
 
     Returns:
         The snapshot, or ``None`` when the config has no ``fixings`` block.
 
     Raises:
-        ConfigurationError: A rate is not a finite number below 1 in
-            magnitude, or a date appears twice in one series.
-        ValueError: A date is not ISO 8601, or ``data_quality`` is not one
-            of observed, synthetic, proxy or assumed.
+        ConfigurationError: A date is not ISO 8601, is not a business day of
+            the index's calendar, or appears twice in one series; a rate is
+            not a number; or ``data_quality`` is not one of the four.
+        ImplausibleInputError: A rate is outside the band, or the latest one
+            is far off the curve's overnight rate.
     """
     block = config.get("fixings") or {}
     if not block:
@@ -225,27 +296,22 @@ def fixings_snapshot(config: dict[str, Any], as_of: date) -> MarketSnapshot | No
     series: dict[str, Series] = {}
     for series_id, spec in block.items():
         where = f"fixings.{series_id}"
+        calendar = index_named(series_id).calendar
         published: dict[date, float] = {}
+        position: dict[date, int] = {}
         for number, entry in enumerate(spec["values"]):
-            day = as_date(entry["date"])
-            rate = entry["rate"]
-            if (
-                isinstance(rate, bool)
-                or not isinstance(rate, (int, float))
-                or not math.isfinite(rate)
-                or abs(rate) >= 1.0
-            ):
-                raise ConfigurationError(
-                    f"{where}.values[{number}].rate is {rate!r}. A fixing is a decimal a year, "
-                    "0.043 for 4.30%: a value of 1 or more is a percent, which would price "
-                    "every coupon a hundredfold, and anything but a finite number is no rate."
-                )
+            day = _fixing_date(entry["date"], f"{where}.values[{number}].date", calendar)
+            rate = _fixing_rate(entry["rate"], f"{where}.values[{number}].rate")
             if day in published:
                 raise ConfigurationError(
-                    f"{where}.values gives {day} twice ({published[day]!r} and {rate!r}); one "
-                    "business day has one published rate, so keep the one that was published."
+                    f"{where}.values[{number}].date gives {day} again (values[{position[day]}] "
+                    f"has it, at {published[day]!r}; this one says {rate!r}). One business day "
+                    "has one published rate, so keep the one that was published."
                 )
-            published[day] = float(rate)
+            published[day] = rate
+            position[day] = number
+        if curve is not None:
+            _require_near_curve(published, position, where, calendar, curve)
         days = tuple(sorted(published))
         series[series_id] = Series(
             series_id,
@@ -255,10 +321,91 @@ def fixings_snapshot(config: dict[str, Any], as_of: date) -> MarketSnapshot | No
                 source=str(spec.get("source", "config")),
                 series_id=series_id,
                 instrument_kind="overnight_fixing",
-                data_quality=DataQuality(spec.get("data_quality", "observed")),
+                data_quality=_data_quality(spec.get("data_quality", "observed"), where),
             ),
         )
     return MarketSnapshot(as_of=as_of, series=series)
+
+
+def _fixing_date(value: Any, path: str, calendar: HolidayCalendar) -> date:
+    """A ``fixings`` row's date, refused by its path unless it is an ISO business day."""
+    try:
+        day = as_date(value)
+    except (TypeError, ValueError) as error:
+        raise ConfigurationError(
+            f"{path} is {value!r}, which is not a date: write it as ISO 8601, YYYY-MM-DD "
+            f"({error})."
+        ) from error
+    if not calendar.is_business_day(day):
+        raise ConfigurationError(
+            f"{path} is {day}, a {day:%A} on which {calendar.name} is closed. A rate is "
+            "published for business days only, and the one before a closed day covers it, "
+            f"so this row would be read by nothing; drop it, or give "
+            f"{calendar.previous_business_day(day)}'s rate under that date."
+        )
+    return day
+
+
+def _fixing_rate(value: Any, path: str) -> float:
+    """A ``fixings`` row's rate, refused by its path unless it is a plausible decimal."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ConfigurationError(
+            f"{path} is {value!r}. A fixing is a number, the published rate as a decimal "
+            "a year: 0.043 for 4.30%."
+        )
+    require_plausible_rate(
+        float(value),
+        path,
+        limit=MAX_PLAUSIBLE_OVERNIGHT_FIXING,
+        limit_name="MAX_PLAUSIBLE_OVERNIGHT_FIXING",
+        convention=_OVERNIGHT_CONVENTION,
+    )
+    return float(value)
+
+
+def _data_quality(value: Any, where: str) -> DataQuality:
+    """A series' ``data_quality``, refused by its path unless it names one."""
+    try:
+        return DataQuality(value)
+    except ValueError as error:
+        names = ", ".join(quality.value for quality in DataQuality)
+        raise ConfigurationError(
+            f"{where}.data_quality is {value!r}; it must be one of {names}."
+        ) from error
+
+
+def _require_near_curve(
+    published: dict[date, float],
+    position: dict[date, int],
+    where: str,
+    calendar: HolidayCalendar,
+    curve: DiscountCurve,
+) -> None:
+    """Refuse a series whose latest fixing is in another unit than the curve.
+
+    See :data:`FIXING_CURVE_FACTOR`. Only the latest fixing on or before
+    ``as_of`` is compared: older ones may be a year and four hundred basis
+    points away from today's curve, as in 2022, and still be right.
+    """
+    as_of = curve.as_of
+    held = [day for day in published if day <= as_of]
+    if not held:
+        return
+    latest = max(held)
+    fixing = published[latest]
+    overnight = curve.forward(as_of, calendar.next_business_day(as_of))
+    larger, smaller = max(abs(fixing), abs(overnight)), min(abs(fixing), abs(overnight))
+    if abs(fixing - overnight) > FIXING_CURVE_GAP and larger > FIXING_CURVE_FACTOR * smaller:
+        times = f"{larger / smaller:.0f} times" if smaller else "infinitely"
+        raise ImplausibleInputError(
+            f"{where}.values[{position[latest]}].rate, the {latest} fixing, is {fixing!r}, and "
+            f"the curve's overnight rate from as_of is {overnight:.6f}: {times} off and "
+            f"{abs(fixing - overnight) * 1e4:.0f} bp away. A fixing in another unit than the "
+            "curve is a hundred times off (0.05 for 0.05%, a percent file from the years "
+            "near zero) and a typo ten (0.43 for 0.043). Fixings are decimals a year: check "
+            f"the file's unit. Refused when more than {FIXING_CURVE_FACTOR:.0f} times and "
+            f"{FIXING_CURVE_GAP * 1e4:.0f} bp off (FIXING_CURVE_FACTOR, FIXING_CURVE_GAP)."
+        )
 
 
 def flat_curve(as_of: date, rate: float, currency: Currency, years: float) -> DiscountCurve:

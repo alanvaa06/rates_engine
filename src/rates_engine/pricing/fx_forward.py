@@ -256,24 +256,42 @@ def _spot_date(pair: CurrencyPair, delivery: date, as_of: date) -> date:
     return spot_date
 
 
-def require_plausible_rate(rate: float, name: str) -> None:
-    """Refuse an interest rate outside :data:`MAX_PLAUSIBLE_RATE`.
+_CONTINUOUS_RATES = (
+    "Rates here are continuously compounded decimals on ACT/365F, so 9.5% is 0.095, not 9.5."
+)
+
+
+def require_plausible_rate(
+    rate: float,
+    name: str,
+    *,
+    limit: float = MAX_PLAUSIBLE_RATE,
+    limit_name: str = "MAX_PLAUSIBLE_RATE",
+    convention: str = _CONTINUOUS_RATES,
+) -> None:
+    """Refuse an interest rate outside :data:`MAX_PLAUSIBLE_RATE`, or a tighter band.
 
     Args:
-        rate: A continuously compounded rate, as a decimal a year.
-        name: What to call it in the message, e.g. ``"r_domestic"``.
+        rate: A rate as a decimal a year; continuously compounded unless
+            ``convention`` says otherwise.
+        name: What to call it in the message, e.g. ``"r_domestic"``, or a
+            config path.
+        limit: The band's edge, as a decimal a year: :data:`MAX_PLAUSIBLE_RATE`
+            unless the caller's kind of rate has a narrower one, such as an
+            overnight fixing.
+        limit_name: The constant ``limit`` is, which the message says to
+            widen.
+        convention: One sentence saying how such a rate is written.
 
     Raises:
         ImplausibleInputError: It is not finite or its magnitude is above the
             band, which almost always means a rate written in percent.
     """
-    if not math.isfinite(rate) or abs(rate) > MAX_PLAUSIBLE_RATE:
+    if not math.isfinite(rate) or abs(rate) > limit:
         raise ImplausibleInputError(
-            f"{name} = {rate!r} is outside the +/-{MAX_PLAUSIBLE_RATE:.0%} a year this "
-            "build will accept. Rates here are continuously compounded decimals on "
-            "ACT/365F, so 9.5% is 0.095, not 9.5. The band is a plausibility check "
-            "rather than a measurement; widen MAX_PLAUSIBLE_RATE deliberately if you "
-            "mean it."
+            f"{name} = {rate!r} is outside the +/-{limit:.0%} a year this build will "
+            f"accept. {convention} The band is a plausibility check rather than a "
+            f"measurement; widen {limit_name} deliberately if you mean it."
         )
 
 

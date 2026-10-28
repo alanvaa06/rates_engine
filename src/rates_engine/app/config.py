@@ -300,28 +300,37 @@ CONFIG_SCHEMA: dict[str, Any] = {
                 "description": (
                     "SOFR as the New York Fed publishes it, each rate dated by the day it "
                     "is for. Read on the SIFMA calendar: a weekend or holiday takes the "
-                    "business day before it, so only business days are given."
+                    "business day before it, so only business days are given, and a row "
+                    "dated on a closed day is refused."
                 ),
                 "keys": {
                     "values": {
                         "required": True,
                         "description": (
-                            "One entry per SIFMA business day the swap has accrued over, "
-                            "from its period start to the day before as_of; a business "
-                            "day left out is refused, never interpolated."
+                            "One entry per SIFMA business day the swap's current period "
+                            "has accrued over, from its start up to as_of; before as_of, a "
+                            "business day left out is refused, never interpolated. The "
+                            "entry dated as_of is optional: given, it is read and decides "
+                            "as_of up to the next business day; left out, those days are "
+                            "forecast off the curve, as before the day's print is out."
                         ),
                         "items": {
                             "date": {
                                 "required": True,
                                 "description": (
-                                    "The business day the rate is for, ISO 8601 (YYYY-MM-DD)."
+                                    "The business day the rate is for, ISO 8601 (YYYY-MM-DD). "
+                                    "A weekend or a SIFMA holiday is refused."
                                 ),
                             },
                             "rate": {
                                 "required": True,
                                 "description": (
                                     "The published rate as a decimal a year: 0.043 is 4.30%, "
-                                    "not 4.30. A value of 1 or more is refused as a percent."
+                                    "not 4.30. Refused beyond 20% "
+                                    "(MAX_PLAUSIBLE_OVERNIGHT_FIXING), and the latest one when "
+                                    "it is more than four times and 50 bp off the curve's "
+                                    "overnight rate (FIXING_CURVE_FACTOR, FIXING_CURVE_GAP): "
+                                    "0.43 for 0.043, or 0.05 meaning 0.05%."
                                 ),
                             },
                         },
@@ -336,9 +345,9 @@ CONFIG_SCHEMA: dict[str, Any] = {
                     "data_quality": {
                         "default": "observed",
                         "description": (
-                            "observed, synthetic, proxy or assumed. Recorded in the "
-                            "provenance, so every result priced on the fixings carries it "
-                            "into its worst_quality."
+                            "observed, synthetic, proxy or assumed; anything else is "
+                            "refused. Recorded in the provenance, so every result priced on "
+                            "the fixings carries it into its worst_quality."
                         ),
                     },
                 },

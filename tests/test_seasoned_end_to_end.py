@@ -726,12 +726,140 @@ class TestTheConfigCarriesTheFixings:
 
     def test_a_rate_in_percent_is_refused_by_its_path(self):
         from rates_engine.app import commands
-        from rates_engine.core.errors import ConfigurationError
+        from rates_engine.core.errors import ImplausibleInputError
 
         config = _seasoned_config()
         config["fixings"]["SOFR"]["values"][3]["rate"] = 4.30
-        with pytest.raises(ConfigurationError, match=r"fixings\.SOFR\.values\[3\]\.rate"):
+        with pytest.raises(ImplausibleInputError, match=r"^fixings\.SOFR\.values\[3\]\.rate"):
             commands.COMMANDS["price"](config)
+
+
+class TestTheFixingsBlockIsCheckedByPath:
+    """Review 3, points 3, 5 and 6: what the ``fixings`` block refuses, and where it says so."""
+
+    @staticmethod
+    def _at(curve_rate: float, fixing: float) -> dict:
+        """The seasoned file with the curve at ``curve_rate`` and every fixing at ``fixing``."""
+        config = _seasoned_config()
+        stub = config["curve"]["stub"]
+        tau = (date.fromisoformat(stub["end"]) - AS_OF).days / 360.0
+        stub["accrual_factor"] = 1.0 + curve_rate * tau
+        for entry in config["curve"]["futures"]:
+            entry["price"] = 100.0 * (1.0 - curve_rate)
+        for entry in config["fixings"]["SOFR"]["values"]:
+            entry["rate"] = fixing
+        return config
+
+    @pytest.mark.parametrize("name", ["price", "hedge"])
+    def test_a_tenfold_typo_is_refused(self, name):
+        # Every SOFR entry typed 0.43 for 0.043 priced the payer at
+        # 14,200,798.33 USD instead of 255,311.41, marked observed: the old
+        # check refused only a magnitude of one or more.
+        from rates_engine.app import commands
+        from rates_engine.core.errors import ImplausibleInputError
+
+        config = _seasoned_config()
+        for entry in config["fixings"]["SOFR"]["values"]:
+            entry["rate"] = 0.43
+        with pytest.raises(ImplausibleInputError, match=r"^fixings\.SOFR\.values\[0\]\.rate"):
+            commands.COMMANDS[name](config)
+
+    @pytest.mark.parametrize("name", ["price", "hedge"])
+    def test_a_tenfold_typo_inside_the_band_is_caught_against_the_curve(self, name):
+        # 0.15 for 0.015 on a 1.5% curve: inside the 20% band, ten times
+        # the curve's overnight rate.
+        from rates_engine.app import commands
+        from rates_engine.core.errors import ImplausibleInputError
+
+        config = self._at(0.015, 0.15)
+        last = len(config["fixings"]["SOFR"]["values"]) - 1
+        with pytest.raises(ImplausibleInputError) as caught:
+            commands.COMMANDS[name](config)
+        message = str(caught.value)
+        assert message.startswith(f"fixings.SOFR.values[{last}].rate, the 2026-01-14 fixing")
+        assert "10 times off" in message
+
+    def test_a_percent_file_from_the_years_near_zero_is_caught(self):
+        # 0.05 meaning 0.05%, on a curve at 0.05%: read as 5%, a rate SOFR
+        # has printed, so no band can see it; the curve is a hundred times off.
+        from rates_engine.app import commands
+        from rates_engine.core.errors import ImplausibleInputError
+
+        with pytest.raises(ImplausibleInputError, match="100 times off"):
+            commands.COMMANDS["price"](self._at(0.0005, 0.05))
+
+    def test_the_market_s_worst_day_is_not_refused(self):
+        # The repo spike of 17 September 2019: SOFR printed 5.25% against a
+        # curve near 2.2%, 2.4 times off.
+        from rates_engine.app import commands
+
+        config = self._at(0.022, 0.022)
+        config["fixings"]["SOFR"]["values"][-1]["rate"] = 0.0525
+        assert math.isfinite(commands.COMMANDS["price"](config)["value"])
+
+    def test_near_zero_noise_is_not_refused(self):
+        # 0.01% against a 0.05% curve is five times off and nothing at all.
+        from rates_engine.app import commands
+
+        assert math.isfinite(commands.COMMANDS["price"](self._at(0.0005, 0.0001))["value"])
+
+    def test_a_date_that_is_not_iso_is_refused_by_its_path(self):
+        from rates_engine.app import commands
+        from rates_engine.core.errors import ConfigurationError
+
+        config = _seasoned_config()
+        config["fixings"]["SOFR"]["values"][2]["date"] = "17/09/2025"
+        with pytest.raises(ConfigurationError, match=r"^fixings\.SOFR\.values\[2\]\.date is "):
+            commands.COMMANDS["price"](config)
+
+    def test_an_unknown_data_quality_is_refused_by_its_path(self):
+        from rates_engine.app import commands
+        from rates_engine.core.errors import ConfigurationError
+
+        config = _seasoned_config(data_quality="good")
+        with pytest.raises(ConfigurationError) as caught:
+            commands.COMMANDS["price"](config)
+        assert str(caught.value) == (
+            "fixings.SOFR.data_quality is 'good'; it must be one of observed, synthetic, "
+            "proxy, assumed."
+        )
+
+    @pytest.mark.parametrize(
+        ("day", "weekday"), [("2025-09-20", "Saturday"), ("2025-11-27", "Thursday")]
+    )
+    def test_a_row_on_a_closed_day_is_refused_not_ignored(self, day, weekday):
+        # A Saturday and Thanksgiving: SIFMA is shut, no rate is published,
+        # and the row used to be accepted and read by nothing.
+        from rates_engine.app import commands
+        from rates_engine.core.errors import ConfigurationError
+
+        config = _seasoned_config()
+        config["fixings"]["SOFR"]["values"][2]["date"] = day
+        with pytest.raises(ConfigurationError) as caught:
+            commands.COMMANDS["price"](config)
+        message = str(caught.value)
+        assert message.startswith(f"fixings.SOFR.values[2].date is {day}, a {weekday}")
+        assert "SIFMA_US is closed" in message
+
+    def test_an_entry_dated_as_of_is_read_and_decides_the_day(self):
+        # The schema said the values run "to the day before as_of"; one
+        # dated as_of is read, and decides as_of up to the next business day
+        # (Friday the 16th), as the schema now says.
+        from rates_engine.app import commands
+        from rates_engine.app.config import CONFIG_SCHEMA
+
+        config = _seasoned_config()
+        without = commands.COMMANDS["price"](config)
+        config["fixings"]["SOFR"]["values"].append({"date": AS_OF.isoformat(), "rate": 0.043})
+        with_it = commands.COMMANDS["price"](config)
+        assert without["evidence"]["fields"]["realised_fixings"][0]["observed_to"] == (
+            "2026-01-15"
+        )
+        assert with_it["evidence"]["fields"]["realised_fixings"][0]["observed_to"] == (
+            "2026-01-16"
+        )
+        text = CONFIG_SCHEMA["fixings"]["keys"]["SOFR"]["keys"]["values"]["description"]
+        assert "day before as_of" not in text and "dated as_of" in text
 
     def test_a_date_given_twice_is_refused(self):
         from rates_engine.app import commands
