@@ -772,17 +772,40 @@ class TestACapWhoseFirstFixingIsToday:
         assert greeks.theta == 0.0
         assert greeks.vega == 0.0
 
-    def test_a_misnamed_series_is_an_error_not_an_absent_fixing(self, option_curve_set):
-        # A snapshot holding "TERM_SOFR" rather than "TERM_SOFR_3M" used to be
-        # read as "today's fixing is not published yet": the cap priced at
-        # the curve forward, 11,018.00 where its 4.50% fixing gives 18,440.32,
-        # with no warning and observed quality.
-        misnamed = MarketSnapshot(
+    @staticmethod
+    def _misnamed() -> MarketSnapshot:
+        return MarketSnapshot(
             AS_OF,
             {"TERM_SOFR": Series("TERM_SOFR", (AS_OF,), (0.045,), Provenance(source="test"))},
         )
+
+    @pytest.mark.parametrize(
+        "price",
+        [
+            lambda cap, curves, fixings: cap_floor_pv(cap, curves, VOL, fixings=fixings),
+            lambda cap, curves, fixings: cap_floor_periods(cap, curves, VOL, fixings=fixings),
+            lambda cap, curves, fixings: caplet_pv(cap.caplets[0], curves, VOL, fixings=fixings),
+            lambda cap, curves, fixings: option_greeks(cap, curves, VOL, fixings=fixings),
+        ],
+        ids=["cap_floor_pv", "cap_floor_periods", "caplet_pv", "option_greeks"],
+    )
+    def test_a_misnamed_series_is_an_error_not_an_absent_fixing(self, option_curve_set, price):
+        # A snapshot holding "TERM_SOFR" rather than "TERM_SOFR_3M" used to be
+        # read as "today's fixing is not published yet": the cap priced at
+        # the curve forward, 11,018.00 where its 4.50% fixing gives 18,440.32,
+        # with no warning and observed quality. Every entry point refuses it,
+        # as their Raises sections say.
         with pytest.raises(MissingFixingError, match="'TERM_SOFR_3M'"):
-            cap_floor_pv(self._cap(), option_curve_set, VOL, fixings=misnamed)
+            price(self._cap(), option_curve_set, self._misnamed())
+
+    def test_a_strip_that_fixes_later_never_reads_the_fixings(self, option_curve_set):
+        # The same snapshot on a cap whose first fixing is tomorrow: nothing
+        # has fixed or fixes today, so nothing reads it, and it prices as
+        # with no fixings. The one case a wrong snapshot passes, documented.
+        cap = replace(self._cap(), effective=date(2026, 1, 21), maturity=date(2027, 1, 21))
+        assert cap.caplets[0].fixing_date == date(2026, 1, 16)
+        priced = cap_floor_pv(cap, option_curve_set, VOL, fixings=self._misnamed())
+        assert priced.value == cap_floor_pv(cap, option_curve_set, VOL).value
 
     @pytest.mark.parametrize("fixings", [None, "series_without_today"])
     def test_the_curve_standing_in_for_the_fixing_is_recorded_not_degraded(

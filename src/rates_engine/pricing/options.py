@@ -647,8 +647,12 @@ def caplet_pv(
     Raises:
         MissingForwardError: The period ends past the projection curve.
         MissingFixingError: The period fixed before the valuation date and
-            ``fixings`` does not hold its fixing, or a fixing it holds is
-            not a finite number.
+            ``fixings`` does not hold its fixing. Or the period fixes on the
+            valuation date and ``fixings`` was passed without a series named
+            after the index (or with it under another name): only the day's
+            absence from a series that is there is forecast. Or a fixing it
+            holds is not a finite number. A period fixing later never reads
+            ``fixings``.
     """
     valuation = as_of or curve_set.as_of
     period, _ = _value_period(caplet, curve_set, volatility, valuation, fixings)
@@ -683,7 +687,9 @@ def cap_floor_periods(
     Raises:
         MissingForwardError: A live period ends past the projection curve.
         MissingFixingError: A period fixed before the valuation date and
-            ``fixings`` does not hold its fixing.
+            ``fixings`` does not hold its fixing, or a period fixes on the
+            valuation date and ``fixings`` has no series named after the
+            index; see :func:`caplet_pv`.
     """
     valuation = as_of or curve_set.as_of
     periods = []
@@ -731,8 +737,12 @@ def cap_floor_pv(
         ValueError: The strip has no periods, or every one has been paid.
         MissingForwardError: A live period ends past the projection curve.
         MissingFixingError: A period fixed before the valuation date and
-            ``fixings`` does not hold its fixing; the message names the
-            series and the date.
+            ``fixings`` does not hold its fixing. Or a period fixes on the
+            valuation date and ``fixings`` was passed without a series named
+            after the index (or with it under another name), even though
+            that day's fixing itself may be absent and forecast. The message
+            names the series and the date. A strip whose periods all fix
+            after the valuation date never reads ``fixings``.
     """
     valuation = as_of or curve_set.as_of
     caplets = cap.caplets
