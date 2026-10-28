@@ -5,18 +5,38 @@ written out one function per holiday rather than compressed: a mis-entered rule
 produces a curve that is wrong by a day's accrual on some nodes and right on
 others, and that is far easier to review as twelve named rules than as a table.
 
-**The manual check.** ``SIFMA_US`` encodes the twelve recommended US holidays
-and the observance rule used for the government bond market — Saturday
-observed on the preceding Friday, Sunday on the following Monday. That
-observance rule, and nothing else here, is what PRD-001 AC-1.2 marks
-``[manual-check]``: it must be confirmed once against SIFMA's published
-calendar. Until it is, the fixture generated from these rules carries
-``data_quality="assumed"``.
+**The manual check, done against the record.** ``SIFMA_US`` encodes the
+twelve recommended US holidays and the observance rule used for the
+government bond market: a Sunday holiday is observed on the following
+Monday, and a Saturday one on the preceding Friday for Independence Day,
+Juneteenth and Christmas only -- New Year's Day and Veterans Day on a
+Saturday close nothing. PRD-001 AC-1.2 marked that rule ``[manual-check]``,
+to be confirmed against SIFMA's published calendar, which the build
+environment cannot reach. It has been confirmed instead against something
+stricter: the New York Fed publishes SOFR for every U.S. government
+securities business day, and the calendar agrees with that publication
+record (FRED series ``SOFR``) on every weekday from
+:attr:`SIFMAUSCalendar.VERIFIED_FROM` to
+:attr:`SIFMAUSCalendar.VERIFIED_THROUGH`. The check found three wrong rules
+in v0.3 -- Memorial Day, the Saturday rule for two of the five holidays, a
+missing special closure -- and ``tests/test_sifma_publication_record.py``
+now holds the calendar to the record.
+
+**What the record cannot cover.** Dates after
+:attr:`SIFMAUSCalendar.VERIFIED_THROUGH` come from the rules alone, and an
+unscheduled closure -- a national day of mourning, a storm -- cannot be
+known before it is announced. Juneteenth on a Saturday, first due on 19
+June 2027, has not happened since SIFMA began observing it, so its Friday
+rule is the one rule here the record has not exercised; QuantLib 1.44
+applies the same one. Before April 2018 there is no SOFR record, and the
+special closures of those years are not encoded.
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import date, timedelta
+from types import MappingProxyType
 from typing import Protocol, runtime_checkable
 
 from rates_engine.conventions.daycount import DayCount, year_fraction
@@ -98,24 +118,47 @@ def _nth_weekday(year: int, month: int, weekday: int, n: int) -> date:
 
 
 def _last_weekday(year: int, month: int, weekday: int) -> date:
-    """The last ``weekday`` of a month, with Monday as 0."""
-    day = date(year, month, 28)
-    while True:
-        nxt = day + timedelta(days=7)
-        if nxt.month != month:
-            break
-        day = nxt
-    return day - timedelta(days=(day.weekday() - weekday) % 7)
+    """The last ``weekday`` of a month, with Monday as 0.
+
+    Counted back from the month's last day, which is the only starting point
+    that cannot miss the answer. Until v0.4 the search started on the 28th
+    and stepped forward a week at a time, but 28 + 7 is always in the next
+    month, so it never stepped: it returned the last ``weekday`` on or before
+    the 28th. For Memorial Day that is a week early whenever the last Monday
+    of May is the 29th, 30th or 31st -- ten years in every twenty-three, 2021
+    to 2023 and 2027 among them.
+    """
+    following = date(year + month // 12, month % 12 + 1, 1)
+    last = following - timedelta(days=1)
+    return last - timedelta(days=(last.weekday() - weekday) % 7)
 
 
 def _observed(day: date) -> date:
-    """Apply the government-bond observance rule to a fixed-date holiday.
+    """Saturday back to Friday, Sunday forward to Monday.
 
-    Saturday moves back to Friday, Sunday forward to Monday. This is the line
-    AC-1.2 marks for manual confirmation against SIFMA's published list.
+    SIFMA's rule for Independence Day, Juneteenth and Christmas. It is not
+    its rule for New Year's Day or Veterans Day, which use
+    :func:`_observed_monday_only`; v0.3 applied this one to all five.
     """
     if day.weekday() == 5:
         return day - timedelta(days=1)
+    if day.weekday() == 6:
+        return day + timedelta(days=1)
+    return day
+
+
+def _observed_monday_only(day: date) -> date:
+    """Sunday forward to Monday; a Saturday holiday stays on the Saturday.
+
+    SIFMA's rule for New Year's Day and Veterans Day. A Saturday one closes
+    no weekday at all: the New York Fed published SOFR on Friday 31 December
+    2021 (0.05%) and Friday 10 November 2023 (5.32%), the days before the
+    two that have fallen on a Saturday since SOFR began (FRED series
+    ``SOFR``), and QuantLib's US government bond and SOFR calendars keep
+    both Fridays open. The Saturday is returned as it is;
+    :meth:`SIFMAUSCalendar.holidays` then leaves it out, because it closes
+    nothing.
+    """
     if day.weekday() == 6:
         return day + timedelta(days=1)
     return day
@@ -134,13 +177,28 @@ class HolidayCalendar:
     name: str = "unnamed"
 
     def holidays(self, year: int) -> frozenset[date]:
-        """Every holiday observed in ``year``, as observed dates.
+        """The weekdays the market closes for ``year``'s holidays, as observed dates.
 
-        "Observed dates" is the subtlety: a weekend-observance rule can move
-        a holiday *out of its own year*. New Year's Day 2022 fell on a
-        Saturday, so it is observed on Friday 31 December 2021, and that
-        date belongs to ``holidays(2022)`` because it is the 2022 holiday.
-        :meth:`is_business_day` accounts for this; see there.
+        Closures, not occasions: a holiday that falls on a weekend and that
+        the calendar's rule does not move to a weekday closes nothing, and is
+        not in the set. Every calendar here keeps to that, so the set can be
+        counted and diffed against a publication record the same way on any
+        of them; until v0.4 ``BMV`` listed its weekend dates and ``SIFMA_US``
+        did not.
+
+        "Observed dates" is the other subtlety: a weekend-observance rule can
+        move a holiday *out of its own year*. A rule that observed a Saturday
+        New Year's Day on the Friday would put 31 December 2021 in
+        ``holidays(2022)``, because it is the 2022 holiday. SIFMA's calendar
+        has no such rule any more -- a Saturday New Year's Day closes nothing
+        -- but the base class does not assume that of every calendar.
+        :meth:`is_business_day` accounts for it; see there.
+
+        Args:
+            year: Calendar year.
+
+        Returns:
+            The observed closures, every one of them a weekday.
         """
         raise NotImplementedError
 
@@ -166,10 +224,13 @@ class HolidayCalendar:
         """True when ``day`` is neither a weekend nor an observed holiday.
 
         Checks the neighbouring years as well as ``day``'s own, because an
-        observance rule can move a holiday across a year boundary: with New
-        Year's Day on a Saturday, the observed holiday is 31 December of the
-        preceding year. Looking only in ``holidays(day.year)`` reported that
-        Friday as a business day, which is the bug this guards.
+        observance rule can move a holiday across a year boundary: under a
+        rule that observes a Saturday New Year's Day on the Friday, the
+        observed holiday is 31 December of the preceding year. Looking only
+        in ``holidays(day.year)`` reported that Friday as a business day,
+        which is the bug this guards. (SIFMA_US held that rule until v0.4,
+        wrongly; no SIFMA holiday now leaves its own year, but the guard
+        costs nothing and serves any calendar that does.)
         """
         if day.weekday() >= 5:
             return False
@@ -249,11 +310,54 @@ class HolidayCalendar:
 class SIFMAUSCalendar(HolidayCalendar):
     """SIFMA's recommended US holiday schedule for the fixed income market.
 
-    Twelve holidays. Juneteenth only from 2022, the year it became a federal
-    holiday; asking about 2021 correctly reports 19 June as a business day.
+    Twelve holidays, and as many closures in most years: a New Year's Day
+    or Veterans Day that falls on a Saturday closes no weekday, so 2022 has
+    eleven and 2028 ten. Juneteenth only from 2022. It became a federal holiday
+    in June 2021, first observed on Friday 18 June, but SIFMA did not
+    recommend a close for it until 2022, and the New York Fed published SOFR
+    for 18 June 2021 (0.05%, FRED). Asking about 2021 correctly reports that
+    Friday as a business day.
+
+    **It is the calendar SOFR fixes on**, and where that and SIFMA's
+    recommendation part, it follows SOFR. The one place they do is Good
+    Friday in a year when the employment report comes out that morning --
+    2021, 2023 and 2026 so far. QuantLib's ``UnitedStates.GovernmentBond``
+    keeps those days open, for SIFMA's early close, but the New York Fed
+    published no SOFR on any of the three, so here they are holidays like
+    every other Good Friday, as in QuantLib's ``UnitedStates.SOFR``. A
+    fixing that was never published cannot be compounded, and a calendar
+    that asks for one turns a valid period into ``MissingFixingError``.
+
+    **Special closures** are listed in :attr:`SPECIAL_CLOSURES`, one date
+    each with the reason, because no rule produces them. A day the market
+    stayed open in spite of an occasion is not listed: 9 January 2025, the
+    national day of mourning for President Carter, was one, and SOFR was
+    published for it (4.30%).
     """
 
     name = "SIFMA_US"
+
+    #: Closures no rule produces, each with the reason and the record that
+    #: shows it. Only the stretch the publication record covers is listed;
+    #: closures before SOFR began in April 2018 are not encoded.
+    SPECIAL_CLOSURES: Mapping[date, str] = MappingProxyType(
+        {
+            date(2018, 12, 5): (
+                "National day of mourning for President George H. W. Bush. No SOFR "
+                "was published for it (FRED series SOFR); QuantLib 1.44 closes it in "
+                "both UnitedStates.GovernmentBond and UnitedStates.SOFR."
+            ),
+        }
+    )
+
+    #: First weekday checked against the SOFR publication record: 3 April
+    #: 2018, the first SOFR in FRED's series.
+    VERIFIED_FROM = date(2018, 4, 3)
+
+    #: Last weekday checked against the record, as downloaded from FRED on
+    #: 15 October 2026. Moving it later needs the record extended to match;
+    #: ``tests/test_sifma_publication_record.py`` fails until it is.
+    VERIFIED_THROUGH = date(2026, 10, 14)
 
     def holidays(self, year: int) -> frozenset[date]:
         """Every holiday observed in ``year``, as observed dates.
@@ -262,11 +366,16 @@ class SIFMAUSCalendar(HolidayCalendar):
             year: Calendar year.
 
         Returns:
-            The observed dates, already rolled off weekends where the rule
-            applies. Good Friday and the n-th-weekday holidays never need it.
+            The weekdays the market is closed for the year's holidays,
+            already rolled off weekends where the rule applies, plus any
+            :attr:`SPECIAL_CLOSURES` in the year. Good Friday and the
+            n-th-weekday holidays never need a roll. A New Year's Day or
+            Veterans Day on a Saturday is not in the set: it closes nothing,
+            and a list of closures that also held non-events could not be
+            counted or diffed against a publication record.
         """
         days = {
-            _observed(date(year, 1, 1)),
+            _observed_monday_only(date(year, 1, 1)),
             _nth_weekday(year, 1, 0, 3),
             _nth_weekday(year, 2, 0, 3),
             easter_sunday(year) - timedelta(days=2),
@@ -274,13 +383,14 @@ class SIFMAUSCalendar(HolidayCalendar):
             _observed(date(year, 7, 4)),
             _nth_weekday(year, 9, 0, 1),
             _nth_weekday(year, 10, 0, 2),
-            _observed(date(year, 11, 11)),
+            _observed_monday_only(date(year, 11, 11)),
             _nth_weekday(year, 11, 3, 4),
             _observed(date(year, 12, 25)),
         }
         if year >= 2022:
             days.add(_observed(date(year, 6, 19)))
-        return frozenset(days)
+        days.update(day for day in self.SPECIAL_CLOSURES if day.year == year)
+        return frozenset(day for day in days if day.weekday() < 5)
 
 
 class BMVCalendar(HolidayCalendar):
@@ -324,14 +434,18 @@ class BMVCalendar(HolidayCalendar):
     MONDAY_OBSERVANCE_FROM = 2006
 
     def holidays(self, year: int) -> frozenset[date]:
-        """Every holiday observed in ``year``.
+        """The weekdays the exchange closes for ``year``'s holidays.
 
         Args:
             year: Calendar year.
 
         Returns:
             The dates. No weekend-observance roll is applied, because this
-            calendar does not have one.
+            calendar does not have one, so a fixed-date holiday on a Saturday
+            or Sunday (16 September 2023, 12 December 2026) is not observed
+            and is not in the set. Until v0.4 it was, which made the set mean
+            something different here than on ``SIFMA_US``;
+            :meth:`is_business_day` gave the same answer either way.
         """
         easter = easter_sunday(year)
         days = {
@@ -354,7 +468,7 @@ class BMVCalendar(HolidayCalendar):
             days.add(date(year, 11, 20))
         if year >= self.INAUGURATION_BASE_YEAR and (year - self.INAUGURATION_BASE_YEAR) % 6 == 0:
             days.add(date(year, 10, 1))
-        return frozenset(days)
+        return frozenset(day for day in days if day.weekday() < 5)
 
 
 SIFMA_US = SIFMAUSCalendar()

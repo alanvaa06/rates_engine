@@ -10,22 +10,79 @@ from __future__ import annotations
 
 import math
 from datetime import date, timedelta
-from typing import Any
+from typing import Any, NamedTuple
 
-from rates_engine.app.config import as_date
+from rates_engine.app.config import as_date, require_block
+from rates_engine.conventions.calendar import HolidayCalendar
 from rates_engine.conventions.daycount import CURVE_TIME_BASIS, year_fraction
 from rates_engine.conventions.indices import SOFR, index_named
 from rates_engine.conventions.side import Side
-from rates_engine.core.errors import ConfigurationError
+from rates_engine.core.errors import ConfigurationError, ImplausibleInputError
 from rates_engine.core.evidence import DataQuality, Provenance
 from rates_engine.core.money import Currency
-from rates_engine.curves.bootstrap import FuturesNode, RealizedStubNode
+from rates_engine.curves.bootstrap import FuturesContract, FuturesNode, RealizedStubNode
 from rates_engine.curves.discount import DiscountCurve
 from rates_engine.instruments.swaps import OISSwap
+from rates_engine.market.snapshot import MarketSnapshot, Series
 from rates_engine.models.convexity import ConvexityModel, convexity_adjustment
 from rates_engine.pricing.calibration import SwapQuoteNode
+from rates_engine.pricing.fx_forward import require_plausible_rate
 
-__all__ = ["calibration_nodes", "ois_swap", "flat_curve", "fx_inputs"]
+__all__ = [
+    "calibration_nodes",
+    "ois_swap",
+    "fixings_snapshot",
+    "flat_curve",
+    "fx_inputs",
+    "MAX_PLAUSIBLE_OVERNIGHT_FIXING",
+    "FIXING_CURVE_FACTOR",
+    "FIXING_CURVE_GAP",
+]
+
+MAX_PLAUSIBLE_OVERNIGHT_FIXING = 0.20
+"""Beyond this, as a decimal a year, an overnight fixing in a config is refused.
+
+SOFR has printed between 0.01% and 5.40% since it began in April 2018, its
+one spike 5.25% on 17 September 2019, and the effective federal funds rate
+was last above 20% in 1981. A fixing beyond the band is almost always a typo
+or a unit: 0.43 typed for 0.043 priced the review's seasoned payer at
+14,200,798 USD instead of 255,311, marked ``observed``. A plausibility band
+and not a measurement, named and adjustable like
+:data:`~rates_engine.pricing.fx_forward.MAX_PLAUSIBLE_RATE`, which it narrows
+for this one kind of rate.
+
+No band catches a file in percent from the years SOFR sat near zero: 0.05
+meaning 0.05% reads as 5%, a rate SOFR has printed. That is what the
+cross-check against the curve is for (:data:`FIXING_CURVE_FACTOR`).
+"""
+
+FIXING_CURVE_FACTOR = 4.0
+"""How many times off the curve's overnight rate the latest fixing may be.
+
+The latest fixing a ``fixings`` series gives on or before ``as_of`` is
+compared with the curve's forward from ``as_of`` to the next business day:
+the one day of history and the one day of forecast that are closest. It is
+refused when it is both this many times larger or smaller and further than
+:data:`FIXING_CURVE_GAP`. A rate written in the wrong unit is a hundred
+times off (0.05 for 0.05%), and a typo ten (0.43 for 0.043). The market's
+worst day since SOFR began, the repo spike of 17 September 2019, printed
+5.25% against about 2.2%, 2.4 times; the emergency cut of Sunday 15 March
+2020 left Friday's print some six times above Monday's curve, and a curve
+valued that Monday, against Friday's fixing, is refused with it.
+"""
+
+FIXING_CURVE_GAP = 0.005
+"""How far, as a decimal a year, the latest fixing may sit from the curve's overnight rate.
+
+Fifty basis points. With :data:`FIXING_CURVE_FACTOR` it keeps the check off
+the noise near zero, where 0.01% against 0.05% is five times off and
+nothing at all: a fixing is refused only when it is both.
+"""
+
+_OVERNIGHT_CONVENTION = (
+    "A fixing is a decimal a year, as the administrator publishes it on ACT/360: 4.30% is "
+    "0.043, not 4.30."
+)
 
 
 def calibration_nodes(config: dict[str, Any], as_of: date) -> tuple[Any, ...]:
@@ -47,8 +104,8 @@ def calibration_nodes(config: dict[str, Any], as_of: date) -> tuple[Any, ...]:
         OIS it describes.
 
     Raises:
-        ConfigurationError: A ``par_swaps`` entry uses the v0.3 shape or is
-            missing a required key.
+        ConfigurationError: A ``par_swaps`` entry fails its schema check:
+            the v0.3 shape, a required key missing, a key misspelt.
     """
     curve = config.get("curve") or {}
     instruments: list[Any] = []
@@ -64,8 +121,9 @@ def calibration_nodes(config: dict[str, Any], as_of: date) -> tuple[Any, ...]:
     sigma = float(convexity.get("sigma", 0.0))
     kappa = convexity.get("kappa")
 
-    for entry in curve.get("futures", ()):
+    for number, entry in enumerate(curve.get("futures", ())):
         start, end = as_date(entry["start"]), as_date(entry["end"])
+        contract = _futures_contract(entry, number)
         adjustment = convexity_adjustment(
             year_fraction(as_of, start, CURVE_TIME_BASIS),
             year_fraction(as_of, end, CURVE_TIME_BASIS),
@@ -85,6 +143,7 @@ def calibration_nodes(config: dict[str, Any], as_of: date) -> tuple[Any, ...]:
                     "kappa": kappa,
                     "adjustment_bp": adjustment.adjustment_bp,
                 },
+                contract=contract,
             )
         )
 
@@ -93,8 +152,27 @@ def calibration_nodes(config: dict[str, Any], as_of: date) -> tuple[Any, ...]:
     return tuple(instruments)
 
 
-_LEGACY_PAR_SWAP_KEYS = ("start", "payment_dates", "year_fractions")
-_PAR_SWAP_REQUIRED = ("effective", "maturity", "rate")
+def _futures_contract(entry: dict[str, Any], number: int) -> FuturesContract | None:
+    """The optional ``contract`` of a ``curve.futures`` entry, checked by name.
+
+    One of :class:`~rates_engine.curves.bootstrap.FuturesContract`'s names,
+    exactly; left out, the hedge reads the contract off the period. It is
+    what sizes the hedge -- an SR1 is worth USD 41.67 a basis point and an
+    SR3 USD 25.00 -- so a misspelling is refused with the entry's path, which
+    the node's own refusal could not name, rather than sized as whichever
+    contract it falls back to.
+    """
+    value = entry.get("contract")
+    if value is None:
+        return None
+    names = [member.value for member in FuturesContract]
+    if value not in names:
+        raise ConfigurationError(
+            f"curve.futures[{number}].contract is {value!r}; it must be one of {names}, "
+            "or left out to read the contract from the period (a calendar month is SR1, "
+            "an IMM quarter SR3)"
+        )
+    return FuturesContract(value)
 
 
 def _par_swap_quote(entry: dict[str, Any], number: int) -> SwapQuoteNode:
@@ -106,19 +184,15 @@ def _par_swap_quote(entry: dict[str, Any], number: int) -> SwapQuoteNode:
     assumed each period is paid the day it ends, which misprices a SOFR OIS
     (paid two business days later) by several basis points at the front; it
     is refused with the migration spelled out rather than accepted.
+
+    Through a command the entry has already passed
+    :func:`~rates_engine.app.config.require_config`, which refuses both
+    problems first. A caller of :func:`calibration_nodes` that went round it
+    gets the same check of the entry against
+    :data:`~rates_engine.app.config.CONFIG_SCHEMA`, in the same words, rather
+    than a second list of the keys kept here.
     """
-    legacy = [key for key in _LEGACY_PAR_SWAP_KEYS if key in entry]
-    if legacy:
-        raise ConfigurationError(
-            f"curve.par_swaps[{number}] uses the v0.3 keys {legacy}. A par quote is now "
-            "given as the swap it quotes: effective, maturity and rate, with optional "
-            "frequency_months (12), payment_lag_days (2) and label. The dates and year "
-            "fractions are generated from those terms, payment lag included; the old "
-            "shape ignored the lag and mispriced a SOFR OIS by several basis points."
-        )
-    missing = [key for key in _PAR_SWAP_REQUIRED if key not in entry]
-    if missing:
-        raise ConfigurationError(f"curve.par_swaps[{number}] is missing {missing}")
+    entry = require_block(entry, f"curve.par_swaps[{number}]")
     rate = float(entry["rate"])
     swap = OISSwap(
         effective=as_date(entry["effective"]),
@@ -170,6 +244,163 @@ def ois_swap(config: dict[str, Any]) -> OISSwap:
     )
 
 
+def fixings_snapshot(
+    config: dict[str, Any], as_of: date, curve: DiscountCurve | None = None
+) -> MarketSnapshot | None:
+    """The ``fixings`` block of a config as the snapshot the pricers read, or ``None``.
+
+    Each series becomes a :class:`~rates_engine.market.snapshot.Series` under
+    the index's name, with a provenance saying where the block says the
+    numbers came from and how good they are. Everything is checked here,
+    where the file can still be named, and every refusal starts with the
+    path of the value at fault:
+
+    - a date must be ISO 8601 and a business day of the index's calendar:
+      a rate is published for business days only, and a row for a Saturday
+      or a holiday was read by nothing, silently;
+    - a date may appear once in a series;
+    - a rate must be a number within :data:`MAX_PLAUSIBLE_OVERNIGHT_FIXING`
+      (20%): 4.30 for 4.30%, or 0.43 for 0.043, is a unit or a typo;
+    - with ``curve``, the latest rate on or before ``as_of`` must be within
+      :data:`FIXING_CURVE_FACTOR` or :data:`FIXING_CURVE_GAP` of the curve's
+      overnight rate, which catches what no band can, a percent file from
+      the years near zero;
+    - ``data_quality`` must be one of observed, synthetic, proxy, assumed.
+
+    Args:
+        config: The whole configuration mapping.
+        as_of: Valuation date; the snapshot serves nothing dated after it.
+        curve: The curve the trade is valued on, for the cross-check; left
+            out, it is skipped.
+
+    Returns:
+        The snapshot, or ``None`` when the config has no ``fixings`` block.
+
+    Raises:
+        ConfigurationError: A date is not ISO 8601, is not a business day of
+            the index's calendar, or appears twice in one series; a rate is
+            not a number; or ``data_quality`` is not one of the four.
+        ImplausibleInputError: A rate is outside the band, or the latest one
+            is far off the curve's overnight rate.
+    """
+    block = config.get("fixings") or {}
+    if not block:
+        return None
+    series: dict[str, Series] = {}
+    for series_id, spec in block.items():
+        where = f"fixings.{series_id}"
+        calendar = index_named(series_id).calendar
+        published: dict[date, float] = {}
+        position: dict[date, int] = {}
+        for number, entry in enumerate(spec["values"]):
+            day = _fixing_date(entry["date"], f"{where}.values[{number}].date", calendar)
+            rate = _fixing_rate(entry["rate"], f"{where}.values[{number}].rate")
+            if day in published:
+                raise ConfigurationError(
+                    f"{where}.values[{number}].date gives {day} again (values[{position[day]}] "
+                    f"has it, at {published[day]!r}; this one says {rate!r}). One business day "
+                    "has one published rate, so keep the one that was published."
+                )
+            published[day] = rate
+            position[day] = number
+        if curve is not None:
+            _require_near_curve(published, position, where, calendar, curve)
+        days = tuple(sorted(published))
+        series[series_id] = Series(
+            series_id,
+            days,
+            tuple(published[day] for day in days),
+            Provenance(
+                source=str(spec.get("source", "config")),
+                series_id=series_id,
+                instrument_kind="overnight_fixing",
+                data_quality=_data_quality(spec.get("data_quality", "observed"), where),
+            ),
+        )
+    return MarketSnapshot(as_of=as_of, series=series)
+
+
+def _fixing_date(value: Any, path: str, calendar: HolidayCalendar) -> date:
+    """A ``fixings`` row's date, refused by its path unless it is an ISO business day."""
+    try:
+        day = as_date(value)
+    except (TypeError, ValueError) as error:
+        raise ConfigurationError(
+            f"{path} is {value!r}, which is not a date: write it as ISO 8601, YYYY-MM-DD "
+            f"({error})."
+        ) from error
+    if not calendar.is_business_day(day):
+        raise ConfigurationError(
+            f"{path} is {day}, a {day:%A} on which {calendar.name} is closed. A rate is "
+            "published for business days only, and the one before a closed day covers it, "
+            f"so this row would be read by nothing; drop it, or give "
+            f"{calendar.previous_business_day(day)}'s rate under that date."
+        )
+    return day
+
+
+def _fixing_rate(value: Any, path: str) -> float:
+    """A ``fixings`` row's rate, refused by its path unless it is a plausible decimal."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ConfigurationError(
+            f"{path} is {value!r}. A fixing is a number, the published rate as a decimal "
+            "a year: 0.043 for 4.30%."
+        )
+    require_plausible_rate(
+        float(value),
+        path,
+        limit=MAX_PLAUSIBLE_OVERNIGHT_FIXING,
+        limit_name="MAX_PLAUSIBLE_OVERNIGHT_FIXING",
+        convention=_OVERNIGHT_CONVENTION,
+    )
+    return float(value)
+
+
+def _data_quality(value: Any, where: str) -> DataQuality:
+    """A series' ``data_quality``, refused by its path unless it names one."""
+    try:
+        return DataQuality(value)
+    except ValueError as error:
+        names = ", ".join(quality.value for quality in DataQuality)
+        raise ConfigurationError(
+            f"{where}.data_quality is {value!r}; it must be one of {names}."
+        ) from error
+
+
+def _require_near_curve(
+    published: dict[date, float],
+    position: dict[date, int],
+    where: str,
+    calendar: HolidayCalendar,
+    curve: DiscountCurve,
+) -> None:
+    """Refuse a series whose latest fixing is in another unit than the curve.
+
+    See :data:`FIXING_CURVE_FACTOR`. Only the latest fixing on or before
+    ``as_of`` is compared: older ones may be a year and four hundred basis
+    points away from today's curve, as in 2022, and still be right.
+    """
+    as_of = curve.as_of
+    held = [day for day in published if day <= as_of]
+    if not held:
+        return
+    latest = max(held)
+    fixing = published[latest]
+    overnight = curve.forward(as_of, calendar.next_business_day(as_of))
+    larger, smaller = max(abs(fixing), abs(overnight)), min(abs(fixing), abs(overnight))
+    if abs(fixing - overnight) > FIXING_CURVE_GAP and larger > FIXING_CURVE_FACTOR * smaller:
+        times = f"{larger / smaller:.0f} times" if smaller else "infinitely"
+        raise ImplausibleInputError(
+            f"{where}.values[{position[latest]}].rate, the {latest} fixing, is {fixing!r}, and "
+            f"the curve's overnight rate from as_of is {overnight:.6f}: {times} off and "
+            f"{abs(fixing - overnight) * 1e4:.0f} bp away. A fixing in another unit than the "
+            "curve is a hundred times off (0.05 for 0.05%, a percent file from the years "
+            "near zero) and a typo ten (0.43 for 0.043). Fixings are decimals a year: check "
+            f"the file's unit. Refused when more than {FIXING_CURVE_FACTOR:.0f} times and "
+            f"{FIXING_CURVE_GAP * 1e4:.0f} bp off (FIXING_CURVE_FACTOR, FIXING_CURVE_GAP)."
+        )
+
+
 def flat_curve(as_of: date, rate: float, currency: Currency, years: float) -> DiscountCurve:
     """A single-node continuous curve, for the FX commands.
 
@@ -179,11 +410,21 @@ def flat_curve(as_of: date, rate: float, currency: Currency, years: float) -> Di
     goes through the same discounting code every other price does, rather
     than through a second exponential written out in the command.
 
+    The rate is read as **continuously compounded on ACT/365F**, the curve's
+    own time basis: ``P(t) = exp(-rate * t)`` with ``t`` in ACT/365F years.
+    A money-market quote — simple interest on ACT/360, which is how SOFR and
+    TIIE are published — is a different number for the same rate and has to
+    be converted before it is passed here; read as continuous, a USD/MXN pair
+    of such quotes moves the one-year forward by hundreds of pips.
+
     Args:
         as_of: Valuation date.
-        rate: Continuously compounded rate as a decimal a year.
+        rate: Continuously compounded rate on ACT/365F, as a decimal a year.
         currency: What the curve discounts.
-        years: Horizon in years; the single node sits at the nearest day.
+        years: Horizon in ACT/365F years; the single node sits at the
+            nearest day, and log-linear interpolation between it and
+            ``as_of`` keeps ``P(t) = exp(-rate * t)`` exact at every date in
+            between, the spot date included.
 
     Returns:
         The curve.
@@ -193,25 +434,102 @@ def flat_curve(as_of: date, rate: float, currency: Currency, years: float) -> Di
     return DiscountCurve(as_of, (node,), (math.exp(-rate * span),), currency=currency)
 
 
-def fx_inputs(config: dict[str, Any]) -> tuple[date, dict[str, Any], float]:
-    """The valuation date, the ``fx`` block and the years to delivery.
+_RATE_CONVENTION_NOTE = (
+    "Read as a continuously compounded rate on ACT/365F, as a decimal a year: "
+    "P(t) = exp(-r t). A money-market quote (simple interest on ACT/360, how SOFR "
+    "and TIIE are published) is a different number for the same rate and must be "
+    "converted first."
+)
+
+
+class FXInputs(NamedTuple):
+    """The ``fx`` block, read once for both FX commands.
+
+    Attributes:
+        as_of: Valuation (trade) date.
+        delivery: Delivery date of the forward, which is also when the
+            exposure settles.
+        spot: Spot rate, MXN per USD, for delivery on the spot date.
+        r_domestic: The peso rate, continuously compounded on ACT/365F, as a
+            decimal a year.
+        r_foreign: The dollar rate, in the same convention.
+        basis_bp: Cross-currency basis in basis points, a spread on the peso
+            leg; zero when the block has none.
+        years: ACT/365F years from ``as_of`` to delivery, the horizon of the
+            two flat curves.
+        provenance: How the two rates were read, for the result's evidence.
+        block: The block itself, for the keys only one command reads.
+    """
+
+    as_of: date
+    delivery: date
+    spot: float
+    r_domestic: float
+    r_foreign: float
+    basis_bp: float
+    years: float
+    provenance: tuple[Provenance, ...]
+    block: dict[str, Any]
+
+
+def fx_inputs(config: dict[str, Any]) -> FXInputs:
+    """The ``fx`` block, read and checked, with the years to delivery.
+
+    ``r_domestic`` (MXN) and ``r_foreign`` (USD) are read as
+    **continuously compounded rates on ACT/365F**, as decimals a year — the
+    convention of :func:`flat_curve` and of Garman-Kohlhagen — and the
+    result's evidence says so in one
+    :class:`~rates_engine.core.evidence.Provenance` per rate.
+    ``spot`` is the price for delivery on the pair's spot date: two business
+    days after ``as_of`` on which both the Federal Reserve and BMV are open,
+    because for the peso T+1 has to be a US business day too
+    (:meth:`~rates_engine.conventions.currency_pair.CurrencyPair.spot_date`).
+    The forward and the option structures both run from there, and the
+    forward's evidence names the calendars the lag was counted on.
 
     Args:
         config: The whole configuration mapping.
 
     Returns:
-        ``(as_of, fx_block, years_to_delivery)``, years on the curve's time
-        basis.
+        The :class:`FXInputs`.
 
     Raises:
-        ConfigurationError: The ``fx`` block is missing or empty.
+        ConfigurationError: The ``fx`` block is missing or empty, lacks one
+            of ``spot``, ``delivery``, ``r_domestic`` and ``r_foreign``, or
+            fails another check of its schema entry; one refusal names every
+            key at fault, as :func:`~rates_engine.app.config.require_config`
+            would.
+        ImplausibleInputError: A rate is outside
+            :data:`~rates_engine.pricing.fx_forward.MAX_PLAUSIBLE_RATE`,
+            which is what a rate written in percent looks like.
     """
-    block = config.get("fx") or {}
-    if not block:
-        raise ConfigurationError(
-            "this command needs an `fx` block with spot, delivery, r_domestic and "
-            "r_foreign. See `rateng describe --json` for the shape."
-        )
+    # The schema is the one list of what the block takes, as for a par swap
+    # entry. Checked as fx-forward reads it, which is what every FX command
+    # needs; hedge-structures' fx.volatility is required by require_config.
+    block = require_block(config.get("fx") or {}, "fx", command="fx-forward")
     as_of = as_date(config["as_of"])
     delivery = as_date(block["delivery"])
-    return as_of, block, year_fraction(as_of, delivery, CURVE_TIME_BASIS)
+    r_domestic = float(block["r_domestic"])
+    r_foreign = float(block["r_foreign"])
+    require_plausible_rate(r_domestic, "r_domestic")
+    require_plausible_rate(r_foreign, "r_foreign")
+    provenance = tuple(
+        Provenance(
+            source="config",
+            series_id=f"fx.{key}",
+            instrument_kind="continuously_compounded_rate_act365f",
+            notes=f"{currency} rate. {_RATE_CONVENTION_NOTE}",
+        )
+        for key, currency in (("r_domestic", "MXN"), ("r_foreign", "USD"))
+    )
+    return FXInputs(
+        as_of=as_of,
+        delivery=delivery,
+        spot=float(block["spot"]),
+        r_domestic=r_domestic,
+        r_foreign=r_foreign,
+        basis_bp=float(block.get("basis_bp", 0.0)),
+        years=year_fraction(as_of, delivery, CURVE_TIME_BASIS),
+        provenance=provenance,
+        block=block,
+    )

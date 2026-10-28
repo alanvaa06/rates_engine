@@ -187,12 +187,22 @@ class TestErrorsReachTheCallerNamed:
         assert excinfo.value.exit_code == 1
 
     def test_a_malformed_config_is_not_a_silent_success(self, config):
-        """Not an anticipated refusal, so not a RatesEngineError — but it must
-        still raise rather than come back as a curve built from what parsed."""
+        """It must raise rather than come back as a curve built from what
+        parsed. It used to raise a bare ``KeyError('price')``; the config is
+        now checked against the schema first, and a required key that is
+        not there is a refusal naming the path, which an agent can act on."""
         broken = json.loads(json.dumps(config))
         del broken["curve"]["futures"][0]["price"]
-        with pytest.raises(KeyError):
+        with pytest.raises(ConfigurationError) as excinfo:
             mcp_server.call_tool("bootstrap", broken)
+        assert "curve.futures[0].price is missing" in str(excinfo.value)
+
+    def test_a_misspelt_key_is_refused_by_the_tool_as_by_the_cli(self, config):
+        broken = json.loads(json.dumps(config))
+        broken["swap"]["notionl"] = broken["swap"].pop("notional")
+        with pytest.raises(ConfigurationError) as excinfo:
+            mcp_server.call_tool("price", broken)
+        assert "swap.notionl (did you mean notional?)" in str(excinfo.value)
 
     def test_the_failure_document_names_the_exception(self, config):
         broken = json.loads(json.dumps(config))
@@ -401,6 +411,134 @@ class TestTransportWiring:
         with pytest.raises(ToolError) as excinfo:
             anyio.run(lambda: server.call_tool("price", {"config": None}))
         assert "ConfigurationError" in str(excinfo.value)
+
+
+def _break(config: dict, case: str) -> tuple[str, dict]:
+    """Failures that are not RatesEngineErrors, as in ``r10_mcp_errors.py``.
+
+    On main each reached the agent as ``UnexpectedToolError: Error executing
+    tool <name>``, with no type and no message, while the CLI printed the
+    reason. The review's ``side: "PAYER"`` behaves the same way; it is left
+    out here because its message belongs to ``instruments.swaps``, and this
+    file should not break when that module's wording does. Built from the
+    fixture so the CLI and the tool see one config.
+    """
+    broken = json.loads(json.dumps(config))
+    if case == "missing-key":
+        del broken["curve"]["futures"][0]["price"]
+        return "bootstrap", broken
+    if case == "day-first-date":
+        broken["as_of"] = "15/01/2026"
+        return "price", broken
+    if case == "dates-as-key-tenors":
+        broken["risk"] = {"key_tenors": ["2026-09-16", "2027-03-17"]}
+        return "price", broken
+    if case == "misspelt-key":
+        broken["swap"]["notionl"] = broken["swap"].pop("notional")
+        return "price", broken
+    raise AssertionError(case)
+
+
+_PREFIX = "Error executing tool {name}: "
+
+
+class TestEveryFailureReachesTheAgentAsTheCLIDocument:
+    """PRD-002 AC-6.2 for every exception, not only the engine's own.
+
+    The SDK flattens anything but its ToolError into "Error executing tool
+    <name>"; the server used to convert RatesEngineError alone. What the
+    agent reads now is the SDK's prefix followed by the exact document
+    ``rateng <name> --json`` prints: type, message, exit_code, recoverable.
+    """
+
+    @pytest.fixture
+    def server(self):
+        pytest.importorskip(
+            "mcp.server.mcpserver",
+            reason="the MCP SDK is not installed; install the [mcp] extra to run this",
+        )
+        return mcp_server.build_server()
+
+    @staticmethod
+    def _agent_reads(server, name: str, config: dict) -> tuple[bool, str]:
+        """What an MCP client receives: the is_error flag and the text."""
+        import anyio
+        from mcp import Client
+
+        async def call():
+            async with Client(server) as client:
+                return await client.call_tool(name, {"config": config})
+
+        result = anyio.run(call)
+        return result.is_error, result.content[0].text
+
+    @staticmethod
+    def _cli_prints(name: str, config: dict, tmp_path) -> tuple[int, dict]:
+        path = tmp_path / "broken.json"
+        path.write_text(json.dumps(config), encoding="utf-8")
+        done = subprocess.run(
+            [sys.executable, "-m", "rates_engine.cli", name, "--config", str(path), "--json"],
+            capture_output=True,
+            text=True,
+        )
+        return done.returncode, json.loads(done.stdout)
+
+    @pytest.mark.parametrize(
+        "case",
+        ["missing-key", "day-first-date", "dates-as-key-tenors", "misspelt-key"],
+    )
+    def test_the_agent_reads_the_document_the_cli_prints(self, case, server, config, tmp_path):
+        name, broken = _break(config, case)
+        is_error, text = self._agent_reads(server, name, broken)
+        code, printed = self._cli_prints(name, broken, tmp_path)
+        assert is_error is True
+        prefix = _PREFIX.format(name=name)
+        assert text.startswith(prefix), text
+        served = json.loads(text.removeprefix(prefix))
+        assert served == printed
+        assert served["exit_code"] == code
+        assert served["error"]["message"]
+
+    def test_a_crash_is_not_reported_as_one(self, server, config):
+        """The SDK's UnexpectedToolError is what drops the message; a failure
+        the server has turned into a document must not arrive as one."""
+        import anyio
+        from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
+
+        name, broken = _break(config, "day-first-date")
+        with pytest.raises(ToolError) as excinfo:
+            anyio.run(lambda: server.call_tool(name, {"config": broken}))
+        assert not isinstance(excinfo.value, UnexpectedToolError)
+        assert '"type": "ValueError"' in str(excinfo.value)
+        assert "15/01/2026" in str(excinfo.value)
+
+    def test_an_unanticipated_exception_keeps_its_type_and_message(
+        self, server, config, monkeypatch
+    ):
+        # Independent of any command body: whatever a handler raises, the
+        # agent is told what it was.
+        def crashes(_config):
+            raise RuntimeError("the handler fell over")
+
+        monkeypatch.setitem(mcp_server.TOOLS, "price", crashes)
+        is_error, text = self._agent_reads(server, "price", config)
+        assert is_error is True
+        served = json.loads(text.removeprefix(_PREFIX.format(name="price")))
+        assert served["error"] == {
+            "type": "RuntimeError",
+            "message": "the handler fell over",
+            "recoverable": True,
+        }
+        assert served["exit_code"] == 1
+
+    def test_a_refusal_carries_its_exit_code_and_recoverability(self, server, config):
+        broken = json.loads(json.dumps(config))
+        broken["curve"]["futures"][3]["price"] = 130.0
+        _, text = self._agent_reads(server, "bootstrap", broken)
+        served = json.loads(text.removeprefix(_PREFIX.format(name="bootstrap")))
+        assert served["error"]["type"] == "CurveArbitrageError"
+        assert served["exit_code"] == 2
+        assert served["error"]["recoverable"] is False
 
     def test_the_console_script_is_installed(self):
         import shutil

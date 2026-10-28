@@ -23,6 +23,18 @@ from rates_engine.models.gaussian import standard_normal_cdf, standard_normal_pd
 __all__ = ["price", "implied_normal_vol", "vega", "delta"]
 
 
+def _require_finite(**values: float) -> None:
+    """Refuse a NaN or an infinity by name before any comparison reads it.
+
+    Every comparison with NaN is false, so ``sigma < 0`` let a NaN through to
+    a NaN price, and an inversion with a NaN target walked its bisection to
+    the top of the bracket and returned that as a volatility.
+    """
+    for name, value in values.items():
+        if not math.isfinite(value):
+            raise ValueError(f"{name} must be a finite number, got {value!r}")
+
+
 def price(
     forward: float,
     strike: float,
@@ -48,8 +60,10 @@ def price(
         The price in the same units as ``annuity``.
 
     Raises:
-        ValueError: ``sigma`` or ``expiry`` is negative.
+        ValueError: ``sigma`` or ``expiry`` is negative, or an input is not
+            a finite number.
     """
+    _require_finite(forward=forward, strike=strike, expiry=expiry, sigma=sigma)
     if sigma < 0.0:
         raise ValueError(f"sigma must be non-negative, got {sigma!r}")
     if expiry < 0.0:
@@ -79,9 +93,18 @@ def vega(
 
     Returns:
         ``d(price) / d(sigma)``. Divide by 1e4 for the change per basis point.
+        At ``sigma = 0`` it is the limit from above: ``annuity sqrt(T) n(0)``
+        at the money and zero away from it.
     """
     dispersion = sigma * math.sqrt(expiry)
     if dispersion == 0.0:
+        # The limit sigma -> 0+. ``d = (F - K) / (sigma sqrt T)`` runs to
+        # +-infinity off the money, where n(d) and so vega vanish, and stays
+        # at zero at the money. Returning the at-the-money value everywhere,
+        # as this did, gave a deep out-of-the-money option the largest vega
+        # it could have.
+        if forward != strike:
+            return 0.0
         return annuity * math.sqrt(expiry) * standard_normal_pdf(0.0)
     d = (forward - strike) / dispersion
     return annuity * math.sqrt(expiry) * standard_normal_pdf(d)
@@ -150,9 +173,12 @@ def implied_normal_vol(
 
     Raises:
         ValueError: ``expiry`` is not positive, ``annuity`` is not positive,
-            or the target is below the intrinsic value, where no volatility
-            reproduces it.
+            the target is below the intrinsic value, where no volatility
+            reproduces it, or an input is not a finite number.
     """
+    _require_finite(
+        target=target, forward=forward, strike=strike, expiry=expiry, annuity=annuity
+    )
     if expiry <= 0.0:
         raise ValueError(f"implied volatility needs a positive expiry, got {expiry!r}")
     if annuity <= 0.0:

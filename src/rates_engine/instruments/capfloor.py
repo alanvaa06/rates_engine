@@ -17,17 +17,29 @@ will happily extrapolate a flat forward past its last node, and for a
 discount factor that is a defensible convention; for a caplet it would mean
 pricing an option on a rate the market never quoted, inside a total that
 reports as complete.
+
+**When the option expires.** At the fixing, not at the start of accrual. A
+term rate is set before the period it covers -- Term SOFR two US Government
+Securities business days before, the ARRC convention -- and once it is set
+nothing about the period is optional. :attr:`Caplet.fixing_date` is that day,
+the index's :attr:`~rates_engine.conventions.indices.RateIndex.fixing_lag_days`
+business days of its calendar before :attr:`Caplet.accrual_start`, unless the
+cap overrides it. Measuring expiry to the accrual start,
+as v0.3 did, gave each caplet two days of time value it does not have: 0.24%
+on a five-year cap against QuantLib with ``fixingDays = 2``.
 """
 
 from __future__ import annotations
 
+import numbers
+import operator
 from dataclasses import dataclass
 from datetime import date
 from functools import cached_property
 from typing import Any
 
 from rates_engine.conventions.calendar import BusinessDayConvention, HolidayCalendar
-from rates_engine.conventions.daycount import DayCount, year_fraction
+from rates_engine.conventions.daycount import CURVE_TIME_BASIS, DayCount, year_fraction
 from rates_engine.conventions.indices import TERM_SOFR_3M, RateIndex, term_sofr
 from rates_engine.conventions.option_kind import OptionKind
 from rates_engine.conventions.schedule import Schedule
@@ -35,6 +47,32 @@ from rates_engine.core.errors import UnsupportedConventionError
 from rates_engine.core.money import Currency
 
 __all__ = ["Caplet", "CapFloor"]
+
+
+def _resolved_lag(lag: int | None, index: RateIndex) -> int:
+    """The lag a cap or caplet fixes with: its own override, else its index's."""
+    if lag is None:
+        return index.fixing_lag_days
+    # A whole number of days, checked by type: 1.5 used to pass ``lag < 0``,
+    # and add_business_days' countdown never reached zero -- it walked back
+    # through the calendar until the year ran out. A bool is an int to
+    # Python and is not a number of days.
+    #
+    # Integral, not int: ``df["lag"].iloc[0]`` is a numpy int64, which is a
+    # whole number and was refused. numpy registers its integers as
+    # Integral and neither its bool nor its floats, so np.True_ and
+    # np.float64(2.0) are still refused. ``operator.index`` alone would not
+    # do at the numpy floor: numpy 2.0 still indexes with np.True_, as 1,
+    # behind only a DeprecationWarning.
+    if isinstance(lag, bool) or not isinstance(lag, numbers.Integral) or lag < 0:
+        raise ValueError(
+            f"fixing_lag_days must be a whole number of business days, zero or more, "
+            f"got {lag!r}"
+        )
+    # Stored as a plain int, not as passed. fixing_date negates the lag, and
+    # a numpy unsigned integer negates by wrapping round: np.uint8(2) fixed
+    # 254 business days *after* its period started.
+    return operator.index(lag)
 
 
 @dataclass(frozen=True)
@@ -50,6 +88,12 @@ class Caplet:
         kind: ``CALL`` for a caplet, ``PUT`` for a floorlet.
         day_count: Accrual basis.
         index: The term rate observed; it fixes the currency.
+        fixing_lag_days: Business days of the index's calendar from the
+            fixing back from :attr:`accrual_start`. ``None``, the default,
+            takes :attr:`RateIndex.fixing_lag_days
+            <rates_engine.conventions.indices.RateIndex.fixing_lag_days>`, so
+            a caplet fixes when an IRS or a FRA on the same period does; the
+            resolved number is stored. Zero fixes on the start date itself.
     """
 
     accrual_start: date
@@ -60,11 +104,47 @@ class Caplet:
     kind: OptionKind
     day_count: DayCount = DayCount.ACT_360
     index: RateIndex = TERM_SOFR_3M
+    fixing_lag_days: int | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "fixing_lag_days", _resolved_lag(self.fixing_lag_days, self.index)
+        )
 
     @property
     def year_fraction(self) -> float:
         """Accrual length in years, on :attr:`day_count`."""
         return year_fraction(self.accrual_start, self.accrual_end, self.day_count)
+
+    @property
+    def fixing_date(self) -> date:
+        """The date the rate is set, and the option expires.
+
+        :attr:`fixing_lag_days` business days of the index's calendar before
+        :attr:`accrual_start`, so the period from Tuesday 19 January 2027,
+        the day after Martin Luther King Day, fixes on Thursday the 14th.
+        """
+        return self.index.calendar.add_business_days(self.accrual_start, -self.lag_days)
+
+    @property
+    def lag_days(self) -> int:
+        """:attr:`fixing_lag_days` as resolved when the caplet was built: never ``None``."""
+        lag = self.fixing_lag_days
+        assert lag is not None  # resolved in __post_init__
+        return lag
+
+    def time_to_expiry(self, as_of: date, *, day_count: DayCount = CURVE_TIME_BASIS) -> float:
+        """Years from a valuation date to :attr:`fixing_date`, where the option ends.
+
+        Args:
+            as_of: Valuation date.
+            day_count: Basis for the year fraction. The curve's own basis by
+                default, so option time and curve time agree.
+
+        Returns:
+            The time in years, zero at or after the fixing.
+        """
+        return max(year_fraction(as_of, self.fixing_date, day_count), 0.0)
 
     @property
     def rate_index(self) -> RateIndex:
@@ -80,6 +160,7 @@ class Caplet:
         """Terms of the caplet, for the evidence record."""
         return {
             "kind": "caplet" if self.kind is OptionKind.CALL else "floorlet",
+            "fixing_date": self.fixing_date.isoformat(),
             "accrual_start": self.accrual_start.isoformat(),
             "accrual_end": self.accrual_end.isoformat(),
             "payment": self.payment.isoformat(),
@@ -112,6 +193,13 @@ class CapFloor:
             same periods.
         index: The term rate every caplet observes; ``None`` means Term SOFR
             of :attr:`frequency_months`.
+        fixing_lag_days: Business days of the index's calendar from each
+            fixing to the start of its period. ``None``, the default, takes
+            the index's :attr:`RateIndex.fixing_lag_days
+            <rates_engine.conventions.indices.RateIndex.fixing_lag_days>` --
+            two for Term SOFR -- and stores it; a number overrides it. Zero
+            reproduces v0.3, which expired each caplet at the start of its
+            accrual.
     """
 
     effective: date
@@ -126,9 +214,11 @@ class CapFloor:
     convention: BusinessDayConvention = BusinessDayConvention.MODIFIED_FOLLOWING
     include_first_period: bool = True
     index: RateIndex | None = None
+    fixing_lag_days: int | None = None
 
     def __post_init__(self) -> None:
         index = self.rate_index
+        object.__setattr__(self, "fixing_lag_days", _resolved_lag(self.fixing_lag_days, index))
         if index.tenor.months is None:
             raise UnsupportedConventionError(
                 f"a CapFloor schedules its periods in whole months; {index.name} "
@@ -145,6 +235,9 @@ class CapFloor:
         # hash alike. Changing one later with ``replace`` must change both.
         object.__setattr__(self, "index", index)
         object.__setattr__(self, "frequency_months", index.tenor.months)
+        # Built now, so a roll convention that leaves no period raises
+        # ConventionError when the cap is written down, not at its first price.
+        _ = self.schedule
 
     @property
     def rate_index(self) -> RateIndex:
@@ -172,8 +265,13 @@ class CapFloor:
 
     @property
     def span(self) -> tuple[date, date]:
-        """Effective through maturity."""
-        return self.effective, self.maturity
+        """Effective through maturity, as the schedule adjusts them.
+
+        The first period's start and the last one's end, rolled by
+        :attr:`convention` like every other date of the schedule; see
+        :attr:`rates_engine.instruments.swaps.OISSwap.span`.
+        """
+        return self.schedule.accrual_start[0], self.schedule.accrual_end[-1]
 
     @cached_property
     def schedule(self) -> Schedule:
@@ -206,6 +304,7 @@ class CapFloor:
                 kind=self.kind,
                 day_count=self.day_count,
                 index=self.rate_index,
+                fixing_lag_days=self.fixing_lag_days,
             )
             for start, end, pay in periods
         )
@@ -220,6 +319,7 @@ class CapFloor:
             "strike": self.strike,
             "notional": self.notional,
             "frequency_months": self.period_months,
+            "fixing_lag_days": self.fixing_lag_days,
             "day_count": self.day_count.value,
             "periods": len(self.caplets),
             "include_first_period": self.include_first_period,

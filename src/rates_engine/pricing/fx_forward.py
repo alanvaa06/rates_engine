@@ -3,7 +3,7 @@
 Covered interest parity says the forward is pinned by the two discount
 curves and nothing else:
 
-``F = S * P_foreign(T) / P_domestic(T)``
+``F = S * [P_foreign(T) / P_foreign(spot)] / [P_domestic(T) / P_domestic(spot)]``
 
 It is an arbitrage relation, not a model, and until 2007 it held to within
 transaction costs. It has not since. The residual — the cross-currency
@@ -17,15 +17,35 @@ the outright; a caller who wants to know how much of a hedge's cost is
 arbitrage-free carry and how much is funding can read it off rather than
 recompute it.
 
+**From the spot date, not from the valuation date.** The quoted spot ``S``
+is the price for delivery on the spot date — for USD/MXN, two business days
+after the trade on which both the Federal Reserve and BMV are open
+(:meth:`~rates_engine.conventions.currency_pair.CurrencyPair.spot_date`) —
+so parity carries each currency from *there* to delivery. Writing
+``S * P_f(T) / P_d(T)`` instead, which this module did until the 2026-10-15
+review, carries both currencies for the two extra days between the trade
+and the spot date: 76 to 78 pips too high on USD/MXN at every tenor from
+one week to a year, and 82 at three months when a Mexican holiday pushes
+the spot date to T+3. :func:`implied_basis` read that carry
+as basis, which on a one-week forward with no basis in it was -125 bp. The
+reference is QuantLib's ``FxSwapRateHelper`` with two fixing days, on trade
+dates where its spot date is the peso rule's, and the tests pin its numbers.
+
+A delivery on or before the spot date is refused. On the spot date it is a
+spot trade; before it, it is a short date (overnight, tom-next) priced off
+the spot by a swap point this module does not model, and running parity
+backwards from the spot date would return a number with nothing behind it.
+
 **Which leg, and therefore which sign.** A cross-currency basis is quoted
 as a spread on the **non-USD** leg, which for USD/MXN is the quote
 currency, MXN. So the effective domestic rate is ``r_d + b`` and
 
-``outright = cip_forward * exp(+b T)``
+``outright = cip_forward * exp(+b tau)``
 
-A negative basis — the persistent sign for most currencies against the
-dollar — therefore *lowers* the outright: it is the premium the market
-charges to obtain dollars, paid by accepting less on the peso leg.
+with ``tau`` the year fraction from the spot date to delivery. A negative
+basis — the persistent sign for most currencies against the dollar —
+therefore *lowers* the outright: it is the premium the market charges to
+obtain dollars, paid by accepting less on the peso leg.
 
 This is worth stating at length because it is a sign, and a sign here is
 the difference between a hedge and its opposite. An earlier version of this
@@ -43,10 +63,11 @@ is the standard one, stated explicitly so that a caller who knows better
 can negate their input rather than discover the disagreement in a P&L.
 
 **Which basis, and therefore which curve.** ``basis_bp`` is a flat,
-continuously compounded spread on the quote-currency zero rate at the one
-delivery being priced: ``outright = S * P_f(T) / (P_d(T) exp(-b T))``, so
-the curve the forward implicitly discounts on is ``P_d(T) exp(-b T)``. A
-cross-currency swap quotes its basis differently — as a *par* spread on
+continuously compounded spread on the quote-currency zero rate between the
+spot date and the one delivery being priced: the forward is parity with
+``P_d(T) / P_d(spot)`` replaced by ``P_d(T) / P_d(spot) * exp(-b tau)``, so
+the curve the forward implicitly discounts on is the domestic one shifted
+by ``b``. A cross-currency swap quotes its basis differently — as a *par* spread on
 the coupon leg of a swap that exchanges notional at both ends, the spread
 that prices the swap to zero when the leg is projected on the OIS curve and
 discounted on a second curve built for flows collateralised in the other
@@ -72,16 +93,20 @@ from rates_engine.core.errors import (
     CurveMismatchError,
     ImplausibleInputError,
 )
-from rates_engine.core.evidence import Evidence
+from rates_engine.core.evidence import Degradation, Evidence, Provenance
 from rates_engine.core.results import EngineResult
-from rates_engine.curves.discount import DiscountCurve
+from rates_engine.curves.discount import CurveSet, DiscountCurve
+from rates_engine.pricing.collateral import curve_warnings, merge_warnings
 
 __all__ = [
     "BASIS_LEG",
     "FXForwardResult",
     "forward_from_curves",
     "implied_basis",
+    "require_plausible_basis",
+    "require_plausible_rate",
     "MAX_PLAUSIBLE_BASIS_BP",
+    "MAX_PLAUSIBLE_RATE",
     "CIP_BROKEN_NOTE",
 ]
 
@@ -100,6 +125,19 @@ Five hundred basis points of cross-currency basis is a currency crisis, not
 a quote. The number is a plausibility band and not a market observation —
 the research gate could not reach a basis time series — so it is named,
 documented and adjustable rather than buried in a comparison.
+"""
+
+MAX_PLAUSIBLE_RATE = 1.0
+"""Beyond this, as a decimal a year, a rate is refused rather than used.
+
+A continuously compounded rate of 100% a year is a hyperinflation, not a
+deposit rate; USD/MXN rates live between zero and fifteen percent. What the
+band is for is the rate typed in percent — 9.5 for 9.5% — which as a decimal
+is 950% a year and, read as one, turned a three-month USD/MXN forward into
+an absurd number with an ``observed`` stamp on it. A plausibility band and
+not a market observation, named and adjustable like
+:data:`MAX_PLAUSIBLE_BASIS_BP`. It cannot catch a percent rate below one
+percent, which is why the convention is stated wherever a rate is taken.
 """
 
 CIP_BROKEN_NOTE = (
@@ -125,6 +163,9 @@ class FXForwardResult(EngineResult):
         spot: The spot rate used.
         pair: The pair, carrying the pip the points are counted in.
         delivery: The delivery date.
+        spot_date: The date the spot settles on, which parity runs from.
+        year_fraction: Years from the spot date to delivery on the curves'
+            time basis (ACT/365F): the span parity and the basis accrue over.
     """
 
     outright: float
@@ -137,6 +178,8 @@ class FXForwardResult(EngineResult):
     spot: float
     pair: CurrencyPair
     delivery: date
+    spot_date: date
+    year_fraction: float
 
     def payload_fields(self) -> dict[str, Any]:
         """Both halves, in rate terms and in pips, and never only the sum."""
@@ -150,7 +193,9 @@ class FXForwardResult(EngineResult):
             "basis_points_contribution": self.basis_points_contribution,
             "basis_leg": BASIS_LEG,
             "spot": self.spot,
+            "spot_date": self.spot_date.isoformat(),
             "delivery": self.delivery.isoformat(),
+            "year_fraction": self.year_fraction,
             **self.pair.to_dict(),
             "cip_note": CIP_BROKEN_NOTE,
         }
@@ -182,13 +227,93 @@ def _check(pair: CurrencyPair, domestic: DiscountCurve, foreign: DiscountCurve) 
         )
 
 
-def _plausible(basis_bp: float) -> None:
+def _curve_warnings(domestic: DiscountCurve, foreign: DiscountCurve) -> tuple[Degradation, ...]:
+    """What every valuation on these two curves carries, each code once.
+
+    The same rule as a swap or an option: the curves' own provenance and the
+    collateral assumption of their currency, through
+    :func:`~rates_engine.pricing.collateral.curve_warnings`. The forward
+    discounts the quote leg on a peso curve, so it inherits the unresolved
+    MXN conventions and reads ``assumed`` — which it did not, until the
+    review found a forward on a TIIE de Fondeo curve reporting ``observed``.
+    """
+    return merge_warnings(
+        curve_warnings(CurveSet(domestic)), curve_warnings(CurveSet(foreign))
+    )
+
+
+def _spot_date(pair: CurrencyPair, delivery: date, as_of: date) -> date:
+    """The pair's spot date, refusing a delivery that is not after it."""
+    spot_date = pair.spot_date(as_of)
+    if delivery <= spot_date:
+        raise ValueError(
+            f"delivery {delivery} is not after the spot date {spot_date} ({pair.name} "
+            f"settles {pair.spot_lag_days} business days after the {as_of} valuation date, "
+            f"counted on {' + '.join(c.name for c in pair.lag_calendars)}). A delivery on the spot "
+            "date is a spot trade, and one before it a short date priced off the spot "
+            "by a swap this module does not model; price a delivery after the spot date."
+        )
+    return spot_date
+
+
+_CONTINUOUS_RATES = (
+    "Rates here are continuously compounded decimals on ACT/365F, so 9.5% is 0.095, not 9.5."
+)
+
+
+def require_plausible_rate(
+    rate: float,
+    name: str,
+    *,
+    limit: float = MAX_PLAUSIBLE_RATE,
+    limit_name: str = "MAX_PLAUSIBLE_RATE",
+    convention: str = _CONTINUOUS_RATES,
+) -> None:
+    """Refuse an interest rate outside :data:`MAX_PLAUSIBLE_RATE`, or a tighter band.
+
+    Args:
+        rate: A rate as a decimal a year; continuously compounded unless
+            ``convention`` says otherwise.
+        name: What to call it in the message, e.g. ``"r_domestic"``, or a
+            config path.
+        limit: The band's edge, as a decimal a year: :data:`MAX_PLAUSIBLE_RATE`
+            unless the caller's kind of rate has a narrower one, such as an
+            overnight fixing.
+        limit_name: The constant ``limit`` is, which the message says to
+            widen.
+        convention: One sentence saying how such a rate is written.
+
+    Raises:
+        ImplausibleInputError: It is not finite or its magnitude is above the
+            band, which almost always means a rate written in percent.
+    """
+    if not math.isfinite(rate) or abs(rate) > limit:
+        raise ImplausibleInputError(
+            f"{name} = {rate!r} is outside the +/-{limit:.0%} a year this build will "
+            f"accept. {convention} The band is a plausibility check rather than a "
+            f"measurement; widen {limit_name} deliberately if you mean it."
+        )
+
+
+def require_plausible_basis(basis_bp: float) -> None:
+    """Refuse a basis outside :data:`MAX_PLAUSIBLE_BASIS_BP`.
+
+    Public so that everything taking a basis — this module's forward and
+    :class:`~rates_engine.hedging.fx_structures.StructureQuote` — refuses the
+    same numbers with the same message.
+
+    Args:
+        basis_bp: Cross-currency basis in basis points.
+
+    Raises:
+        ImplausibleInputError: It is not finite or is outside the band.
+    """
     if not math.isfinite(basis_bp) or abs(basis_bp) > MAX_PLAUSIBLE_BASIS_BP:
         raise ImplausibleInputError(
             f"a cross-currency basis of {basis_bp:.1f} bp is outside the "
-            f"±{MAX_PLAUSIBLE_BASIS_BP:.0f} bp band this build will accept. That is a "
+            f"+/-{MAX_PLAUSIBLE_BASIS_BP:.0f} bp band this build will accept. That is a "
             "currency crisis rather than a quote, and the band is a plausibility "
-            "check rather than a measurement — no basis time series was reachable "
+            "check rather than a measurement: no basis time series was reachable "
             "when it was set. Widen MAX_PLAUSIBLE_BASIS_BP deliberately if you mean it."
         )
 
@@ -202,13 +327,20 @@ def forward_from_curves(
     *,
     basis_bp: float = 0.0,
     source_evidence: tuple[Evidence, ...] = (),
+    inputs: tuple[Provenance, ...] = (),
 ) -> FXForwardResult:
     """The outright forward, with the basis kept separate from the parity part.
 
+    Parity runs from the pair's spot date (see the module docstring), and so
+    does the basis.
+
     Args:
-        pair: The currency pair, base first.
-        spot: Spot rate, quote currency per unit of base.
-        delivery: Delivery date, after both curves' valuation date.
+        pair: The currency pair, base first. Its spot lag and calendars fix
+            the spot date.
+        spot: Spot rate, quote currency per unit of base, for delivery on
+            the spot date.
+        delivery: Delivery date, after the pair's spot date from the curves'
+            valuation date.
         domestic: Discount curve of the quote currency.
         foreign: Discount curve of the base currency.
         basis_bp: Cross-currency basis in basis points, a spread on the
@@ -220,47 +352,62 @@ def forward_from_curves(
             a cross-currency swap quotes; the module docstring says how the
             two differ.
         source_evidence: Evidence of the curves, chained in.
+        inputs: Provenance of the numbers the curves were built from, when
+            they were not bootstrapped — the CLI's two rates, and the
+            compounding and day count they are read in.
 
     Returns:
-        The :class:`FXForwardResult`.
+        The :class:`FXForwardResult`. Its evidence carries the curves'
+        degradations and their currencies' collateral assumptions, so a
+        forward on a peso curve reads ``assumed``.
 
     Raises:
         CurrencyMismatchError: Either curve is not in the currency the pair
             says it should be.
         ImplausibleInputError: ``basis_bp`` is outside the plausibility band.
         ValueError: ``spot`` is not positive, or delivery is not after the
-            valuation date.
+            spot date.
     """
     _check(pair, domestic, foreign)
-    _plausible(basis_bp)
-    if spot <= 0.0:
+    require_plausible_basis(basis_bp)
+    if not spot > 0.0:
         raise ValueError(f"a spot rate is positive; got {spot!r}")
-    if delivery <= domestic.as_of:
-        raise ValueError(
-            f"delivery {delivery} is not after the valuation date {domestic.as_of}"
-        )
+    # The spot date is on or after the valuation date, so this also refuses
+    # a delivery on or before the valuation date.
+    spot_date = _spot_date(pair, delivery, domestic.as_of)
 
     domestic_df = domestic.df(delivery)
     foreign_df = foreign.df(delivery)
-    parity = spot * foreign_df / domestic_df
+    # Each currency grows from the spot date, when the spot exchange settles,
+    # to delivery. Dividing by the discount factors at the spot date is what
+    # stops the days between the trade and the spot from being carried.
+    domestic_growth = domestic.df(spot_date) / domestic_df
+    foreign_growth = foreign.df(spot_date) / foreign_df
+    parity = spot * domestic_growth / foreign_growth
 
     # A spread on the quote (non-USD) leg: the effective domestic rate is
-    # r_d + b, so the forward carries exp(+b T) over the same year fraction
-    # the curves use. See BASIS_LEG.
-    years = domestic.time(delivery)
+    # r_d + b between the spot date and delivery, so the forward carries
+    # exp(+b tau) over the same span parity does. See BASIS_LEG.
+    years = domestic.time(delivery) - domestic.time(spot_date)
     outright = parity * math.exp(basis_bp * 1e-4 * years)
 
     evidence = Evidence(
         produced_by="fx.forward_from_curves",
+        inputs=inputs,
         fields={
             "pair": pair.name,
             "spot": spot,
+            "spot_date": spot_date.isoformat(),
+            **pair.settlement_fields(),
             "delivery": delivery.isoformat(),
             "domestic_currency": domestic.currency.value,
             "foreign_currency": foreign.currency.value,
             "domestic_df": domestic_df,
             "foreign_df": foreign_df,
+            "domestic_df_at_spot": domestic.df(spot_date),
+            "foreign_df_at_spot": foreign.df(spot_date),
             "year_fraction": years,
+            "year_fraction_from": "spot_date",
             "cip_forward": parity,
             "basis_bp": basis_bp,
             "basis_leg": BASIS_LEG,
@@ -268,6 +415,7 @@ def forward_from_curves(
             "outright": outright,
             "cip_note": CIP_BROKEN_NOTE,
         },
+        warnings=_curve_warnings(domestic, foreign),
         sources=source_evidence,
     )
     return FXForwardResult(
@@ -282,6 +430,8 @@ def forward_from_curves(
         spot=spot,
         pair=pair,
         delivery=delivery,
+        spot_date=spot_date,
+        year_fraction=years,
     )
 
 
@@ -302,11 +452,16 @@ def implied_basis(
     saying so is better than adjusting a curve until the forward comes out
     right.
 
+    Parity runs from the pair's spot date, as in :func:`forward_from_curves`,
+    and the basis is read over the same span: measured from the valuation
+    date instead, the carry before the spot date came back as basis, -125 bp
+    at one week on a forward that had none.
+
     Args:
-        pair: The currency pair.
-        spot: Spot rate.
+        pair: The currency pair; its spot lag and calendars fix the spot date.
+        spot: Spot rate, for delivery on the spot date.
         market_forward: The quoted outright.
-        delivery: Delivery date.
+        delivery: Delivery date, after the spot date.
         domestic: Quote currency curve.
         foreign: Base currency curve.
         source_evidence: Evidence of the curves.
@@ -321,22 +476,24 @@ def implied_basis(
         ImplausibleInputError: The implied basis is outside the band, which
             usually means a curve or the quote is wrong rather than that the
             market has moved that far.
-        ValueError: A rate is not positive, or delivery is not in the future.
+        ValueError: A rate is not positive, or delivery is not after the
+            spot date.
     """
     _check(pair, domestic, foreign)
-    if spot <= 0.0 or market_forward <= 0.0:
+    if not (spot > 0.0 and market_forward > 0.0):
         raise ValueError(
             f"spot and forward are positive rates; got {spot!r} and {market_forward!r}"
         )
-    if delivery <= domestic.as_of:
-        raise ValueError(
-            f"delivery {delivery} is not after the valuation date {domestic.as_of}"
-        )
+    spot_date = _spot_date(pair, delivery, domestic.as_of)
 
-    parity = spot * foreign.df(delivery) / domestic.df(delivery)
-    years = domestic.time(delivery)
+    parity = (
+        spot
+        * (domestic.df(spot_date) / domestic.df(delivery))
+        / (foreign.df(spot_date) / foreign.df(delivery))
+    )
+    years = domestic.time(delivery) - domestic.time(spot_date)
     basis_bp = math.log(market_forward / parity) / years * 1e4
-    _plausible(basis_bp)
+    require_plausible_basis(basis_bp)
 
     evidence = Evidence(
         produced_by="fx.implied_basis",
@@ -344,11 +501,14 @@ def implied_basis(
             "pair": pair.name,
             "spot": spot,
             "market_forward": market_forward,
+            "spot_date": spot_date.isoformat(),
+            **pair.settlement_fields(),
             "delivery": delivery.isoformat(),
             "cip_forward": parity,
             "implied_basis_bp": basis_bp,
             "basis_leg": BASIS_LEG,
             "year_fraction": years,
+            "year_fraction_from": "spot_date",
             "domestic_currency": domestic.currency.value,
             "foreign_currency": foreign.currency.value,
             "cip_note": CIP_BROKEN_NOTE,
@@ -358,6 +518,7 @@ def implied_basis(
                 "hide the same number inside the curve."
             ),
         },
+        warnings=_curve_warnings(domestic, foreign),
         sources=source_evidence,
     )
     return FXForwardResult(
@@ -372,4 +533,6 @@ def implied_basis(
         spot=spot,
         pair=pair,
         delivery=delivery,
+        spot_date=spot_date,
+        year_fraction=years,
     )

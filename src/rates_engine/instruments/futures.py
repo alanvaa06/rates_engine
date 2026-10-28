@@ -3,9 +3,13 @@
 The two contracts settle on different functions of the same fixings, and the
 difference is not cosmetic. SR1 averages the daily rates arithmetically over a
 calendar month; SR3 compounds them between IMM dates. At 5% overnight the
-compounded rate exceeds the average by roughly a tenth of a basis point over
-three months — larger than the 0.1 bp tolerance the settlement tests hold, so
-using one formula for both contracts fails loudly rather than quietly.
+compounded rate exceeds the average by about three basis points over three
+months: 3.10 bp across the IMM quarter from 18 March to 17 June 2026, each
+business day's rate accruing over the calendar days it covers, which is close
+to the continuous-time r * (1 + r T / 2) - r = 3.16 bp. That is thirty times
+the 0.1 bp tolerance the settlement tests hold, so using one formula for both
+contracts fails loudly rather than quietly. (Until v0.4 this paragraph said
+"roughly a tenth of a basis point", which is thirty times too small.)
 
 **Contract size and DV01.** Both are derived from notional and tenor rather
 than quoted from a table, so the arithmetic is visible:
@@ -115,7 +119,10 @@ class SOFRFuture1M:
             ``rate`` is the settlement rate as a decimal.
 
         Raises:
-            MissingFixingError: A business day in the month has no fixing.
+            MissingFixingError: A business day in the month has no fixing;
+                the month opens on a non-business day and the business day
+                before it has none (an older fixing is never carried in);
+                or the month runs past the snapshot's ``as_of``.
         """
         return snapshot.averaged(series_id, self.accrual_start, self.accrual_end)
 
@@ -130,7 +137,10 @@ class SOFRFuture1M:
             The price in the contract's own quotation, e.g. ``94.69``.
 
         Raises:
-            MissingFixingError: A business day in the month has no fixing.
+            MissingFixingError: A business day in the month has no fixing;
+                the month opens on a non-business day and the business day
+                before it has none (an older fixing is never carried in);
+                or the month runs past the snapshot's ``as_of``.
         """
         return 100.0 - 100.0 * self.settlement_rate(snapshot, series_id=series_id).rate
 
@@ -199,7 +209,10 @@ class SOFRFuture3M:
             The :class:`~rates_engine.market.snapshot.CompoundedRate`.
 
         Raises:
-            MissingFixingError: A business day in the period has no fixing.
+            MissingFixingError: A business day in the period has no fixing;
+                the period opens on a non-business day (Juneteenth 2030 is an
+                IMM Wednesday) and the business day before it has none; or
+                the period runs past the snapshot's ``as_of``.
         """
         return snapshot.compounded(series_id, self.imm_start, self.imm_end)
 
@@ -214,7 +227,10 @@ class SOFRFuture3M:
             The price in the contract's own quotation.
 
         Raises:
-            MissingFixingError: A business day in the period has no fixing.
+            MissingFixingError: A business day in the period has no fixing;
+                the period opens on a non-business day (Juneteenth 2030 is an
+                IMM Wednesday) and the business day before it has none; or
+                the period runs past the snapshot's ``as_of``.
         """
         return 100.0 - 100.0 * self.settlement_rate(snapshot, series_id=series_id).rate
 
