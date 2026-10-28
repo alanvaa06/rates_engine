@@ -104,9 +104,59 @@ class TestLoading:
 #: The review's FRED download, as fredgraph.csv writes it: in percent.
 FRED_CSV = "observation_date,SOFR\n2026-01-12,3.64\n2026-01-13,.\n2026-01-14,3.65\n"
 
+#: Two days of SOFR at a few basis points, the level of much of 2020-22, as
+#: FRED writes them: in percent (Alan's second review used these values).
+#: Read as decimals they are a believable 1% and 5%, so the 30% band cannot
+#: tell the two readings apart; only the layout, or ``percent=``, can.
+LOW_RATE_ROWS = "2021-06-01,0.01\n2021-06-02,0.05\n"
+LOW_RATES_AS_DECIMALS = (pytest.approx(0.0001), pytest.approx(0.0005))
+LOW_RATES_AS_WRITTEN = (0.01, 0.05)
+
+#: The whole units rule, one row per layout: the header over LOW_RATE_ROWS,
+#: the columns named (None for the defaults), and what ``percent=None``
+#: does. ``percent=True`` divides and ``percent=False`` keeps, in every row.
+UNITS_RULE = [
+    ("observation_date,SOFR", None, "divide"),
+    ("observation_date,SOFR", ("observation_date", "SOFR"), "divide"),
+    ("OBSERVATION_DATE,sofr", None, "divide"),
+    ("DATE,SOFR", None, "refuse"),
+    ("DATE,SOFR", ("DATE", "SOFR"), "refuse"),
+    ("date,SOFR", None, "refuse"),
+    ("date,SOFR", ("date", "SOFR"), "refuse"),
+    ("observation_date,EFFR", ("observation_date", "EFFR"), "refuse"),
+    ("day,rate", ("day", "rate"), "refuse"),
+    ("date,value", None, "keep"),
+    ("date,value", ("date", "value"), "keep"),
+]
+
 
 class TestUnits:
     """The units a file is read in are stated or known, never assumed by accident."""
+
+    @pytest.mark.parametrize(
+        ("header", "columns", "unstated"),
+        UNITS_RULE,
+        ids=[f"{h}-{'named' if c else 'default'}-{u}" for h, c, u in UNITS_RULE],
+    )
+    def test_the_units_rule_at_2021_s_rates(self, tmp_path, header, columns, unstated):
+        # Two rounds turned this rule around, each time in a case the tests
+        # did not hold at a low rate. Every layout is held here at 1 and 5
+        # bp, where a percent file and a decimal one both look plausible.
+        path = tmp_path / "rates.csv"
+        path.write_text(f"{header}\n{LOW_RATE_ROWS}", encoding="utf-8")
+        named = {} if columns is None else {"date_column": columns[0], "value_column": columns[1]}
+
+        def load(**units):
+            return load_series_csv(path, "SOFR", **named, **units).values
+
+        assert load(percent=True) == LOW_RATES_AS_DECIMALS
+        assert load(percent=False) == LOW_RATES_AS_WRITTEN
+        if unstated == "refuse":
+            with pytest.raises(UnsupportedConventionError, match="percent=True"):
+                load()
+        else:
+            expected = LOW_RATES_AS_DECIMALS if unstated == "divide" else LOW_RATES_AS_WRITTEN
+            assert load() == expected
 
     def test_a_fred_download_loads_in_decimals_with_the_default_columns(self, tmp_path):
         # Used to load zero observations, without an error.
@@ -117,7 +167,7 @@ class TestUnits:
         assert series.values == (pytest.approx(0.0364), pytest.approx(0.0365))
 
     @pytest.mark.parametrize(
-        "header", ["﻿observation_date,SOFR", "OBSERVATION_DATE,SOFR", "Observation_Date,sofr"]
+        "header", ["\ufeffobservation_date,SOFR", "OBSERVATION_DATE,SOFR", "Observation_Date,sofr"]
     )
     def test_fred_s_header_is_recognised_in_any_case_and_after_a_bom(self, tmp_path, header):
         path = tmp_path / "SOFR.csv"
@@ -125,33 +175,108 @@ class TestUnits:
         assert load_series_csv(path, "SOFR").values == (pytest.approx(0.0364),)
 
     @pytest.mark.parametrize(
-        "date_header", ["DATE", "date", "observation_date", "Observation_Date"]
+        "named",
+        [{}, {"date_column": "observation_date", "value_column": "SOFR"}],
+        ids=["default-columns", "named-columns"],
     )
-    def test_named_columns_are_read_in_the_units_stated_not_guessed(self, tmp_path, date_header):
-        # Alan's review of round one: with both columns named, "DATE,SOFR"
-        # was taken for FRED's layout and a decimal file came back divided
-        # by 100 (0.000387, observed), while "date,SOFR" came back right.
-        # The case of a header decided the units. Naming the columns is
-        # describing the file, so the units are percent= and nothing else.
-        path = tmp_path / "decimal.csv"
-        path.write_text(f"{date_header},SOFR\n2026-01-02,0.0387\n", encoding="utf-8")
-        series = load_series_csv(path, "SOFR", value_column="SOFR", date_column=date_header)
-        assert series.values == (0.0387,)
-
-    def test_naming_fred_s_columns_means_stating_the_units(self, tmp_path):
-        # The case the first review found: FRED's download with its columns
-        # named loaded 3.64, a hundred times too large, marked observed. With
-        # the columns named there is no guess to make, so the percent
-        # values are caught by the plausibility band instead, and the
-        # refusal says which argument to pass.
+    def test_fred_s_layout_is_read_in_fred_s_units_named_or_not(self, tmp_path, named):
+        # Alan's second review: round two read FRED's download with its
+        # columns named as decimals, so 2021's 1 and 5 bp came back as a 1%
+        # and a 5% SOFR, observed, below anything the 30% band can see. The
+        # header is FRED's, so FRED's units apply however the columns were
+        # found: (0.0001, 0.0005), as fred.fetch_series reads the same bytes.
         path = tmp_path / "SOFR.csv"
-        path.write_text(FRED_CSV, encoding="utf-8")
-        named = {"value_column": "SOFR", "date_column": "observation_date"}
-        with pytest.raises(ImplausibleInputError, match="percent=True"):
-            load_series_csv(path, "SOFR", **named)
-        series = load_series_csv(path, "SOFR", percent=True, **named)
-        assert series.values == (pytest.approx(0.0364), pytest.approx(0.0365))
+        path.write_text(f"observation_date,SOFR\n{LOW_RATE_ROWS}", encoding="utf-8")
+        series = load_series_csv(path, "SOFR", **named)
+        assert series.values == LOW_RATES_AS_DECIMALS
         assert series.provenance.data_quality is DataQuality.OBSERVED
+        path.write_text(FRED_CSV, encoding="utf-8")
+        assert load_series_csv(path, "SOFR", **named).values == (
+            pytest.approx(0.0364),
+            pytest.approx(0.0365),
+        )
+
+    def test_a_decimal_file_under_fred_s_header_states_percent_false(self, tmp_path):
+        # The other side of the rule above: observation_date,<ID> means
+        # FRED's units, so a file of decimals that borrows FRED's header is
+        # divided by 100 unless it says otherwise. This is the price of
+        # reading FRED's download right; the header is FRED's own spelling.
+        path = tmp_path / "decimal.csv"
+        path.write_text("observation_date,SOFR\n2026-01-02,0.0387\n", encoding="utf-8")
+        assert load_series_csv(path, "SOFR").values == (pytest.approx(0.000387),)
+        assert load_series_csv(path, "SOFR", percent=False).values == (0.0387,)
+
+    @pytest.mark.parametrize("date_header", ["DATE", "date", "Date"])
+    @pytest.mark.parametrize("named", [False, True], ids=["default-columns", "named-columns"])
+    def test_the_older_date_header_asks_for_the_units(self, tmp_path, date_header, named):
+        # Alan's second review, finding 2: a FRED download saved before FRED
+        # renamed its first column (DATE,SOFR, in percent) stopped loading,
+        # and naming its columns read it as decimals: 0.01 and 0.05, a
+        # hundred times too large. DATE,<ID> is also the obvious header for
+        # a file of decimals, and at 2021's rates the values cannot say which
+        # it is, so with or without named columns the units are asked for.
+        path = tmp_path / "SOFR.csv"
+        path.write_text(f"{date_header},SOFR\n{LOW_RATE_ROWS}", encoding="utf-8")
+        columns = {"date_column": date_header, "value_column": "SOFR"} if named else {}
+        with pytest.raises(UnsupportedConventionError) as excinfo:
+            load_series_csv(path, "SOFR", **columns)
+        message = str(excinfo.value)
+        assert "percent=True" in message and "percent=False" in message
+        assert "observation_date" in message
+        decimals = load_series_csv(path, "SOFR", percent=True, **columns).values
+        assert decimals == LOW_RATES_AS_DECIMALS
+        written = load_series_csv(path, "SOFR", percent=False, **columns).values
+        assert written == LOW_RATES_AS_WRITTEN
+
+    @pytest.mark.parametrize(
+        ("text", "series_id", "date_column", "value_column"),
+        [
+            (f"day,rate\n{LOW_RATE_ROWS}", "SOFR", "day", "rate"),
+            (f"day,SOFR\n{LOW_RATE_ROWS}", "MY_LABEL", "day", "SOFR"),
+            (
+                "date,DGS1MO,DGS10\n2021-06-01,0.01,1.60\n2021-06-02,0.05,1.59\n",
+                "DGS1MO",
+                "date",
+                "DGS1MO",
+            ),
+            (
+                "observation_date,SOFR,EFFR\n2021-06-01,0.01,0.06\n2021-06-02,0.05,0.08\n",
+                "SOFR",
+                "observation_date",
+                "SOFR",
+            ),
+        ],
+        ids=["own-names", "rate-column-under-a-label", "treasury-table", "fred-multi-series"],
+    )
+    def test_named_columns_of_a_rate_in_another_layout_ask_for_the_units(
+        self, tmp_path, text, series_id, date_column, value_column
+    ):
+        # Alan's alternative fix: a series known to be a rate, read from
+        # columns whose layout does not say the units, is refused until
+        # percent= states them. FRED's own two-column download is the one
+        # layout that says (the test above); a table of several series is
+        # not it, even when it is FRED's.
+        path = tmp_path / "rates.csv"
+        path.write_text(text, encoding="utf-8")
+        columns = {"date_column": date_column, "value_column": value_column}
+        with pytest.raises(UnsupportedConventionError) as excinfo:
+            load_series_csv(path, series_id, **columns)
+        message = str(excinfo.value)
+        assert "percent=True" in message and "percent=False" in message
+        decimals = load_series_csv(path, series_id, percent=True, **columns).values
+        assert decimals == LOW_RATES_AS_DECIMALS
+        written = load_series_csv(path, series_id, percent=False, **columns).values
+        assert written == LOW_RATES_AS_WRITTEN
+
+    def test_named_columns_of_a_series_not_known_to_be_a_rate_are_read_as_written(self, tmp_path):
+        # Only a known rate has a percent reading to confuse with a decimal
+        # one. An index level, or a series this package does not classify,
+        # is kept as written, as it always was.
+        path = tmp_path / "level.csv"
+        path.write_text("day,level\n2021-06-01,1.04\n2021-06-02,1.05\n", encoding="utf-8")
+        columns = {"date_column": "day", "value_column": "level"}
+        assert load_series_csv(path, "SOFRINDEX", **columns).values == (1.04, 1.05)
+        assert load_series_csv(path, "MY_SPREAD", **columns).values == (1.04, 1.05)
 
     def test_a_rate_in_percent_read_as_decimals_refuses(self, tmp_path):
         # 3.64 as a decimal SOFR is 364%. The band is checked only when the
@@ -165,19 +290,22 @@ class TestUnits:
         assert load_series_csv(path, "SOFR", percent=False).values == (3.64,)
         assert load_series_csv(path, "SOMETHING_NEW").values == (3.64,)
 
-    def test_the_legacy_upper_case_date_header_is_not_taken_for_fred_s(self, tmp_path):
-        # FRED's download has said observation_date for some time; DATE,<ID>
-        # is as likely to be anyone's decimal file, so with the default
-        # columns it is refused for its columns rather than divided by 100.
-        path = tmp_path / "legacy.csv"
-        path.write_text("DATE,SOFR\n2026-01-02,3.64\n", encoding="utf-8")
-        with pytest.raises(ValueError, match="date_column="):
-            load_series_csv(path, "SOFR")
-
-    def test_the_package_s_own_layout_is_decimals(self, tmp_path):
+    @pytest.mark.parametrize(
+        "named", [{}, {"date_column": "date", "value_column": "value"}], ids=["default", "named"]
+    )
+    def test_the_package_s_own_layout_is_decimals(self, tmp_path, named):
+        # date,value is this package's layout and is decimals by contract,
+        # at 2021's rates as at 2026's; percent=True is how a percent file
+        # in this layout says so.
         path = tmp_path / "sofr.csv"
-        path.write_text("date,value\n2026-01-12,0.0364\n", encoding="utf-8")
-        assert load_series_csv(path, "SOFR").values == (0.0364,)
+        path.write_text(
+            "date,value\n2021-06-01,0.0001\n2021-06-02,0.0005\n2026-01-12,0.0364\n",
+            encoding="utf-8",
+        )
+        assert load_series_csv(path, "SOFR", **named).values == (0.0001, 0.0005, 0.0364)
+        path.write_text(f"date,value\n{LOW_RATE_ROWS}", encoding="utf-8")
+        decimals = load_series_csv(path, "SOFR", percent=True, **named).values
+        assert decimals == LOW_RATES_AS_DECIMALS
 
     def test_stated_units_win_in_either_layout(self, tmp_path):
         fred_file = tmp_path / "SOFR.csv"
@@ -194,34 +322,56 @@ class TestUnits:
             load_series_csv(path, "DEXMXUS")
         assert load_series_csv(path, "DEXMXUS", percent=False).values == (17.5,)
 
-    def test_a_fred_file_holding_another_series_refuses_and_the_remedy_works(self, tmp_path):
+    @pytest.mark.parametrize("date_header", ["observation_date", "DATE"])
+    def test_a_fred_file_holding_another_series_refuses_and_the_remedy_works(
+        self, tmp_path, date_header
+    ):
         # The first version told the caller to name value_column=, and doing
         # exactly that raised a second ValueError. The message now names
-        # both columns and the units, and following it loads the file.
+        # both columns and the units, and following it loads the file. It
+        # holds for FRED's older header too, with the units stated or not.
         path = tmp_path / "DGS2.csv"
-        path.write_text("observation_date,DGS2\n2026-01-12,4.05\n", encoding="utf-8")
-        with pytest.raises(ValueError) as excinfo:
-            load_series_csv(path, "SOFR")
-        message = str(excinfo.value)
-        for part in ("date_column='observation_date'", "value_column='DGS2'", "percent="):
-            assert part in message
+        path.write_text(f"{date_header},DGS2\n2026-01-12,4.05\n", encoding="utf-8")
+        for units in ({}, {"percent": True}):
+            with pytest.raises(ValueError) as excinfo:
+                load_series_csv(path, "SOFR", **units)
+            message = str(excinfo.value)
+            for part in (f"date_column={date_header!r}", "value_column='DGS2'", "percent="):
+                assert part in message
         series = load_series_csv(
-            path, "SOFR", date_column="observation_date", value_column="DGS2", percent=True
+            path, "SOFR", date_column=date_header, value_column="DGS2", percent=True
         )
         assert series.values == (pytest.approx(0.0405),)
 
     def test_an_index_level_is_never_divided_because_of_a_label(self, tmp_path):
         # The first version took the units from the label: SOFRINDEX at
         # 1.23456789 read as "SOFR" came back 0.0123456789, an index level
-        # divided by 100. With the columns named nothing is divided unless
-        # percent=True says so, and a 123% "SOFR" is refused as implausible.
+        # divided by 100. A FRED column read under another name is refused
+        # until percent= says whose units apply; percent=False keeps it.
         path = tmp_path / "SOFRINDEX.csv"
         path.write_text("observation_date,SOFRINDEX\n2026-01-12,1.23456789\n", encoding="utf-8")
         named = {"value_column": "SOFRINDEX", "date_column": "observation_date"}
-        with pytest.raises(ImplausibleInputError):
+        with pytest.raises(UnsupportedConventionError) as excinfo:
             load_series_csv(path, "SOFR", **named)
+        assert "'SOFRINDEX'" in str(excinfo.value) and "percent=" in str(excinfo.value)
         assert load_series_csv(path, "SOFR", percent=False, **named).values == (1.23456789,)
         assert load_series_csv(path, "SOFRINDEX").values == (1.23456789,)
+
+    def test_a_low_rate_fred_column_under_another_name_asks_for_the_units(self, tmp_path):
+        # EFFR at 6 and 8 bp, named and read as "SOFR": round two loaded
+        # (0.06, 0.08), a 6% and an 8% SOFR, observed. Relabelling is
+        # allowed, but the units of a relabelled column are the caller's.
+        path = tmp_path / "EFFR.csv"
+        path.write_text(
+            "observation_date,EFFR\n2021-06-01,0.06\n2021-06-02,0.08\n", encoding="utf-8"
+        )
+        named = {"value_column": "EFFR", "date_column": "observation_date"}
+        with pytest.raises(UnsupportedConventionError, match="percent=True"):
+            load_series_csv(path, "SOFR", **named)
+        assert load_series_csv(path, "SOFR", percent=True, **named).values == (
+            pytest.approx(0.0006),
+            pytest.approx(0.0008),
+        )
 
     def test_columns_that_are_not_there_refuse_rather_than_reading_nothing(self, tmp_path):
         path = tmp_path / "other.csv"

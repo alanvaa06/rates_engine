@@ -89,13 +89,15 @@ class TestUnits:
         # The file provider's docstring promised this and did not keep it:
         # FRED's CSV read from disk gave 0 observations with the default
         # columns and values a hundred times too large, marked observed, with
-        # the columns named. Naming the columns now means stating the units.
+        # the columns named. FRED's header now means FRED's units, so naming
+        # its columns changes nothing.
         downloaded = fred.fetch_series("SOFR")
         path = tmp_path / "SOFR.csv"
         path.write_text(CSV.format(series="SOFR"), encoding="utf-8")
         named = {"value_column": "SOFR", "date_column": "observation_date"}
         for loaded in (
             load_series_csv(path, "SOFR"),
+            load_series_csv(path, "SOFR", **named),
             load_series_csv(path, "SOFR", percent=True, **named),
         ):
             assert loaded.dates == downloaded.dates
@@ -107,9 +109,9 @@ class TestUnits:
     ):
         # Whether FRED sends one is not known here. If it does, the download
         # and the saved file must still agree: the first version refused the
-        # download (its header read "﻿observation_date") and loaded the
+        # download (its header read "\ufeffobservation_date") and loaded the
         # file, because only the file was decoded with utf-8-sig.
-        payload = "﻿observation_date,SOFR\n2026-01-13,4.31\n"
+        payload = "\ufeffobservation_date,SOFR\n2026-01-13,4.31\n"
         _serve(monkeypatch, payload)
         path = tmp_path / "SOFR.csv"
         path.write_text(payload, encoding="utf-8")
@@ -142,6 +144,32 @@ class TestUnits:
         _serve(monkeypatch, "observation_date,DGS2\n2026-01-13,4.05\n")
         with pytest.raises(ValueError, match="DGS2"):
             fred.fetch_series("SOFR")
+
+    def test_a_low_rate_download_and_its_saved_file_agree_in_basis_points(
+        self, monkeypatch, tmp_path
+    ):
+        # SOFR at 1 and 5 bp, as in 2021. Alan's second review: the saved
+        # file with its columns named loaded (0.01, 0.05), a hundred times
+        # the download's (0.0001, 0.0005). All three paths now agree.
+        payload = "observation_date,SOFR\n2021-06-01,0.01\n2021-06-02,0.05\n"
+        _serve(monkeypatch, payload)
+        path = tmp_path / "SOFR.csv"
+        path.write_text(payload, encoding="utf-8")
+        downloaded = fred.fetch_series("SOFR")
+        assert downloaded.values == (pytest.approx(0.0001), pytest.approx(0.0005))
+        named = {"value_column": "SOFR", "date_column": "observation_date"}
+        assert load_series_csv(path, "SOFR").values == downloaded.values
+        assert load_series_csv(path, "SOFR", **named).values == downloaded.values
+
+    def test_a_response_with_fred_s_older_header_asks_for_the_units(self, monkeypatch):
+        # One reader for the wire and the disk means one answer for the same
+        # bytes. DATE,<ID> is refused on disk because a file of decimals can
+        # carry it too, so it is refused here as well rather than read two
+        # ways; percent= states the units and loads it.
+        _serve(monkeypatch, "DATE,SOFR\n2021-06-01,0.01\n")
+        with pytest.raises(UnsupportedConventionError, match="percent=True"):
+            fred.fetch_series("SOFR")
+        assert fred.fetch_series("SOFR", percent=True).values == (pytest.approx(0.0001),)
 
 
 def test_it_calls_the_documented_endpoint(stub_urlopen):

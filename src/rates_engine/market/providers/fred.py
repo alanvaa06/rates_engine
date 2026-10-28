@@ -51,7 +51,10 @@ def fetch_series(series_id: str, *, timeout: float = 30.0, percent: bool | None 
         UnsupportedConventionError: ``percent`` is ``None`` and the series is
             not one whose units this package knows. Every series used to be
             divided by 100, which is right for a rate and a hundredfold
-            error for an index or an exchange rate.
+            error for an index or an exchange rate. Also for a response
+            headed ``DATE,<ID>``, FRED's older layout: the reader refuses it
+            on disk, where a file of decimals carries it too, and the same
+            bytes read the same off the wire.
         InsufficientDataError: The response holds no observations.
         ValueError: The response is not FRED's CSV of this series.
         ImplausibleInputError: A rate came back above 30% after the
