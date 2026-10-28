@@ -486,7 +486,11 @@ class StructureResult(EngineResult):
             because every strike here is set off the forward, so mirror-image
             structures — a payable's call and a receivable's put at the same
             offset — keep the same share; a structure that sells a wing
-            inside the move reads lower on a wider ``grid_width``.
+            inside the move reads lower on a wider ``grid_width``. The move
+            is the favourable half of :attr:`spot_grid`, which is centred on
+            the forward, so the number can be read off the table: the
+            change in :attr:`payoff_grid` from the middle point to the
+            favourable end, over the change in spot.
         hedge_ratio: The fraction of the exposure covered *by a forward*.
             An option structure covers the whole exposure by a different
             mechanism, so this is ``None`` there rather than ``0.0`` —
@@ -495,7 +499,9 @@ class StructureResult(EngineResult):
         legs: ``(kind, strike, quantity)`` per option leg.
         forward_amount: Base currency sold or bought forward, signed.
         payoff_grid: Effective rate at each spot on the grid.
-        spot_grid: The spots it was evaluated at.
+        spot_grid: The spots at settlement it was evaluated at, in quote
+            currency per unit of base: ``grid_points`` evenly spaced from
+            ``(1 - grid_width)`` to ``(1 + grid_width)`` times the forward.
     """
 
     name: str
@@ -803,7 +809,8 @@ class StructureComparison(EngineResult):
     Attributes:
         exposure: What was hedged.
         structures: The rows, in the order they were built.
-        spot_grid: The spots every row was evaluated at.
+        spot_grid: The spots every row was evaluated at, centred on the
+            forward (see :attr:`StructureResult.spot_grid`).
         residual_variance: The variance decomposition for the forward row,
             or ``None`` when no correlation was supplied.
     """
@@ -852,10 +859,35 @@ class StructureComparison(EngineResult):
         }
 
 
-def _grid(spot: float, points: int, width: float) -> tuple[float, ...]:
-    lowest, highest = spot * (1.0 - width), spot * (1.0 + width)
+def _grid(centre: float, points: int, width: float) -> tuple[float, ...]:
+    """``points`` spots evenly spaced from ``(1 - width)`` to ``(1 + width)`` times ``centre``."""
+    lowest, highest = centre * (1.0 - width), centre * (1.0 + width)
     step = (highest - lowest) / (points - 1)
     return tuple(lowest + step * k for k in range(points))
+
+
+def _check_grid(points: int, width: float) -> None:
+    """Refuse a grid that measures no move, reaches a spot of zero, or has one end.
+
+    The width is also the size of the favourable move upside participation
+    is measured over, so it is an input to a reported number and not only
+    to the table's extent. Zero, or a negative width, made every row read
+    zero participation, the unhedged one included; a width of one or more
+    put the grid's low end at a spot of zero or below; one point divided by
+    zero building the grid.
+    """
+    if isinstance(points, bool) or not isinstance(points, int) or points < 2:
+        raise ValueError(
+            f"grid_points is a whole number of spots, two or more; got {points!r}. "
+            "The grid needs both of its ends, and an odd count puts the forward on it."
+        )
+    if not 0.0 < width < 1.0:
+        raise ValueError(
+            f"grid_width is the grid's half-width as a fraction of the forward, "
+            f"strictly between 0 and 1; got {width!r}. It is also the favourable move "
+            "upside participation is measured over: zero measures no move, and 1 or "
+            "more reaches a spot of zero or below. 0.20, the default, is twenty percent."
+        )
 
 
 def compare_structures(
@@ -884,9 +916,15 @@ def compare_structures(
             alongside it, with the sold strike solved rather than chosen.
         hedge_ratio: Fraction of the exposure the forward row covers, in
             ``[0, 1]``. AC-4.3.
-        grid_points: Points in the spot grid, odd so the forward-ish middle
-            is included.
-        grid_width: Half-width of the grid as a fraction of spot.
+        grid_points: Points in the spot grid, two or more; odd, as the
+            default 21 is, so that the forward is one of them.
+        grid_width: Half-width of the grid as a fraction of the forward,
+            strictly between 0 and 1. The grid is centred on the forward,
+            and the same width is the favourable move upside participation
+            is measured over, so the participation is the slope of the
+            grid's favourable half. It used to be centred on spot while
+            participation measured from the forward, and the two described
+            different moves.
         correlation: Correlation between the foreign asset return and the
             exchange rate, for the residual-variance decomposition. ``None``
             skips it rather than assuming zero.
@@ -898,12 +936,14 @@ def compare_structures(
 
     Raises:
         ValueError: ``hedge_ratio`` is outside ``[0, 1]``, an offset is not
-            positive, only one of the two variance inputs was given, the
-            correlation is outside ``[-1, 1]``, or the asset volatility is
-            negative or not finite.
+            positive, ``grid_points`` is not a whole number of at least two,
+            ``grid_width`` is not strictly between 0 and 1, only one of the
+            two variance inputs was given, the correlation is outside
+            ``[-1, 1]``, or the asset volatility is negative or not finite.
     """
     if not 0.0 <= hedge_ratio <= 1.0:
         raise ValueError(f"a hedge ratio is a fraction in [0, 1]; got {hedge_ratio!r}")
+    _check_grid(grid_points, grid_width)
     if otm_offset <= 0.0 or spread_offset <= otm_offset:
         raise ValueError(
             f"the spread's sold leg must sit further out than the protective one; "
@@ -925,8 +965,11 @@ def compare_structures(
             f"{foreign_asset_volatility!r}"
         )
 
-    grid = _grid(quote.spot, grid_points, grid_width)
     outright = quote.forward
+    # Centred on the forward, which is where every strike is set and where
+    # participation measures from, so the favourable half of the grid is
+    # the move that number describes.
+    grid = _grid(outright, grid_points, grid_width)
     protective = exposure.direction.protective_kind
     away = 1.0 + otm_offset if protective is OptionKind.CALL else 1.0 - otm_offset
     far = 1.0 + spread_offset if protective is OptionKind.CALL else 1.0 - spread_offset
@@ -1080,6 +1123,7 @@ def compare_structures(
             "hedge_ratio": hedge_ratio,
             "grid_points": grid_points,
             "grid_width": grid_width,
+            "grid_centre": "forward",
             "residual_variance": decomposition,
             "trade_off": dict(TRADE_OFF_FRAME),
             **quote.to_dict(),
