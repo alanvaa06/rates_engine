@@ -45,9 +45,14 @@ known on the trade date and is counted in full. Its floating coupon:
 - a term rate is history once its fixing date is before ``as_of``, whether
   or not its period has begun, and pays that fixing. A fixing dated
   ``as_of`` itself is used when ``fixings`` holds it and projected off the
-  curve when it does not -- QuantLib's default, with
+  curve when there is no snapshot or the index's series in it does not
+  have that day yet -- QuantLib's default, with
   ``enforcesTodaysHistoricFixings`` off -- so a swap struck at spot today
-  still prices without a snapshot; the evidence says which it was. Term
+  still prices before the print is out. The forecast is the ordinary case,
+  not a degradation: the evidence's ``fixings_dated_as_of`` says which it
+  was, and nothing else. A snapshot with no series named after the index
+  is refused even then, as the caps refuse it: a print stored under
+  another name is a wrong snapshot, not a print still to come. Term
   SOFR fixes two SIFMA business days before the accrual start, the ARRC's
   convention (:data:`_TERM_SOFR_FIXING_LAG_DAYS`): the fixing published on
   2025-10-20 sets the period that starts on the 22nd. TIIE 28 is read on
@@ -82,19 +87,19 @@ from rates_engine.conventions.indices import (
 )
 from rates_engine.conventions.side import fixed_leg_sign
 from rates_engine.core.errors import MissingFixingError, UnsupportedConventionError
-from rates_engine.core.money import Currency
+from rates_engine.core.money import Currency, require_same_currency
 from rates_engine.curves.discount import CurveSet
 from rates_engine.instruments.cashflow import Cashflow, RealisedFixing
 from rates_engine.instruments.fra import FRA
 from rates_engine.instruments.swaps import IRSwap, OISSwap
-from rates_engine.market.snapshot import MarketSnapshot
+from rates_engine.market.snapshot import MarketSnapshot, Series
 
 __all__ = ["Priceable", "Swappable", "project", "float_leg", "fra_fair_rate", "is_paid"]
 
 _TERM_SOFR_FIXING_LAG_DAYS = 2
 """Business days, on the index's calendar, from a Term SOFR fixing to the
 start of the period it sets: the ARRC's convention. Private and local for
-now: the lag is a property of the index, and alanvaa06/rates_engine#20
+now: the lag is a property of the index, and alanvaa06/rates_engine#21
 moves it to one ``fixing_lag_days`` on :class:`RateIndex` that every
 reader of a term fixing uses."""
 
@@ -201,7 +206,8 @@ def project(
     Raises:
         TypeError: Nothing is registered for the instrument's type.
         MissingFixingError: A floating period is in progress and ``fixings``
-            is absent or lacks a fixing it needs.
+            is absent or lacks a fixing it needs, or a term period fixes on
+            ``as_of`` and ``fixings`` has no series named after its index.
     """
     raise TypeError(
         f"no cashflow projection is registered for {type(instrument).__name__}; "
@@ -226,9 +232,17 @@ def float_leg(
     Raises:
         TypeError: Nothing is registered for the swap's type.
         MissingFixingError: A floating period is in progress and ``fixings``
-            is absent or lacks a fixing it needs.
+            is absent or lacks a fixing it needs, or a term period fixes on
+            ``as_of`` and ``fixings`` has no series named after its index.
     """
     raise TypeError(f"no floating leg is registered for {type(swap).__name__}")
+
+
+def _trade(instrument: OISSwap | IRSwap | FRA) -> str:
+    """How the refusals below name the trade."""
+    if isinstance(instrument, FRA):
+        return f"FRA {instrument.start} to {instrument.end}"
+    return f"{type(instrument).__name__} {instrument.effective} to {instrument.maturity}"
 
 
 def _in_progress(
@@ -241,10 +255,7 @@ def _in_progress(
     fixed_on: date | None = None,
 ) -> str:
     """How the refusals below name the period they could not value."""
-    if isinstance(instrument, FRA):
-        trade = f"FRA {instrument.start} to {instrument.end}"
-    else:
-        trade = f"{type(instrument).__name__} {instrument.effective} to {instrument.maturity}"
+    trade = _trade(instrument)
     when = (
         f"began before the valuation date {as_of}"
         if fixed_on is None
@@ -338,7 +349,9 @@ def _term_history(
     One dated ``as_of`` is used if supplied and forecast if not, which is
     QuantLib's default: the day's print may not be out when the book is
     valued, and refusing a swap struck at spot this morning would be a
-    refusal of the ordinary case.
+    refusal of the ordinary case. "Not supplied" means no snapshot, or the
+    index's series without that day; a snapshot without the series is
+    refused by :func:`_todays_series`.
     """
     if (start - as_of).days > _FIXING_SEARCH_HORIZON_DAYS:
         return None, None
@@ -346,11 +359,42 @@ def _term_history(
     if fixing_date > as_of:
         return None, None
     if fixing_date == as_of:
-        series = fixings.series.get(index.name) if fixings is not None else None
-        if series is None or series.get(fixing_date) is None:
+        if fixings is None:
+            return None, fixing_date
+        series = _todays_series(instrument, index, start, end, as_of, fixings)
+        if series.get(fixing_date) is None:
             return None, fixing_date
     context = _in_progress(instrument, start, end, pay, as_of, fixed_on=fixing_date)
     return _term_fixing(index, fixing_date, fixings, context), None
+
+
+def _todays_series(
+    instrument: IRSwap | FRA,
+    index: RateIndex,
+    start: date,
+    end: date,
+    as_of: date,
+    fixings: MarketSnapshot,
+) -> Series:
+    """The index's series, for a period fixing on ``as_of``; refused when it is not there.
+
+    A day absent from the series is a print not out yet, and the curve
+    stands in for it. A series absent from the snapshot is not: read that
+    way, a spot payer whose 4.50% print was stored as ``"TERM_SOFR"``
+    instead of ``"TERM_SOFR_3M"`` priced at the curve's 48,054.45 instead
+    of 180,487.14 (two years at 4% on a flat 4% curve), reported as a print
+    not out yet. The refusal is worded as the caps' on
+    alanvaa06/rates_engine#16, so a book of both reports one thing.
+    """
+    try:
+        return fixings.require(index.name)
+    except MissingFixingError as missing:
+        raise MissingFixingError(
+            f"{_trade(instrument)}: the period from {start} to {end} fixes on the valuation "
+            f"date {as_of}, and the fixings passed have no series named after its index "
+            f"({missing}). Name the series {index.name!r}; an absent series is not a fixing "
+            "that has yet to be published."
+        ) from missing
 
 
 def _term_fixing(
@@ -535,6 +579,11 @@ def fra_fair_rate(
     verified). A fixing dated ``curve_set.as_of`` is used when ``fixings``
     holds it and forecast when it does not, as QuantLib does.
 
+    The FRA's currency is checked against the curves' before anything else,
+    as :func:`~rates_engine.pricing.linear.pv` checks it: a peso FRA on the
+    dollar curve has no fair rate there, and v0.3 returned the dollar
+    forward for it.
+
     Args:
         fra: The contract.
         curve_set: Discount and projection curves.
@@ -546,9 +595,12 @@ def fra_fair_rate(
         The fair rate as a decimal on the FRA's day count.
 
     Raises:
+        CurrencyMismatchError: The FRA is in another currency than the curves.
         MissingFixingError: The index fixed before ``curve_set.as_of`` and
-            ``fixings`` does not hold that fixing.
+            ``fixings`` does not hold that fixing, or it fixes on that date
+            and ``fixings`` has no series named after the index.
     """
+    require_same_currency(fra.currency, curve_set.currency, operation="the fair rate of a FRA")
     rate, _, _ = _fra_rate(fra, curve_set, fixings)
     return rate
 
