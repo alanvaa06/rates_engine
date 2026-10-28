@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import replace
 from datetime import date, timedelta
 
+import numpy as np
 import pytest
 from conftest import AS_OF
 
@@ -250,16 +252,37 @@ class TestTheOptionExpiresAtTheFixing:
         with pytest.raises(ValueError, match="fixing_lag_days"):
             self._five_year("cap", lag=-1)
 
-    @pytest.mark.parametrize("lag", [1.5, 2.0, True, "2"])
+    @pytest.mark.parametrize("lag", [1.5, 2.0, True, "2", np.True_, np.float64(2.0)])
     def test_a_lag_that_is_not_a_whole_number_of_days_refuses_at_construction(self, lag):
         # 1.5 used to be accepted; add_business_days' countdown then never
         # reached zero, walked back for seconds and died on "year 0 is out
-        # of range". A bool is an int to Python and not a number of days.
+        # of range". A bool is an int to Python and not a number of days,
+        # and numpy's bool is not one either.
         with pytest.raises(ValueError, match="whole number"):
             self._five_year("cap", lag=lag)
         caplet = self._five_year("cap").caplets[0]
         with pytest.raises(ValueError, match="whole number"):
             replace(caplet, fixing_lag_days=lag)
+
+    @pytest.mark.parametrize("lag", [np.int64(2), np.int32(0), np.uint8(2)])
+    def test_a_numpy_integer_is_a_whole_number_of_days(self, option_curve_set, lag):
+        # df["lag"].iloc[0] is a numpy int64, not an int, and was refused as
+        # "must be a whole number". It is one: the strip prices as QuantLib
+        # does with that many fixing days, and its evidence still serialises.
+        # It is stored as an int: -np.uint8(2) is 254, which would have
+        # fixed each caplet 254 business days after its period started.
+        cap = self._five_year("cap", lag=lag)
+        assert type(cap.fixing_lag_days) is int
+        assert all(type(c.fixing_lag_days) is int for c in cap.caplets)
+        result = cap_floor_pv(cap, option_curve_set, Volatility.normal_bp(90.0))
+        assert result.value == pytest.approx(
+            QL_FIVE_YEAR[(int(lag), "cap", "normal")], rel=1e-13, abs=0.0
+        )
+        fields = json.loads(json.dumps(result.evidence.to_dict()))["fields"]
+        assert fields["fixing_lag_days"] == int(lag)
+        assert fields["instrument"]["fixing_lag_days"] == int(lag)
+        caplet = replace(self._five_year("cap").caplets[0], fixing_lag_days=lag)
+        assert caplet.fixing_date == replace(caplet, fixing_lag_days=int(lag)).fixing_date
 
 
 class TestStructure:
@@ -462,11 +485,13 @@ class TestASeasonedCapOrFloor:
         assert today["fixing"] is None
         assert today["expiry_years"] == 0.0
         assert today["forward"] == pytest.approx(QL_TODAYS_FORECAST, rel=1e-13, abs=0.0)
-        # Not only a field: the substitution is a degradation of the result.
-        # The same code and quality as a swap whose term fixing is forecast.
-        codes = [w.code for w in result.evidence.warnings]
-        assert codes.count("curve_forward_for_todays_fixing:TERM_SOFR_3M") == 1
-        assert result.evidence.worst_quality is DataQuality.PROXY
+        # A field, not a degradation: the rate is being published that day,
+        # and the curve's forward is the market's estimate of it. The series
+        # is there and holds the fixing before it, which is required.
+        assert not any(
+            w.code.startswith("curve_forward_for_todays_fixing") for w in result.evidence.warnings
+        )
+        assert result.evidence.worst_quality is DataQuality.OBSERVED
 
     def test_a_fixing_on_the_valuation_date_is_used_when_supplied(self, option_curve_set):
         result = cap_floor_pv(
@@ -749,40 +774,65 @@ class TestACapWhoseFirstFixingIsToday:
         assert greeks.theta == 0.0
         assert greeks.vega == 0.0
 
-    def test_a_misnamed_series_is_an_error_not_an_absent_fixing(self, option_curve_set):
-        # A snapshot holding "TERM_SOFR" rather than "TERM_SOFR_3M" used to be
-        # read as "today's fixing is not published yet": the cap priced at
-        # the curve forward, 11,018.00 where its 4.50% fixing gives 18,440.32,
-        # with no warning and observed quality.
-        misnamed = MarketSnapshot(
+    @staticmethod
+    def _misnamed() -> MarketSnapshot:
+        return MarketSnapshot(
             AS_OF,
             {"TERM_SOFR": Series("TERM_SOFR", (AS_OF,), (0.045,), Provenance(source="test"))},
         )
-        with pytest.raises(MissingFixingError, match="'TERM_SOFR_3M'"):
-            cap_floor_pv(self._cap(), option_curve_set, VOL, fixings=misnamed)
 
-    @pytest.mark.parametrize("fixings", [None, "empty_series"])
-    def test_the_curve_standing_in_for_the_fixing_is_a_degradation(
+    @pytest.mark.parametrize(
+        "price",
+        [
+            lambda cap, curves, fixings: cap_floor_pv(cap, curves, VOL, fixings=fixings),
+            lambda cap, curves, fixings: cap_floor_periods(cap, curves, VOL, fixings=fixings),
+            lambda cap, curves, fixings: caplet_pv(cap.caplets[0], curves, VOL, fixings=fixings),
+            lambda cap, curves, fixings: option_greeks(cap, curves, VOL, fixings=fixings),
+        ],
+        ids=["cap_floor_pv", "cap_floor_periods", "caplet_pv", "option_greeks"],
+    )
+    def test_a_misnamed_series_is_an_error_not_an_absent_fixing(self, option_curve_set, price):
+        # A snapshot holding "TERM_SOFR" rather than "TERM_SOFR_3M" used to be
+        # read as "today's fixing is not published yet": the cap priced at
+        # the curve forward, 11,018.00 where its 4.50% fixing gives 18,440.32,
+        # with no warning and observed quality. Every entry point refuses it,
+        # as their Raises sections say.
+        with pytest.raises(MissingFixingError, match="'TERM_SOFR_3M'"):
+            price(self._cap(), option_curve_set, self._misnamed())
+
+    def test_a_strip_that_fixes_later_never_reads_the_fixings(self, option_curve_set):
+        # The same snapshot on a cap whose first fixing is tomorrow: nothing
+        # has fixed or fixes today, so nothing reads it, and it prices as
+        # with no fixings. The one case a wrong snapshot passes, documented.
+        cap = replace(self._cap(), effective=date(2026, 1, 21), maturity=date(2027, 1, 21))
+        assert cap.caplets[0].fixing_date == date(2026, 1, 16)
+        priced = cap_floor_pv(cap, option_curve_set, VOL, fixings=self._misnamed())
+        assert priced.value == cap_floor_pv(cap, option_curve_set, VOL).value
+
+    @pytest.mark.parametrize("fixings", [None, "series_without_today"])
+    def test_the_curve_standing_in_for_the_fixing_is_recorded_not_degraded(
         self, option_curve_set, fixings
     ):
         # Without fixings, or with the right series but not that day in it,
         # the curve's forward stands in -- QuantLib's default -- and the
-        # result says so as a degradation, which its greeks inherit.
+        # period's fixing_source says so. It used to be a proxy degradation
+        # as well, which made every spot-starting cap's morning quote proxy:
+        # its first fixing is dated as_of, and the print is not out yet. The
+        # greeks report what the price does.
         snapshot = None
-        if fixings == "empty_series":
+        if fixings == "series_without_today":
             snapshot = _fixings(date(2026, 1, 14))
         result = cap_floor_pv(self._cap(), option_curve_set, VOL, fixings=snapshot)
-        warning = next(
-            w for w in result.evidence.warnings
-            if w.code == "curve_forward_for_todays_fixing:TERM_SOFR_3M"
-        )
-        assert "2026-01-15" in warning.message
-        assert warning.data_quality is DataQuality.PROXY
-        assert result.evidence.worst_quality is DataQuality.PROXY
+        first = result.evidence.fields["per_period"][0]
+        assert first["fixing_date"] == "2026-01-15"
+        assert first["status"] == "fixes_today"
+        assert first["fixing_source"] == "curve_forward_on_fixing_day"
         greeks = option_greeks(self._cap(), option_curve_set, VOL, fixings=snapshot)
-        assert "curve_forward_for_todays_fixing:TERM_SOFR_3M" in {
-            w.code for w in greeks.evidence.warnings
-        }
+        for evidence in (result.evidence, greeks.evidence):
+            assert not any(
+                w.code.startswith("curve_forward_for_todays_fixing") for w in evidence.warnings
+            )
+            assert evidence.worst_quality is DataQuality.OBSERVED
 
     def test_a_supplied_fixing_carries_no_such_degradation(self, option_curve_set):
         result = cap_floor_pv(

@@ -179,6 +179,29 @@ class TestSR1Settlement:
         with pytest.raises(MissingFixingError, match="2026-07-31"):
             SOFRFuture1M(date(2026, 8, 1)).settlement_rate(snapshot)
 
+    @pytest.mark.parametrize(
+        "named",
+        [{}, {"date_column": "observation_date", "value_column": "SOFR"}],
+        ids=["default-columns", "named-columns"],
+    )
+    def test_a_2021_fred_download_settles_in_basis_points(self, tmp_path, named):
+        # Alan's second review: a 2020-22 backtest that named FRED's columns
+        # read every fixing as a decimal, so every settlement was about 100x
+        # off. SOFR flat at 5 bp (FRED's 0.05) settles June 2021's SR1 at
+        # exactly 0.0005, a price of 99.95. Read as decimals it was 0.05 and
+        # 95.00, observed.
+        first, last = date(2021, 5, 28), date(2021, 7, 2)
+        days = (first + timedelta(days=k) for k in range((last - first).days + 1))
+        rows = "".join(f"{d.isoformat()},0.05\n" for d in days if SIFMA_US.is_business_day(d))
+        path = tmp_path / "SOFR.csv"
+        path.write_text(f"observation_date,SOFR\n{rows}", encoding="utf-8")
+        snapshot = MarketSnapshot(
+            as_of=last, series={"SOFR": load_series_csv(path, "SOFR", **named)}
+        )
+        contract = SOFRFuture1M(date(2021, 6, 1))
+        assert contract.settlement_rate(snapshot).rate == pytest.approx(0.0005, abs=1e-15)
+        assert contract.settlement_price(snapshot) == pytest.approx(99.95, abs=1e-12)
+
     def test_contract_month_spans_the_calendar_month(self):
         contract = SOFRFuture1M(date(2026, 2, 14))
         assert contract.accrual_start == date(2026, 2, 1)

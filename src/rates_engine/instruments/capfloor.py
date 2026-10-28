@@ -31,6 +31,8 @@ on a five-year cap against QuantLib with ``fixingDays = 2``.
 
 from __future__ import annotations
 
+import numbers
+import operator
 from dataclasses import dataclass
 from datetime import date
 from functools import cached_property
@@ -55,12 +57,22 @@ def _resolved_lag(lag: int | None, index: RateIndex) -> int:
     # and add_business_days' countdown never reached zero -- it walked back
     # through the calendar until the year ran out. A bool is an int to
     # Python and is not a number of days.
-    if isinstance(lag, bool) or not isinstance(lag, int) or lag < 0:
+    #
+    # Integral, not int: ``df["lag"].iloc[0]`` is a numpy int64, which is a
+    # whole number and was refused. numpy registers its integers as
+    # Integral and neither its bool nor its floats, so np.True_ and
+    # np.float64(2.0) are still refused. ``operator.index`` alone would not
+    # do at the numpy floor: numpy 2.0 still indexes with np.True_, as 1,
+    # behind only a DeprecationWarning.
+    if isinstance(lag, bool) or not isinstance(lag, numbers.Integral) or lag < 0:
         raise ValueError(
             f"fixing_lag_days must be a whole number of business days, zero or more, "
             f"got {lag!r}"
         )
-    return lag
+    # Stored as a plain int, not as passed. fixing_date negates the lag, and
+    # a numpy unsigned integer negates by wrapping round: np.uint8(2) fixed
+    # 254 business days *after* its period started.
+    return operator.index(lag)
 
 
 @dataclass(frozen=True)

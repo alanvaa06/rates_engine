@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import math
+from dataclasses import replace
 from datetime import date
 
 import pytest
@@ -691,6 +692,59 @@ class TestArgumentRefusals:
             compare_structures(_exposure(), QUOTE, collar_offset=0.0)
 
 
+class TestTheGrid:
+    """Alan Vazquez's round-3 finding 2 on PR #13: the grid was never checked.
+
+    Upside participation is measured over a move of ``grid_width`` times the
+    forward, so the width became an input to a reported number. Before:
+    ``grid_width=0`` (or negative) read 0 on every row, the unhedged one
+    included; 1.2 evaluated the structures at a spot of -3.70; one point
+    divided by zero. And the reported grid ran from 14.80 to 22.20 around
+    the 18.50 spot while participation measured from the 18.7468 forward,
+    so the table and the number beside it described different moves.
+    """
+
+    @pytest.mark.parametrize("bad", [0.0, -0.1, 1.0, 1.2, float("nan"), float("inf")])
+    def test_a_width_outside_zero_to_one_refuses(self, bad):
+        with pytest.raises(ValueError, match="grid_width"):
+            compare_structures(_exposure(), QUOTE, grid_width=bad)
+
+    @pytest.mark.parametrize("bad", [1, 0, -3, 2.5, True])
+    def test_fewer_than_two_points_refuses(self, bad):
+        with pytest.raises(ValueError, match="grid_points"):
+            compare_structures(_exposure(), QUOTE, grid_points=bad)
+
+    def test_the_grid_is_centred_on_the_forward(self, payable):
+        forward = QUOTE.forward
+        grid = payable.spot_grid
+        assert grid[0] == pytest.approx(forward * 0.80, rel=1e-14)
+        assert grid[10] == pytest.approx(forward, rel=1e-14)
+        assert grid[-1] == pytest.approx(forward * 1.20, rel=1e-14)
+        assert payable.evidence.fields["grid_centre"] == "forward"
+
+    def test_two_points_are_the_two_ends(self):
+        grid = compare_structures(_exposure(), QUOTE, grid_points=2, grid_width=0.1).spot_grid
+        assert grid == pytest.approx((QUOTE.forward * 0.9, QUOTE.forward * 1.1), rel=1e-14)
+
+    @pytest.mark.parametrize("direction", list(ExposureDirection))
+    @pytest.mark.parametrize("width", [0.05, 0.20, 0.50])
+    def test_participation_is_the_slope_of_the_grids_favourable_half(self, direction, width):
+        """Read off the reported grid, not recomputed: from the middle point
+        (the forward) to the favourable end, the change in the effective
+        rate over the change in spot."""
+        table = compare_structures(_exposure(direction), QUOTE, grid_width=width)
+        grid, middle = table.spot_grid, len(table.spot_grid) // 2
+        for row in table.structures:
+            rates = row.payoff_grid
+            if direction is ExposureDirection.PAYABLE:
+                slope = (rates[middle] - rates[0]) / (grid[middle] - grid[0])
+            else:
+                slope = (rates[-1] - rates[middle]) / (grid[-1] - grid[middle])
+            assert row.upside_participation == pytest.approx(
+                max(0.0, min(1.0, slope)), abs=1e-12
+            ), row.name
+
+
 class TestTheUnderlyingPricesAreRight:
     """The comparator is arithmetic over Garman-Kohlhagen, so spot-check it."""
 
@@ -1013,3 +1067,91 @@ class TestTheSmileHasToSitOnTheLegsForward:
         walk(result.evidence)
         assert "smile_forward_unverified" in codes
         assert result.evidence.worst_quality is DataQuality.ASSUMED
+
+
+class TestTheSmileCheckReadsWhatTheSmileReports:
+    """Alan Vazquez's round-3 finding 3 on PR #13: the check read
+    ``getattr(smile, "forward")`` and passed it to ``float``, so a smile that
+    exposes its forward as a method raised a bare ``TypeError``; and it
+    compared only the forward and the expiry. A smile on the same forward
+    with another spot or another dollar rate places its spot-delta pillars
+    elsewhere (a spot delta carries ``exp(-r_f T)``), and was accepted."""
+
+    @staticmethod
+    def _stand_in(**reported):
+        from rates_engine.core.evidence import Evidence
+
+        class Reading:
+            volatility = 0.115
+            evidence = Evidence(produced_by="test.stand_in")
+
+        class StandIn:
+            def volatility_at(self, strike):
+                return Reading()
+
+        smile = StandIn()
+        for name, value in reported.items():
+            setattr(smile, name, value)
+        return smile
+
+    @staticmethod
+    def _codes(evidence):
+        codes = {w.code for w in evidence.warnings}
+        for source in evidence.sources:
+            codes |= TestTheSmileCheckReadsWhatTheSmileReports._codes(source)
+        return codes
+
+    def test_a_forward_method_is_called(self):
+        smile = self._stand_in(forward=lambda: QUOTE.forward, expiry=lambda: 0.25)
+        quote = StructureQuote(18.50, 0.25, 0.0950, 0.0420, smile)
+        result = compare_structures(_exposure(), quote)
+        assert "smile_forward_unverified" not in self._codes(result.evidence)
+
+    def test_a_forward_method_on_another_forward_refuses(self):
+        smile = self._stand_in(forward=lambda: QUOTE.forward * 1.01)
+        with pytest.raises(ValueError, match="forward"):
+            StructureQuote(18.50, 0.25, 0.0950, 0.0420, smile)
+
+    def test_a_forward_method_that_needs_arguments_refuses_by_name(self):
+        smile = self._stand_in(forward=lambda expiry: QUOTE.forward)
+        with pytest.raises(ValueError, match="smile's forward is a method that needs arguments"):
+            StructureQuote(18.50, 0.25, 0.0950, 0.0420, smile)
+
+    def test_a_forward_that_is_not_a_number_refuses_by_name(self):
+        smile = self._stand_in(forward=object())
+        with pytest.raises(ValueError, match="smile reports forward"):
+            StructureQuote(18.50, 0.25, 0.0950, 0.0420, smile)
+
+    def test_the_same_forward_on_another_dollar_rate_refuses(self):
+        """Both rates up a point: the forward is the legs', the spot deltas
+        are not. Accepted before."""
+        smile = replace(
+            TestTheSmileHasToSitOnTheLegsForward._smile(0.1050), r_foreign=0.0520
+        )
+        assert smile.forward == pytest.approx(QUOTE.forward, rel=1e-14)
+        with pytest.raises(ValueError, match="r_foreign"):
+            StructureQuote(18.50, 0.25, 0.0950, 0.0420, smile)
+
+    def test_the_same_forward_from_another_spot_refuses(self):
+        r_domestic = 0.0420 + math.log(QUOTE.forward / 18.40) / 0.25
+        smile = replace(
+            TestTheSmileHasToSitOnTheLegsForward._smile(r_domestic), spot=18.40
+        )
+        assert smile.forward == pytest.approx(QUOTE.forward, rel=1e-14)
+        with pytest.raises(ValueError, match="spot"):
+            StructureQuote(18.50, 0.25, 0.0950, 0.0420, smile)
+
+    def test_the_refusal_names_every_input_to_rebuild_with(self):
+        smile = self._stand_in(forward=QUOTE.forward, spot=18.40, r_foreign=0.05)
+        with pytest.raises(ValueError) as caught:
+            StructureQuote(18.50, 0.25, 0.0950, 0.0420, smile)
+        message = str(caught.value)
+        for piece in ("spot 18.4", "r_foreign 0.05", "spot=18.5", "r_foreign=0.042"):
+            assert piece in message
+        assert message.isascii()
+
+    def test_a_smile_on_the_legs_inputs_is_accepted(self):
+        smile = TestTheSmileHasToSitOnTheLegsForward._smile(0.0950)
+        quote = StructureQuote(18.50, 0.25, 0.0950, 0.0420, smile)
+        result = compare_structures(_exposure(), quote, otm_offset=0.02, spread_offset=0.04)
+        assert "smile_forward_unverified" not in self._codes(result.evidence)

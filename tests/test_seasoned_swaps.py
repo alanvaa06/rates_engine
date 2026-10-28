@@ -403,10 +403,16 @@ class TestTradesWithNoHistoryDoNotMove:
     @pytest.mark.parametrize("name", sorted(PINNED))
     def test_handing_them_fixings_changes_nothing(self, name):
         # A book is priced with one snapshot for every trade; the ones with
-        # no history must not read it, and the two fixed today find no print
-        # for their index in it and forecast as before.
+        # no history must not read it, and the two fixed today find their
+        # index's series without that day's print and forecast as before.
+        # The prints of the 14th are decoys: no period here fixed on them.
         instrument, curve_set = _pinned_cases()[name]
-        snapshot = _fixings(_history(), _history("TIIE_FONDEO", 0.07, calendar=BMV))
+        snapshot = _fixings(
+            _history(),
+            _history("TIIE_FONDEO", 0.07, calendar=BMV),
+            _term("TERM_SOFR_3M", {date(2026, 1, 14): 0.99}),
+            _term("TIIE_28", {date(2026, 1, 14): 0.99}),
+        )
         assert _measure(instrument, curve_set, fixings=snapshot) == PINNED[name]
 
     def test_the_battery_covers_both_starts_and_every_linear_product(self):
@@ -665,6 +671,70 @@ class TestThePeriodInProgressNeedsItsFixings:
             pv(swap, CurveSet(_flat_curve()), fixings=_fixings(_history("TEST_ON")))
 
 
+class TestTheWrongCurrencyIsRefusedBeforeAnyFixingIsAskedFor:
+    """A trade on a curve of another currency is refused as that, whatever it would need.
+
+    The review of #12 (Alan, 2026-10-22): the currency was checked after the
+    projection, which asks for fixings first, so both trades below raised
+    ``MissingFixingError`` ("pass the published fixings", exit 1). Supplying
+    them only reached ``CurrencyMismatchError`` (exit 2) on the second try.
+    """
+
+    PESO_OIS = OISSwap(effective=date(2025, 7, 15), maturity=date(2027, 7, 15), fixed_rate=0.04,
+                       index=TIIE_FONDEO)
+    PESO_FRA = FRA(start=date(2025, 12, 1), end=date(2026, 2, 1), rate=0.075, index=TIIE_28)
+
+    @pytest.mark.parametrize(
+        "measure", [pv, discounted_value, par_rate, par_rate_value, annuity]
+    )
+    def test_a_seasoned_peso_ois_on_the_dollar_curve(self, measure):
+        with pytest.raises(CurrencyMismatchError, match="MXN") as caught:
+            measure(self.PESO_OIS, CurveSet(_flat_curve()))
+        assert caught.value.exit_code == 2
+
+    @pytest.mark.parametrize("measure", [pv, discounted_value, fra_fair_rate])
+    def test_a_seasoned_tiie_28_fra_on_the_dollar_curve(self, measure):
+        with pytest.raises(CurrencyMismatchError, match="MXN") as caught:
+            measure(self.PESO_FRA, CurveSet(_flat_curve()))
+        assert caught.value.exit_code == 2
+
+    def test_supplying_the_fixings_the_old_message_asked_for_changes_nothing(self):
+        snapshot = _fixings(
+            _history("TIIE_FONDEO", 0.07, calendar=BMV),
+            _term("TIIE_28", {date(2025, 12, 1): 0.0745}),
+        )
+        for instrument in (self.PESO_OIS, self.PESO_FRA):
+            with pytest.raises(CurrencyMismatchError, match="MXN"):
+                pv(instrument, CurveSet(_flat_curve()), fixings=snapshot)
+
+    def test_a_parametric_comparison_refuses_it_too(self):
+        from dataclasses import dataclass
+        from typing import Any
+
+        from rates_engine.core.evidence import Evidence
+        from rates_engine.core.results import EngineResult
+        from rates_engine.pricing.linear import price_on_parametric
+
+        @dataclass(frozen=True)
+        class Fit(EngineResult):
+            def payload_fields(self) -> dict[str, Any]:
+                return {"curve_kind": "parametric", "model": "flat"}
+
+        with pytest.raises(CurrencyMismatchError, match="MXN"):
+            price_on_parametric(
+                self.PESO_OIS,
+                CurveSet(_flat_curve(0.0405)),
+                CurveSet(_flat_curve()),
+                fit=Fit(evidence=Evidence(produced_by="test.fit")),
+            )
+
+    def test_an_unseasoned_peso_fra_has_no_dollar_fair_rate(self):
+        # main returned the dollar curve's forward for it, without a word.
+        fra = FRA(start=date(2026, 4, 15), end=date(2026, 5, 13), rate=0.075, index=TIIE_28)
+        with pytest.raises(CurrencyMismatchError, match="MXN"):
+            fra_fair_rate(fra, CurveSet(_flat_curve()))
+
+
 class TestClosedForms:
     """With the history and the curve both known exactly, so is the answer."""
 
@@ -887,51 +957,136 @@ class TestTermSOFRFixesTwoBusinessDaysBeforeItsPeriod:
         assert fra_fair_rate(fra, curve_set, fixings=snapshot) == 0.0745
 
 
-class TestAForecastStandingInForAFixingIsADegradation:
-    """When the curve's forward replaces a fixing dated as_of, the price says so in its warnings.
+class TestTodaysFixingIsForecastWithoutADegradation:
+    """A fixing dated ``as_of`` that is not out yet is forecast and recorded, not degraded.
 
-    The convention every branch follows: a fixing dated the valuation date is
-    read when supplied and forecast when not, and the forecast is reported
-    as a ``Degradation``, not only as a field, so ``worst_quality`` drops to
-    ``proxy``: the curve's expectation is real data standing in for a
-    different quantity, the print.
+    With T+2 spot, the first period of every Term SOFR swap struck today
+    fixes on ``as_of``: degrading the forecast marked the ordinary morning
+    quote of a vanilla swap ``proxy``, and everything built on it, until the
+    print came out. The review of #12 (Alan, 2026-10-22) asked for it to be
+    flagged at most once the print is due; the set takes the lighter rule
+    for every branch. The forecast is recorded in ``fixings_dated_as_of``
+    (``"source": "curve"``) and adds no ``Degradation``, so ``pv``,
+    ``par_rate`` and ``dv01`` report the same quality.
     """
 
     SPOT_IRS = IRSwap(effective=date(2026, 1, 20), maturity=date(2027, 1, 20), fixed_rate=0.04,
                       notional=NOTIONAL)
 
-    def test_a_spot_swap_priced_without_todays_print_is_degraded(self):
+    def test_a_spot_swap_priced_before_todays_print_is_observed(self):
+        # Before: worst_quality proxy, with curve_forward_for_todays_fixing.
         result = pv(self.SPOT_IRS, CurveSet(_flat_curve()))
-        (warning,) = [w for w in result.evidence.warnings if w.code.startswith("curve_forward")]
-        assert warning.code == "curve_forward_for_todays_fixing:TERM_SOFR_3M"
-        assert warning.data_quality is DataQuality.PROXY
-        assert "2026-01-15" in warning.message and "fixings=" in warning.message
-        assert result.evidence.worst_quality is DataQuality.PROXY
-
-    def test_with_the_print_there_is_nothing_to_report(self):
-        snapshot = _fixings(_term("TERM_SOFR_3M", {AS_OF: 0.0405}))
-        result = pv(self.SPOT_IRS, CurveSet(_flat_curve()), fixings=snapshot)
-        assert not [w for w in result.evidence.warnings if w.code.startswith("curve_forward")]
+        assert result.evidence.warnings == ()
         assert result.evidence.worst_quality is DataQuality.OBSERVED
+        (entry,) = result.evidence.fields["fixings_dated_as_of"]
+        assert (entry["series_id"], entry["source"]) == ("TERM_SOFR_3M", "curve")
 
-    def test_the_par_rate_and_a_tiie_28_fra_carry_it_too(self):
-        par = par_rate(self.SPOT_IRS, CurveSet(_flat_curve()))
-        assert "curve_forward_for_todays_fixing:TERM_SOFR_3M" in {
-            w.code for w in par.evidence.warnings
-        }
+    def test_a_series_without_that_day_is_forecast_and_observed_too(self):
+        older = _fixings(_term("TERM_SOFR_3M", {date(2026, 1, 13): 0.0405}))
+        result = pv(self.SPOT_IRS, CurveSet(_flat_curve()), fixings=older)
+        assert result.evidence.warnings == ()
+        assert result.evidence.fields["fixings_dated_as_of"][0]["source"] == "curve"
+
+    def test_pv_par_rate_and_dv01_report_the_same_quality(self):
+        # Alan's point 3: pv and par_rate were proxy, and dv01 -19,589.93
+        # observed with no warnings, for one forecast. Now all three agree.
+        from rates_engine.risk.sensitivities import dv01
+
+        curve_set = CurveSet(_flat_curve())
+        measures = (pv(self.SPOT_IRS, curve_set), par_rate(self.SPOT_IRS, curve_set),
+                    dv01(self.SPOT_IRS, curve_set))
+        assert {m.evidence.worst_quality for m in measures} == {DataQuality.OBSERVED}
+        assert all(m.evidence.warnings == () for m in measures)
+
+    def test_a_tiie_28_fra_keeps_only_the_peso_conventions(self):
         fra = FRA(start=AS_OF, end=date(2026, 2, 12), rate=0.075, notional=1_000_000_000.0,
                   index=TIIE_28)
         result = pv(fra, CurveSet(_flat_curve(0.07, Currency.MXN)))
-        assert "curve_forward_for_todays_fixing:TIIE_28" in {
-            w.code for w in result.evidence.warnings
-        }
+        assert not [w for w in result.evidence.warnings if w.code.startswith("curve_forward")]
+        assert result.evidence.worst_quality is DataQuality.ASSUMED  # the MXN conventions
+        assert result.evidence.fields["fixings_dated_as_of"][0]["source"] == "curve"
 
-    def test_a_trade_that_has_not_fixed_carries_no_such_warning(self):
-        # Fixes 2026-01-16, after as_of: a forecast is what it should be.
-        fra = FRA(start=date(2026, 1, 21), end=date(2026, 4, 21), rate=0.04, notional=NOTIONAL)
-        result = pv(fra, CurveSet(_flat_curve()))
+    def test_with_the_print_it_is_read_and_still_observed(self):
+        snapshot = _fixings(_term("TERM_SOFR_3M", {AS_OF: 0.0405}))
+        result = pv(self.SPOT_IRS, CurveSet(_flat_curve()), fixings=snapshot)
         assert result.evidence.warnings == ()
-        assert result.evidence.worst_quality is DataQuality.OBSERVED
+        assert result.evidence.fields["fixings_dated_as_of"][0]["source"] == "fixings"
+
+
+class TestASnapshotWithoutTheIndexIsRefusedEvenForTodaysFixing:
+    """Only a day missing from a series that is there falls back to the curve.
+
+    The rule the caps follow on #16. A snapshot that holds today's print
+    under another name is a wrong snapshot, not a print still to come, and
+    read as the second it priced Alan's two-year spot payer at 4% on a flat
+    4% curve at the curve's 48,054.45 instead of the 180,487.14 its 4.50%
+    print gives, flagged ``proxy`` and saying the fixing "was not among the
+    fixings passed".
+    """
+
+    SPOT_IRS = IRSwap(effective=date(2026, 1, 20), maturity=date(2028, 1, 20), fixed_rate=0.04,
+                      notional=NOTIONAL)
+
+    def test_the_review_repro_is_refused_and_names_the_series_it_wanted(self):
+        misnamed = _fixings(_term("TERM_SOFR", {AS_OF: 0.045}))
+        with pytest.raises(MissingFixingError) as caught:
+            pv(self.SPOT_IRS, CurveSet(_flat_curve()), fixings=misnamed)
+        message = str(caught.value)
+        for needed in (
+            "IRSwap 2026-01-20 to 2028-01-20",
+            "the period from 2026-01-20 to 2026-04-20 fixes on the valuation date 2026-01-15",
+            "the fixings passed have no series named after its index",
+            "has no series 'TERM_SOFR_3M'; it has ['TERM_SOFR']",
+            "Name the series 'TERM_SOFR_3M'; an absent series is not a fixing that has yet "
+            "to be published.",
+        ):
+            assert needed in message, (needed, message)
+
+    def test_under_the_right_name_it_prices_on_the_print(self):
+        # Closed form, single curve and no payment lag: the fixed leg, the
+        # first period on the 4.50% print over its 90 days, and the rest
+        # telescoping to N (P(2026-04-20) - P(2028-01-20)). Alan's number.
+        first_end, middle, end = date(2026, 4, 20), date(2027, 1, 20), date(2028, 1, 20)
+        expected = (
+            -NOTIONAL * 0.04 * 365 / 360 * (_df(middle) + _df(end))
+            + NOTIONAL * 0.045 * 90 / 360 * _df(first_end)
+            + NOTIONAL * (_df(first_end) - _df(end))
+        )
+        assert expected == pytest.approx(180_487.14, abs=0.005)
+        snapshot = _fixings(_term("TERM_SOFR_3M", {AS_OF: 0.045}))
+        result = pv(self.SPOT_IRS, CurveSet(_flat_curve()), fixings=snapshot)
+        assert result.value == pytest.approx(expected, rel=1e-12)
+
+    @pytest.mark.parametrize("measure", [pv, discounted_value, par_rate, par_rate_value])
+    def test_every_measure_on_the_floating_leg_refuses_it(self, measure):
+        misnamed = _fixings(_term("TERM_SOFR", {AS_OF: 0.045}))
+        with pytest.raises(MissingFixingError, match="Name the series 'TERM_SOFR_3M'"):
+            measure(self.SPOT_IRS, CurveSet(_flat_curve()), fixings=misnamed)
+
+    def test_a_tiie_28_fra_fixed_today_and_its_fair_rate_refuse_it(self):
+        fra = FRA(start=AS_OF, end=date(2026, 2, 12), rate=0.075, notional=1_000_000_000.0,
+                  index=TIIE_28)
+        curve_set = CurveSet(_flat_curve(0.07, Currency.MXN))
+        misnamed = _fixings(_term("TIIE28", {AS_OF: 0.0745}))
+        with pytest.raises(MissingFixingError, match="Name the series 'TIIE_28'"):
+            pv(fra, curve_set, fixings=misnamed)
+        with pytest.raises(MissingFixingError, match="Name the series 'TIIE_28'"):
+            fra_fair_rate(fra, curve_set, fixings=misnamed)
+
+    def test_without_a_snapshot_it_is_still_forecast(self):
+        # No snapshot at all is a valuation before the print, the ordinary
+        # case; only a snapshot that lacks the series is a wrong one.
+        result = pv(self.SPOT_IRS, CurveSet(_flat_curve()))
+        assert result.value == pytest.approx(48_054.45, abs=0.005)
+
+    def test_a_trade_that_has_not_fixed_ignores_the_snapshot(self):
+        # Fixes 2026-01-16, after as_of: nothing is read, so no series is
+        # needed and a book's snapshot without it changes nothing.
+        fra = FRA(start=date(2026, 1, 21), end=date(2026, 4, 21), rate=0.04, notional=NOTIONAL)
+        curve_set = CurveSet(_flat_curve())
+        misnamed = _fixings(_term("TERM_SOFR", {AS_OF: 0.045}))
+        assert pv(fra, curve_set, fixings=misnamed).value == pv(fra, curve_set).value
+        assert pv(fra, curve_set).evidence.warnings == ()
 
 
 class TestTheFixingDateIsLookedUpOnlyNearTheValuationDate:

@@ -34,6 +34,7 @@ from typing import Any
 
 import pandas as pd
 
+from rates_engine.conventions.calendar import HolidayCalendar
 from rates_engine.conventions.schedule import next_imm_on_or_after
 from rates_engine.core.errors import ConfigurationError, IncompleteStripError
 from rates_engine.core.evidence import DataQuality, Degradation, Evidence
@@ -96,8 +97,34 @@ _CONTRACT_DV01_DERIVATION: dict[FuturesContract, str] = {
     ),
 }
 
-_SHORT_PERIOD_DAYS = 35
-"""A period no longer than this reads as a month, for the hint in the assumed-contract degradation."""
+_TICK_REL_TOL = 1e-3
+"""How far a tick may sit from a contract's own and still be that contract's.
+
+A cent of rounding on the published figure, 41.67 for SR1's 41.666...;
+anything further is a different number of contracts.
+"""
+
+_REFERENCE_DAYS: dict[FuturesContract, tuple[int, ...]] = {
+    FuturesContract.SR1: (28, 29, 30, 31),
+    FuturesContract.SR3: (84, 91, 98),
+}
+"""How long each contract's reference period runs, in calendar days.
+
+SR1 references a calendar month. SR3 runs from one IMM date to the next,
+and as the third Wednesday falls between the 15th and the 21st of its month
+that is 12, 13 or 14 weeks.
+"""
+
+_ROLL_DAYS = 3
+"""The furthest a business-day roll moves a date on the SIFMA calendar.
+
+A Saturday before a Monday holiday rolls to the Tuesday, and a Friday
+holiday to the Monday. A period rolled by one convention moves both its
+ends the same way, so its length moves by no more than this, and a period
+within this many days of a contract's reference length is that contract's
+period with its ends rolled: SR1 25 to 34 days, SR3 81 to 101. The two
+ranges are fifty days apart, so no rolled period is ambiguous.
+"""
 
 DEFAULT_SHOCKS_BP: tuple[float, ...] = (-100.0, -50.0, -25.0, -10.0, 10.0, 25.0, 50.0, 100.0)
 """Shock grid for :func:`shock_table`, symmetric so convexity shows as asymmetry."""
@@ -241,7 +268,9 @@ def strip_hedge(
             contract was before the two were told apart, with a degradation
             saying so. Pass a number only for a contract that is neither: a
             number that contradicts a contract the node declares, or one its
-            period names, is refused rather than obeyed.
+            period names, is refused rather than obeyed, and one applied to
+            a period that names no contract keeps that degradation, because
+            nothing here can say what such a contract is worth.
         long_end_source: Passed through to the bootstrap.
         require_full_coverage: When true, a gap between the swap's span and the
             strip's coverage raises rather than producing a partial hedge that
@@ -261,12 +290,19 @@ def strip_hedge(
     Raises:
         IncompleteStripError: The strip has no contract covering part of the
             swap's span, and ``require_full_coverage`` is set. A missing
-            contract is never interpolated from its neighbours.
+            contract is never interpolated from its neighbours. A gap at
+            either end made only of days the swap's calendar closes is not
+            refused: it is the swap's date rolled off a holiday, as when
+            Juneteenth falls on the June IMM Wednesday, and the evidence
+            lists it under ``coverage_tolerated_gaps``.
         ConfigurationError: Two instruments' keys cannot be told apart even
             with the node date appended; a node declares a contract its
             period contradicts (an SR1 on an IMM quarter, an SR3 on a
-            calendar month); or ``contract_dv01`` contradicts a contract that
-            is declared or that the period names.
+            calendar month, or either on a period that is not its own and
+            runs more than three days, the longest business-day roll, from
+            its reference length: SR1 25 to 34 days, SR3 81 to 101); or
+            ``contract_dv01`` contradicts a contract that is declared or
+            that the period names.
         MissingFixingError: The swap's floating coupon is already decided
             and ``fixings`` does not cover it.
         ValueError: There are no futures among ``instruments``.
@@ -278,8 +314,11 @@ def strip_hedge(
     default_start, default_end = swap.span
     start = swap_start or max(default_start, as_of)
     end = swap_end or default_end
-    if require_full_coverage:
-        _check_coverage(futures, start, end)
+    tolerated_gaps = (
+        _check_coverage(futures, start, end, _roll_calendar(swap))
+        if require_full_coverage
+        else None
+    )
 
     # The bootstrap first: it refuses two instruments pinning one node, which
     # is what a contract passed twice is, under its own name.
@@ -348,6 +387,7 @@ def strip_hedge(
             "contract_sizing": sizing,
             "futures_count": len(futures),
             "coverage_checked": require_full_coverage,
+            "coverage_tolerated_gaps": tolerated_gaps,
             "swap_span": [start.isoformat(), end.isoformat()],
             "quote_parallel_dv01": quote_parallel_dv01,
             "bucket_sum": sum(deltas.values()),
@@ -360,7 +400,7 @@ def strip_hedge(
             ),
         },
         sources=_with_history(swap, curve_set, fixings, (base.evidence,)),
-        warnings=_sizing_warnings(futures, keys, sizing),
+        warnings=_sizing_warnings(futures, keys, sizing, contract_dv01),
     )
     return HedgeResult(
         evidence=evidence,
@@ -467,27 +507,53 @@ def _period_contract(contract: FuturesNode) -> FuturesContract | None:
     return None
 
 
+def _length_contract(contract: FuturesNode) -> FuturesContract | None:
+    """The future whose reference period is this node's length, give or take a roll.
+
+    The weaker reading of a period, for one :func:`_period_contract` does not
+    recognise: a length within :data:`_ROLL_DAYS` of a contract's reference
+    lengths. It cannot say a period *is* that contract's, only that it could
+    be -- SR1 months rolled to business days, or an SR3 quarter whose IMM
+    date fell on a holiday -- so it checks a declaration and words a hint,
+    and never sizes a contract by itself.
+    """
+    days = (contract.end - contract.start).days
+    for name, lengths in _REFERENCE_DAYS.items():
+        if min(lengths) - _ROLL_DAYS <= days <= max(lengths) + _ROLL_DAYS:
+            return name
+    return None
+
+
 _PERIOD_BASIS = {FuturesContract.SR1: "calendar_month", FuturesContract.SR3: "imm_quarter"}
 _PERIOD_SHAPE = {FuturesContract.SR1: "a calendar month", FuturesContract.SR3: "an IMM quarter"}
 
 
-def _contract_sizes(
-    futures: tuple[FuturesNode, ...], keys: list[str], contract_dv01: float | None
-) -> tuple[dict[str, float], dict[str, dict[str, Any]]]:
-    """USD per basis point for each contract, and how each was established.
+def _contract_sizing(
+    contract: FuturesNode, key: str, contract_dv01: float | None
+) -> dict[str, Any]:
+    """USD per basis point for one contract, and how it was established.
 
     Every contract used to be divided by one ``contract_dv01``, SR3's 25.00
     by default, so an SR1 month was bought 1.67 times over. Nothing in the
     result showed it, because the strip DV01 was multiplied back by the same
     tick; the error was in the number of contracts a trader would buy.
 
+    One contract at a time so that the ``hedge`` command can make the same
+    checks entry by entry and name the key in the file a refusal comes from.
+
+    Args:
+        contract: The futures node.
+        key: Its name in the result and in any refusal.
+        contract_dv01: The caller's tick in USD per basis point, or ``None``
+            for the contract's own.
+
     Returns:
-        ``(sizes, sizing)``: the tick per key in USD per basis point, and per
-        key the contract (``None`` when the caller's ``contract_dv01`` stands
-        in for one the period does not name), the ``basis`` it was read from
+        The contract (``None`` when the caller's ``contract_dv01`` stands in
+        for one the period does not name), the ``basis`` it was read from
         (``declared``, ``calendar_month``, ``imm_quarter``, ``assumed`` for a
-        period that is neither and is sized as SR3 as before, or ``caller``),
-        the tick, and whether the tick is the ``contract``'s or the
+        period that is neither and is sized as SR3 as before, or ``caller``
+        for such a period sized at the caller's tick), the tick ``dv01`` in
+        USD per basis point, and whether it is the ``contract``'s or the
         ``caller``'s.
 
     Raises:
@@ -495,52 +561,77 @@ def _contract_sizes(
             ``contract_dv01`` contradicts a contract that is declared or that
             the period names.
     """
-    sizes: dict[str, float] = {}
-    sizing: dict[str, dict[str, Any]] = {}
-    for key, contract in zip(keys, futures, strict=True):
-        from_period = _period_contract(contract)
-        name: FuturesContract | None
-        if contract.contract is not None:
-            declared = FuturesContract(contract.contract)
-            if from_period is not None and from_period != declared:
-                raise ConfigurationError(
-                    f"{key} is declared {declared}, but its period {contract.start} to "
-                    f"{contract.end} is {_PERIOD_SHAPE[from_period]}, which is "
-                    f"{from_period}'s; fix the contract or the dates"
-                )
-            name, basis = declared, "declared"
-        elif from_period is not None:
-            name, basis = from_period, _PERIOD_BASIS[from_period]
-        else:
-            name, basis = None, "assumed"
+    from_period = _period_contract(contract)
+    name: FuturesContract | None
+    if contract.contract is not None:
+        declared = FuturesContract(contract.contract)
+        if from_period is not None and from_period != declared:
+            raise ConfigurationError(
+                f"{key} is declared {declared}, but its period {contract.start} to "
+                f"{contract.end} is {_PERIOD_SHAPE[from_period]}, which is "
+                f"{from_period}'s; fix the contract or the dates"
+            )
+        # A period that is not exactly the declared contract's is taken on
+        # the declaration only if it could be that contract's period rolled
+        # to business days. SR1 from 2 February to 4 May 2026 is ninety-one
+        # days, an IMM quarter's length: two statements that cannot both be
+        # true, and the declaration alone sized it at 59.93 SR1 contracts.
+        if from_period is None and _length_contract(contract) is not declared:
+            lengths = _REFERENCE_DAYS[declared]
+            raise ConfigurationError(
+                f"{key} is declared {declared}, but its period {contract.start} to "
+                f"{contract.end} runs {(contract.end - contract.start).days} days. "
+                f"{declared}'s reference period is {_PERIOD_SHAPE[declared]}, "
+                f"{min(lengths)} to {max(lengths)} days, and rolling its ends to business "
+                f"days moves that by at most {_ROLL_DAYS} days; fix the contract or the dates"
+            )
+        name, basis = declared, "declared"
+    elif from_period is not None:
+        name, basis = from_period, _PERIOD_BASIS[from_period]
+    else:
+        name, basis = None, "assumed"
 
-        if contract_dv01 is None:
-            name = name or FuturesContract.SR3
-            size, source = _CONTRACT_DV01[name], "contract"
-        elif name is not None:
-            # Checked against an inferred contract as well as a declared one:
-            # 25.00, the old default, on an undeclared calendar month bought
-            # that SR1 1.67 times over without a word. A cent of rounding on
-            # the published tick (41.67 for 41.666...) is the same contract;
-            # anything further is two statements that cannot both be true.
-            if not math.isclose(contract_dv01, _CONTRACT_DV01[name], rel_tol=1e-3):
-                how = "declared" if basis == "declared" else f"by its period, {_PERIOD_SHAPE[name]}"
-                raise ConfigurationError(
-                    f"contract_dv01={contract_dv01} USD/bp contradicts {key}, which is "
-                    f"{name} ({_CONTRACT_DV01[name]:.2f} USD/bp) {how}; drop contract_dv01 "
-                    "to size each contract at its own tick"
-                )
-            size, source = contract_dv01, "caller"
-        else:
-            basis, size, source = "caller", contract_dv01, "caller"
-        sizes[key] = size
-        sizing[key] = {
-            "contract": None if name is None else str(name),
-            "basis": basis,
-            "dv01": size,
-            "dv01_source": source,
-        }
-    return sizes, sizing
+    if contract_dv01 is None:
+        name = name or FuturesContract.SR3
+        size, source = _CONTRACT_DV01[name], "contract"
+    elif name is not None:
+        # Checked against an inferred contract as well as a declared one:
+        # 25.00, the old default, on an undeclared calendar month bought
+        # that SR1 1.67 times over without a word. A cent of rounding on
+        # the published tick (41.67 for 41.666...) is the same contract;
+        # anything further is two statements that cannot both be true.
+        if not math.isclose(contract_dv01, _CONTRACT_DV01[name], rel_tol=_TICK_REL_TOL):
+            how = "declared" if basis == "declared" else f"by its period, {_PERIOD_SHAPE[name]}"
+            raise ConfigurationError(
+                f"contract_dv01={contract_dv01} USD/bp contradicts {key}, which is "
+                f"{name} ({_CONTRACT_DV01[name]:.2f} USD/bp) {how}; drop contract_dv01 "
+                "to size each contract at its own tick"
+            )
+        size, source = contract_dv01, "caller"
+    else:
+        basis, size, source = "caller", contract_dv01, "caller"
+    return {
+        "contract": None if name is None else str(name),
+        "basis": basis,
+        "dv01": size,
+        "dv01_source": source,
+    }
+
+
+def _contract_sizes(
+    futures: tuple[FuturesNode, ...], keys: list[str], contract_dv01: float | None
+) -> tuple[dict[str, float], dict[str, dict[str, Any]]]:
+    """:func:`_contract_sizing` for every contract: the tick per key, and how each was read.
+
+    Raises:
+        ConfigurationError: As :func:`_contract_sizing`, for the first
+            contract that fails.
+    """
+    sizing = {
+        key: _contract_sizing(contract, key, contract_dv01)
+        for key, contract in zip(keys, futures, strict=True)
+    }
+    return {key: entry["dv01"] for key, entry in sizing.items()}, sizing
 
 
 def _derivations(
@@ -548,10 +639,21 @@ def _derivations(
 ) -> dict[str, str]:
     """Where each tick the hedge used came from, one line per contract type."""
     if contract_dv01 is not None:
+        # Not "derived from a contract spec", and no longer "not checked
+        # against one" either: wherever a contract is declared or its period
+        # names one, the caller's number had to match that contract's tick
+        # to be accepted at all.
+        unchecked = [key for key, entry in sizing.items() if entry["contract"] is None]
+        reach = (
+            f"unchecked for {', '.join(unchecked)}, whose periods name no contract"
+            if unchecked
+            else "checked against the tick of every contract in the strip"
+        )
         return {
             "caller": (
                 f"contract_dv01 = {contract_dv01:.2f} USD/bp, given by the caller and applied "
-                "to every contract; not derived from a contract spec"
+                "to every contract. It has to match the tick of any contract that is declared "
+                f"or that its period names, within {_TICK_REL_TOL:.1%}, so it is {reach}"
             )
         }
     names = dict.fromkeys(FuturesContract(entry["contract"]) for entry in sizing.values())
@@ -559,21 +661,29 @@ def _derivations(
 
 
 def _sizing_warnings(
-    futures: tuple[FuturesNode, ...], keys: list[str], sizing: dict[str, dict[str, Any]]
+    futures: tuple[FuturesNode, ...],
+    keys: list[str],
+    sizing: dict[str, dict[str, Any]],
+    contract_dv01: float | None,
 ) -> tuple[Degradation, ...]:
     """What the sizing assumed, as degradations rather than fields alone.
 
-    Two assumptions. The SR1 notional, on any hedge with an SR1 in it: a
-    ``contract_dv01`` the caller gave has to agree with the SR1 tick within a
-    cent to be accepted, so it rests on the same notional, and the warning
-    used to hang on float equality (``41.666...`` warned, ``41.67`` did
-    not). And the contract itself, for a period that is neither a calendar
-    month nor an IMM quarter and so is sized as SR3 by default -- including an
-    SR1 month whose dates were rolled to business days, which that default
-    buys 1.67 times over.
+    Two assumptions. The SR1 notional, on every contract sized at the SR1
+    tick, whatever named the contract and whoever gave the tick: it was
+    keyed on the engine's classification, so the caller's 41.67 on SR1
+    months it could not recognise rested on the same notional and raised no
+    flag. And the contract itself, for a period that is neither a calendar
+    month nor an IMM quarter, whether it is sized as SR3 by default or at a
+    tick the caller gave: the caller branch used to drop the flag, and 25.00
+    on SR1 months rolled to business days bought them 1.67 times over and
+    read as clean.
     """
     warnings: list[Degradation] = []
-    sr1 = [key for key, entry in sizing.items() if entry["contract"] == FuturesContract.SR1]
+    sr1 = [
+        key
+        for key, entry in sizing.items()
+        if math.isclose(entry["dv01"], SR1_DV01, rel_tol=_TICK_REL_TOL)
+    ]
     if sr1:
         warnings.append(
             Degradation(
@@ -581,35 +691,30 @@ def _sizing_warnings(
                 message=(
                     f"SR1 contracts are sized at {SR1_DV01:.2f} USD per basis point from a "
                     f"{SR1_NOTIONAL:,.0f} USD notional that has not been read from the CME "
-                    "contract spec. Affected contracts: " + ", ".join(sr1)
+                    "contract spec, whoever gave the tick. Affected contracts: "
+                    + ", ".join(sr1)
                 ),
                 data_quality=DataQuality.ASSUMED,
             )
         )
-    assumed = [key for key, entry in sizing.items() if entry["basis"] == "assumed"]
+    assumed = [key for key, entry in sizing.items() if entry["basis"] in ("assumed", "caller")]
     if assumed:
-        by_key = dict(zip(keys, futures, strict=True))
-        short = [
-            key
-            for key in assumed
-            if (by_key[key].end - by_key[key].start).days <= _SHORT_PERIOD_DAYS
-        ]
-        hint = (
-            f" {', '.join(short)} run about a month: if they are SR1 contracts with dates "
-            "rolled to business days, declare contract='SR1', or they are bought 1.67 "
-            "times over."
-            if short
-            else ""
+        tick = SR3_DV01 if contract_dv01 is None else contract_dv01
+        sized = (
+            f"so they are sized as SR3 at {SR3_DV01:.2f} USD per basis point"
+            if contract_dv01 is None
+            else f"so the caller's contract_dv01 of {tick:.2f} USD per basis point is "
+            "applied to them unchecked: nothing here says what they are worth"
         )
         warnings.append(
             Degradation(
                 code="futures_contract_assumed",
                 message=(
                     "Futures " + ", ".join(assumed) + " span periods that are neither a "
-                    "calendar month (SR1) nor one IMM date to the next (SR3), so they are "
-                    f"sized as SR3 at {SR3_DV01:.2f} USD per basis point. Declare the "
-                    "contract (FuturesNode.contract, or `contract` on a CLI futures entry), "
-                    "or pass contract_dv01 for a contract that is neither." + hint
+                    f"calendar month (SR1) nor one IMM date to the next (SR3), {sized}. "
+                    "Declare the contract (FuturesNode.contract, or `contract` on a CLI "
+                    "futures entry) to size them at its own tick."
+                    + _rolled_period_hints(dict(zip(keys, futures, strict=True)), assumed, tick)
                 ),
                 data_quality=DataQuality.ASSUMED,
             )
@@ -617,21 +722,107 @@ def _sizing_warnings(
     return tuple(warnings)
 
 
-def _check_coverage(futures: tuple[FuturesNode, ...], start: date, end: date) -> None:
-    """Refuse when the strip leaves a hole anywhere inside the swap's span."""
+def _rolled_period_hints(by_key: dict[str, FuturesNode], assumed: list[str], tick: float) -> str:
+    """Which declaration the assumed contracts probably need, by their length.
+
+    Args:
+        by_key: The futures nodes by key.
+        assumed: The keys whose contract was assumed.
+        tick: USD per basis point they were sized at.
+
+    Returns:
+        One sentence per contract a group of them is as long as, each with
+        the declaration and, where the tick used is not that contract's,
+        how far off the count is; empty when none fits.
+    """
+    hints = []
+    for name in FuturesContract:
+        fits = [key for key in assumed if _length_contract(by_key[key]) is name]
+        if not fits:
+            continue
+        hint = (
+            f" {', '.join(fits)} run as long as {_PERIOD_SHAPE[name]} with its ends rolled "
+            f"to business days: if they are {name} contracts, declare contract='{name}'"
+        )
+        ratio = _CONTRACT_DV01[name] / tick
+        if not math.isclose(ratio, 1.0, rel_tol=_TICK_REL_TOL):
+            hint += (
+                f"; sized at {tick:.2f} USD/bp against an {name}'s "
+                f"{_CONTRACT_DV01[name]:.2f}, they are {ratio:.2f} times the contracts an "
+                f"{name} hedge needs"
+            )
+        hints.append(hint + ".")
+    return "".join(hints)
+
+
+def _roll_calendar(swap: Priceable) -> HolidayCalendar | None:
+    """The calendar the swap's dates roll on, or ``None`` if it does not say.
+
+    Read rather than assumed: a peso swap rolls on BMV, and a gap is a roll
+    only on the calendar that rolled it. An instrument with no
+    ``roll_calendar`` gets no tolerance at all, which is the strict reading.
+    """
+    calendar = getattr(swap, "roll_calendar", None)
+    return calendar if isinstance(calendar, HolidayCalendar) else None
+
+
+def _check_coverage(
+    futures: tuple[FuturesNode, ...], start: date, end: date, calendar: HolidayCalendar | None
+) -> list[dict[str, str]]:
+    """Refuse when the strip leaves a hole anywhere inside the swap's span.
+
+    A gap at either end made only of days ``calendar`` closes is not a hole
+    but the swap's own date rolled off a holiday or a weekend. The June 2030
+    IMM date is Juneteenth: a swap from the December 2029 IMM date to that
+    one ends on Thursday 20 June once its maturity is rolled, the SR3
+    quarter on the 19th, and refusing over a day the market is shut blocked
+    the textbook IMM-to-IMM hedge. Strictly the day is uncovered, so each
+    one tolerated is returned for the evidence. A gap *between* contracts is
+    never tolerated: it is not a roll of the swap's dates, and the one day
+    nobody holds there is a day nobody holds.
+
+    Args:
+        futures: The strip.
+        start: First day of the span that must be covered.
+        end: End of that span, exclusive.
+        calendar: The swap's roll calendar, or ``None`` to tolerate nothing.
+
+    Returns:
+        The tolerated gaps, each as ``from``, ``to`` (exclusive) and the
+        ``calendar`` that closes every day in it; empty when there are none.
+
+    Raises:
+        IncompleteStripError: Some business day of the span is in no
+            contract's period, and the message says what to pass instead.
+    """
     ordered = sorted(futures, key=lambda f: f.start)
     covered_from = min(f.start for f in ordered)
     covered_to = max(f.end for f in ordered)
+    tolerated: list[dict[str, str]] = []
+    # What the caller can pass, said in the refusal: the span is a default,
+    # and so is the check itself. The CLI exposes the second as a key.
+    waive = (
+        "or pass require_full_coverage=False (hedge.require_full_coverage: false on the "
+        "CLI) to size the partial hedge anyway"
+    )
     if start < covered_from:
-        raise IncompleteStripError(
-            f"the strip starts at {covered_from} but the swap starts at {start}; "
-            "no contract covers the opening period and none is extrapolated"
-        )
+        opening = _roll_gap(calendar, start, covered_from)
+        if opening is None:
+            raise IncompleteStripError(
+                f"the strip starts at {covered_from} but the swap starts at {start}; "
+                "no contract covers the opening period and none is extrapolated. Pass "
+                f"swap_start= if the hedge is meant to start later, {waive}"
+            )
+        tolerated.append(opening)
     if end > covered_to:
-        raise IncompleteStripError(
-            f"the strip ends at {covered_to} but the swap runs to {end}; "
-            "no contract covers the closing period and none is extrapolated"
-        )
+        closing = _roll_gap(calendar, covered_to, end)
+        if closing is None:
+            raise IncompleteStripError(
+                f"the strip ends at {covered_to} but the swap runs to {end}; "
+                "no contract covers the closing period and none is extrapolated. Pass "
+                f"swap_end= if the hedge is meant to stop earlier, {waive}"
+            )
+        tolerated.append(closing)
     # Walk the contracts in start order, carrying the furthest end reached so
     # far. Comparing each contract only with the one starting next refused
     # valid strips: SR1 months traded under an SR3 quarter overlap it, and
@@ -642,9 +833,22 @@ def _check_coverage(futures: tuple[FuturesNode, ...], start: date, end: date) ->
         if contract.start > reach and reach < end and contract.start > start:
             raise IncompleteStripError(
                 f"the strip has no contract covering {reach} to {contract.start}, "
-                f"which lies inside the swap span {start} to {end}"
+                f"which lies inside the swap span {start} to {end}; add the missing "
+                f"contract, {waive}"
             )
         reach = max(reach, contract.end)
+    return tolerated
+
+
+def _roll_gap(calendar: HolidayCalendar | None, first: date, last: date) -> dict[str, str] | None:
+    """``[first, last)`` as the evidence records a tolerated gap, or ``None`` if it is a hole.
+
+    A gap is tolerated when ``calendar`` closes every day in it, and never
+    without a calendar to say so.
+    """
+    if calendar is None or calendar.business_days(first, last):
+        return None
+    return {"from": first.isoformat(), "to": last.isoformat(), "calendar": calendar.name}
 
 
 def _with_quote_shift(

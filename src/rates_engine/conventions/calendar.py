@@ -177,15 +177,28 @@ class HolidayCalendar:
     name: str = "unnamed"
 
     def holidays(self, year: int) -> frozenset[date]:
-        """Every holiday observed in ``year``, as observed dates.
+        """The weekdays the market closes for ``year``'s holidays, as observed dates.
 
-        "Observed dates" is the subtlety: a weekend-observance rule can move
-        a holiday *out of its own year*. A rule that observed a Saturday New
-        Year's Day on the Friday would put 31 December 2021 in
+        Closures, not occasions: a holiday that falls on a weekend and that
+        the calendar's rule does not move to a weekday closes nothing, and is
+        not in the set. Every calendar here keeps to that, so the set can be
+        counted and diffed against a publication record the same way on any
+        of them; until v0.4 ``BMV`` listed its weekend dates and ``SIFMA_US``
+        did not.
+
+        "Observed dates" is the other subtlety: a weekend-observance rule can
+        move a holiday *out of its own year*. A rule that observed a Saturday
+        New Year's Day on the Friday would put 31 December 2021 in
         ``holidays(2022)``, because it is the 2022 holiday. SIFMA's calendar
         has no such rule any more -- a Saturday New Year's Day closes nothing
         -- but the base class does not assume that of every calendar.
         :meth:`is_business_day` accounts for it; see there.
+
+        Args:
+            year: Calendar year.
+
+        Returns:
+            The observed closures, every one of them a weekday.
         """
         raise NotImplementedError
 
@@ -421,14 +434,18 @@ class BMVCalendar(HolidayCalendar):
     MONDAY_OBSERVANCE_FROM = 2006
 
     def holidays(self, year: int) -> frozenset[date]:
-        """Every holiday observed in ``year``.
+        """The weekdays the exchange closes for ``year``'s holidays.
 
         Args:
             year: Calendar year.
 
         Returns:
             The dates. No weekend-observance roll is applied, because this
-            calendar does not have one.
+            calendar does not have one, so a fixed-date holiday on a Saturday
+            or Sunday (16 September 2023, 12 December 2026) is not observed
+            and is not in the set. Until v0.4 it was, which made the set mean
+            something different here than on ``SIFMA_US``;
+            :meth:`is_business_day` gave the same answer either way.
         """
         easter = easter_sunday(year)
         days = {
@@ -451,7 +468,7 @@ class BMVCalendar(HolidayCalendar):
             days.add(date(year, 11, 20))
         if year >= self.INAUGURATION_BASE_YEAR and (year - self.INAUGURATION_BASE_YEAR) % 6 == 0:
             days.add(date(year, 10, 1))
-        return frozenset(days)
+        return frozenset(day for day in days if day.weekday() < 5)
 
 
 SIFMA_US = SIFMAUSCalendar()

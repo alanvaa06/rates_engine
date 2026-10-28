@@ -26,11 +26,13 @@ it started has these kinds of period, by QuantLib's rule with its default
 - fixing *on* the valuation date: its intrinsic value on that day's fixing
   when ``fixings`` holds it, and otherwise on the curve's forward with no
   time left -- the rate is being published that day, and the forward is
-  the curve's estimate of it. The substitution is a ``Degradation``
-  (``curve_forward_for_todays_fixing:<series>``, proxy, the code the
-  linear pricers use), not only a field. A
-  snapshot without the index's series at all is refused: that is a wrong
-  snapshot, not a fixing not yet published;
+  the curve's estimate of it. The period's ``fixing_source`` in the
+  evidence says which, and the forecast is not a ``Degradation``: a
+  spot-starting cap fixes its first period on the valuation date, so a
+  proxy flag there would mark every morning quote and tell nobody
+  anything. A snapshot without the index's series at all is refused,
+  whatever the period: that is a wrong snapshot, not a fixing not yet
+  published;
 - the rest are options, to their fixing dates.
 
 v0.3 had no notion of any of it: the curve's discount factor is one on and
@@ -56,7 +58,7 @@ from typing import Any
 
 from rates_engine.conventions.option_kind import OptionKind
 from rates_engine.core.errors import MissingFixingError, MissingForwardError
-from rates_engine.core.evidence import DataQuality, Degradation, Evidence, Provenance
+from rates_engine.core.evidence import Evidence, Provenance
 from rates_engine.core.money import require_same_currency
 from rates_engine.core.results import EngineResult
 from rates_engine.curves.discount import CurveSet
@@ -64,11 +66,7 @@ from rates_engine.instruments.capfloor import CapFloor, Caplet
 from rates_engine.instruments.swaption import Swaption
 from rates_engine.market.snapshot import MarketSnapshot
 from rates_engine.models import bachelier, black
-from rates_engine.pricing.collateral import (
-    discounting_fields,
-    merge_warnings,
-    valuation_warnings,
-)
+from rates_engine.pricing.collateral import discounting_fields, valuation_warnings
 from rates_engine.volatility.units import Volatility
 
 __all__ = [
@@ -82,7 +80,6 @@ __all__ = [
     "swaption_pv",
     "PeriodStatus",
     "CapletValuation",
-    "FIXING_FORECAST_CODE",
     "cap_floor_periods",
     "cap_floor_pv",
     "caplet_pv",
@@ -296,7 +293,6 @@ def _evidence(
     extra: dict[str, Any],
     sources: tuple[Evidence, ...],
     inputs: tuple[Provenance, ...] = (),
-    degradations: tuple[Degradation, ...] = (),
 ) -> Evidence:
     return Evidence(
         produced_by=produced_by,
@@ -316,7 +312,7 @@ def _evidence(
             **extra,
         },
         sources=sources,
-        warnings=merge_warnings(valuation_warnings(instrument, curve_set), degradations),
+        warnings=valuation_warnings(instrument, curve_set),
     )
 
 
@@ -403,7 +399,8 @@ class PeriodStatus(StrEnum):
         Fixes on the valuation date and the fixings did not hold that day's
         rate. Valued on the curve's forward with no time left -- its
         intrinsic value on the forward -- as QuantLib does when today's
-        fixing is not in the history.
+        fixing is not in the history. Its ``fixing_source`` records it;
+        it is not a degradation.
     ``LIVE``
         Fixes after the valuation date. An option.
     """
@@ -505,12 +502,12 @@ def _todays_fixing(
 
     Absent is not an error on the fixing day itself: the rate is being
     published that day, so the curve's forward stands in for it -- QuantLib's
-    default, ``enforcesTodaysHistoricFixings = False`` -- and the result
-    carries a degradation saying so. Only that absence is tolerated. A
-    snapshot with no series named after the index is a wrong snapshot, and
-    read as "not published yet" it priced a cap at the curve's 11,018.00
-    where its 4.50% fixing gives 18,440.32, without a word; it is refused. A
-    fixing that is there and is not a number is refused too.
+    default, ``enforcesTodaysHistoricFixings = False`` -- and the period's
+    ``fixing_source`` says so. Only that absence is tolerated. A snapshot
+    with no series named after the index is a wrong snapshot, and read as
+    "not published yet" it priced a cap at the curve's 11,018.00 where its
+    4.50% fixing gives 18,440.32, without a word; it is refused. A fixing
+    that is there and is not a number is refused too.
     """
     if fixings is None:
         return None
@@ -620,39 +617,6 @@ def _value_period(
     )
 
 
-FIXING_FORECAST_CODE = "curve_forward_for_todays_fixing"
-"""Prefix of the degradation a result carries when the curve's forward stood in for a fixing.
-
-The code is ``curve_forward_for_todays_fixing:<series>``, one per series, and
-its quality ``proxy``: real data -- the curve's forward -- standing in for a
-different quantity, the rate being published that day. The linear pricers
-use the same code and quality, so a book of caps and swaps reports one
-thing.
-"""
-
-
-def _forecast_degradations(
-    forecast: list[CapletValuation], valuation: date
-) -> tuple[Degradation, ...]:
-    by_series: dict[str, list[CapletValuation]] = {}
-    for period in forecast:
-        by_series.setdefault(period.caplet.index.name, []).append(period)
-    return tuple(
-        Degradation(
-            code=f"{FIXING_FORECAST_CODE}:{series_id}",
-            message=(
-                f"The {series_id} fixing dated {valuation}, the valuation date, was not "
-                "among the fixings passed, so the curve's forward stands in for it, as "
-                "QuantLib does by default, for the period(s) starting "
-                + ", ".join(p.caplet.accrual_start.isoformat() for p in periods)
-                + ". Pass it as fixings= to price on the print."
-            ),
-            data_quality=DataQuality.PROXY,
-        )
-        for series_id, periods in by_series.items()
-    )
-
-
 def caplet_pv(
     caplet: Caplet,
     curve_set: CurveSet,
@@ -683,8 +647,12 @@ def caplet_pv(
     Raises:
         MissingForwardError: The period ends past the projection curve.
         MissingFixingError: The period fixed before the valuation date and
-            ``fixings`` does not hold its fixing, or a fixing it holds is
-            not a finite number.
+            ``fixings`` does not hold its fixing. Or the period fixes on the
+            valuation date and ``fixings`` was passed without a series named
+            after the index (or with it under another name): only the day's
+            absence from a series that is there is forecast. Or a fixing it
+            holds is not a finite number. A period fixing later never reads
+            ``fixings``.
     """
     valuation = as_of or curve_set.as_of
     period, _ = _value_period(caplet, curve_set, volatility, valuation, fixings)
@@ -719,7 +687,9 @@ def cap_floor_periods(
     Raises:
         MissingForwardError: A live period ends past the projection curve.
         MissingFixingError: A period fixed before the valuation date and
-            ``fixings`` does not hold its fixing.
+            ``fixings`` does not hold its fixing, or a period fixes on the
+            valuation date and ``fixings`` has no series named after the
+            index; see :func:`caplet_pv`.
     """
     valuation = as_of or curve_set.as_of
     periods = []
@@ -767,8 +737,12 @@ def cap_floor_pv(
         ValueError: The strip has no periods, or every one has been paid.
         MissingForwardError: A live period ends past the projection curve.
         MissingFixingError: A period fixed before the valuation date and
-            ``fixings`` does not hold its fixing; the message names the
-            series and the date.
+            ``fixings`` does not hold its fixing. Or a period fixes on the
+            valuation date and ``fixings`` was passed without a series named
+            after the index (or with it under another name), even though
+            that day's fixing itself may be absent and forecast. The message
+            names the series and the date. A strip whose periods all fix
+            after the valuation date never reads ``fixings``.
     """
     valuation = as_of or curve_set.as_of
     caplets = cap.caplets
@@ -788,10 +762,6 @@ def cap_floor_pv(
             f"every period of this {cap.product} was paid on or before {valuation}, the "
             f"last on {caplets[-1].payment}; there is nothing left to value."
         )
-    forecast = [p for p in periods if p.status is PeriodStatus.FIXES_TODAY]
-    degradations: tuple[Degradation, ...] = ()
-    if forecast:
-        degradations = _forecast_degradations(forecast, valuation)
     last = periods[-1]
     last_rate = last.forward if last.forward is not None else last.fixing
     assert last_rate is not None  # a valued period has one or the other
@@ -815,14 +785,14 @@ def cap_floor_pv(
                     "A period paid on or before the valuation date is not valued. One "
                     "fixed before it is its intrinsic value on the published fixing. One "
                     "fixing on it is its intrinsic value on that day's fixing if supplied, "
-                    "else on the curve's forward (fixing_source says which). Only the "
-                    "rest are options."
+                    "else on the curve's forward (fixing_source says which; the forecast "
+                    "is QuantLib's default and not a degradation). Only the rest are "
+                    "options."
                 ),
                 "per_period": [p.describe() for p in periods],
             },
             source_evidence,
             inputs=tuple(inputs),
-            degradations=degradations,
         ),
         value=sum(p.value for p in periods),
         model=model_for(volatility),

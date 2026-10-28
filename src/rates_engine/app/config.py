@@ -18,7 +18,8 @@ another command reads, because one desk file serves every command.
 holds it, with a ``description`` that states its units; the schema's
 docstring lists the fields. Until the entry exists the key is refused as
 unknown, and ``tests/test_app_config.py`` fails for any key a handler looks
-up that the schema does not document.
+up that the schema does not document, and for any key the schema documents
+that no handler reads.
 """
 
 from __future__ import annotations
@@ -26,8 +27,9 @@ from __future__ import annotations
 import copy
 import difflib
 import json
+import math
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -40,7 +42,7 @@ __all__ = [
     "as_date",
     "require_config",
     "CONFIG_SCHEMA",
-    "key_refusal",
+    "require_block",
 ]
 
 _CURVE_COMMANDS = ["bootstrap", "price", "hedge"]
@@ -149,10 +151,12 @@ CONFIG_SCHEMA: dict[str, Any] = {
                     },
                     "maturity": {
                         "required": True,
+                        "suggested_for": ["end"],
                         "description": "End date of the swap the quote is for.",
                     },
                     "rate": {
                         "required": True,
+                        "suggested_for": ["fixed_rate"],
                         "description": "Par fixed rate as a decimal a year: 0.041 is 4.1%.",
                     },
                     "frequency_months": {
@@ -193,10 +197,17 @@ CONFIG_SCHEMA: dict[str, Any] = {
             "convexity": {
                 "description": (
                     "How futures rates are convexity-adjusted before they enter the "
-                    "curve. Absent means no adjustment."
+                    "curve. Absent means no adjustment; given, it names its model."
                 ),
                 "keys": {
-                    "model": {"default": "none", "description": "none, ho_lee or hull_white."},
+                    "model": {
+                        "required": True,
+                        "description": (
+                            "The model, none, ho_lee or hull_white; required whenever the "
+                            "block is given, since a sigma without it priced with no "
+                            "adjustment at all."
+                        ),
+                    },
                     "sigma": {
                         "default": 0.0,
                         "description": (
@@ -236,10 +247,19 @@ CONFIG_SCHEMA: dict[str, Any] = {
         "required": True,
         "description": "The OIS swap price values and hedge sizes the futures strip against.",
         "keys": {
-            "effective": {"required": True, "description": "Start of the first accrual period."},
-            "maturity": {"required": True, "description": "End of the last accrual period."},
+            "effective": {
+                "required": True,
+                "suggested_for": ["start"],
+                "description": "Start of the first accrual period.",
+            },
+            "maturity": {
+                "required": True,
+                "suggested_for": ["end"],
+                "description": "End of the last accrual period.",
+            },
             "fixed_rate": {
                 "required": True,
+                "suggested_for": ["rate"],
                 "description": "Fixed rate as a decimal a year: 0.04 is 4%.",
             },
             "notional": {
@@ -331,6 +351,7 @@ CONFIG_SCHEMA: dict[str, Any] = {
         "keys": {
             "key_tenors": {
                 "default": None,
+                "type": "list of numbers",
                 "description": (
                     "Key tenors for key_rate_dv01, in years on the curve's ACT/365F time "
                     "axis, as numbers. Absent leaves key_rate_dv01 null."
@@ -362,6 +383,7 @@ CONFIG_SCHEMA: dict[str, Any] = {
             },
             "shocks_bp": {
                 "default": list(DEFAULT_SHOCKS_BP),
+                "type": "list of numbers",
                 "description": (
                     "Parallel shocks for the hedged position's shock table, in basis points, "
                     "none of them zero: a zero shock is refused."
@@ -491,6 +513,7 @@ CONFIG_SCHEMA: dict[str, Any] = {
             },
             "allowed_instruments": {
                 "default": [],
+                "type": "list of strings",
                 "description": (
                     "Structure names the programme permits; empty permits every structure."
                 ),
@@ -510,16 +533,29 @@ is a mapping with these fields:
     Every entry has one.
 ``required``
     ``True`` when a command that reads the block cannot run without the key.
-    Absent, or ``null``, it is refused by name.
+    Absent, or ``null``, it is refused by name. A required key of an
+    optional block is required only when the block is given: an optional
+    block that is empty, or holds nothing but comments, counts as left out.
 ``default``
     What an absent key means. A key whose default is a value is refused when
     given as ``null``; one whose default is ``None`` reads ``null`` as absent.
 ``used_by``
     The commands that read the key; a nested key without it is read by its
     block's commands. ``required`` and ``null`` are checked only for those
-    commands, while an unknown key is refused by every command.
+    commands, while an unknown key, a block or list of the wrong shape and a
+    list holding the wrong things are refused by every command.
 ``keys`` / ``items``
     A nested block, or a list of blocks, each a mapping of entries like this.
+``type``
+    For a key whose value is a list of plain values: ``"list of numbers"``
+    (JSON numbers, finite, not booleans) or ``"list of strings"``. A string
+    given where the list belongs is refused rather than read a character at
+    a time.
+``suggested_for``
+    Names of other blocks' keys that a caller writing this block is likely
+    to mean this key by, such as ``rate`` for ``swap.fixed_rate``. They stay
+    unknown keys; the refusal suggests this one instead of sending the
+    caller to the block where the name is accepted.
 ``refused``
     A key recognised in order to refuse it; the text is the migration.
 
@@ -534,10 +570,11 @@ was::
     },
 
 ``tests/test_app_config.py`` holds the schema to the handlers: every key a
-handler looks up must be documented, ``used_by`` must be exactly the
-commands that read the key, a required key must be read by every command
-that requires it, and leaving out or nulling any key must end in a refusal
-or a result, never a ``KeyError`` or a ``TypeError``.
+handler looks up must be documented, every key documented must be read by
+some command, ``used_by`` must be exactly the commands that read the key, a
+required key must be read by every command that requires it, every list of
+plain values must have a ``type``, and leaving out or nulling any key must
+end in a refusal or a result, never a ``KeyError`` or a ``TypeError``.
 """
 
 
@@ -608,12 +645,15 @@ def require_config(config: Mapping[str, Any] | None, command: str) -> dict[str, 
     - every key must be documented where it sits, or start with ``_`` (a
       comment, at any depth); anything else is a typo or an invention;
     - a key documented as ``refused`` is refused with its migration;
-    - a block documented as a mapping or a list must be one.
+    - a block documented as a mapping or a list must be one;
+    - a list documented with a ``type`` must be a list of those values.
 
     For the blocks ``command`` reads (``used_by``) it also checks that every
     ``required`` key is there, and that a key whose default is a value is not
     given as ``null``. A ``null`` for a key whose default is ``null`` is the
-    same as leaving it out.
+    same as leaving it out, and so is an optional block that is empty or
+    holds only comments: ``hedge_program: {}`` audits nothing, and a comment
+    switches nothing off in a block that holds anything else.
 
     Args:
         config: The configuration mapping, or ``None``.
@@ -621,8 +661,8 @@ def require_config(config: Mapping[str, Any] | None, command: str) -> dict[str, 
 
     Returns:
         A copy of the config as plain ``dict`` and ``list`` values, without
-        comment keys and without the ``null`` values that mean "absent". The
-        caller's mapping is not modified.
+        comment keys, the ``null`` values that mean "absent" and the empty
+        optional blocks. The caller's mapping is not modified.
 
     Raises:
         ConfigurationError: ``config`` is ``None`` or not a mapping, or it
@@ -647,29 +687,31 @@ def require_config(config: Mapping[str, Any] | None, command: str) -> dict[str, 
     return checked
 
 
-def key_refusal(
-    where: str, *, refused: tuple[str, ...] = (), missing: tuple[str, ...] = ()
-) -> str:
-    """The words :func:`require_config` uses for refused or missing keys of one block.
+def require_block(block: Any, where: str) -> dict[str, Any]:
+    """One block checked against its entry in :data:`CONFIG_SCHEMA`, as :func:`require_config` would.
 
-    For a builder that checks a block itself, so that a caller who went round
-    :func:`require_config` reads the same refusal as one who did not.
+    For a builder that a caller can reach without :func:`require_config`, so
+    that the builder keeps no list of keys of its own, and a caller who went
+    round the whole-file check reads the same refusal as one who did not.
+    Every check of :func:`require_config` applies, for every command.
 
     Args:
-        where: The block's path, with list indices (``"curve.par_swaps[0]"``).
-        refused: Keys present in the block that the schema refuses.
-        missing: Required keys absent from it.
+        block: The block as the caller holds it.
+        where: Its path in a config, with list indices
+            (``"curve.par_swaps[0]"``).
 
     Returns:
-        The refusal text.
+        The checked copy, as :func:`require_config` makes one.
+
+    Raises:
+        ConfigurationError: The block is not a mapping, or fails a check of
+            :func:`require_config`; one refusal lists every problem.
     """
-    level = _level_at(where)
     problems = _Problems(None)
-    for key in refused:
-        problems.refused.append((where, key, str((level.get(key) or {}).get("refused", ""))))
-    for key in missing:
-        problems.missing.append((_join(where, key), level.get(key) or {}))
-    return problems.message()
+    checked = _check_value(block, {"keys": _level_at(where)}, where, None, problems)
+    if problems:
+        raise ConfigurationError(problems.message())
+    return dict(checked)
 
 
 def _is_comment(key: Any) -> bool:
@@ -683,6 +725,8 @@ def _join(path: str, key: Any) -> str:
 
 def _kind(value: Any) -> str:
     """What a JSON reader would call ``value``."""
+    if value is None:
+        return "null"
     if isinstance(value, bool):
         return "true or false"
     if isinstance(value, (int, float)):
@@ -693,7 +737,28 @@ def _kind(value: Any) -> str:
         return "a mapping"
     if isinstance(value, (list, tuple)):
         return "a list"
-    return type(value).__name__
+    # A YAML date, say: what the loader made of it, in words.
+    return f"a {type(value).__name__}"
+
+
+def _is_number(value: Any) -> bool:
+    """A JSON number: not a boolean, which Python counts as an int, nor NaN or infinity."""
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
+
+
+def _is_string(value: Any) -> bool:
+    return isinstance(value, str)
+
+
+_LIST_TYPES: dict[str, tuple[str, Callable[[Any], bool]]] = {
+    "list of numbers": ("a finite number", _is_number),
+    "list of strings": ("a string", _is_string),
+}
+"""Each ``type`` a schema entry may declare: what one element must be, and the test."""
 
 
 def _level_at(where: str) -> dict[str, Any]:
@@ -728,12 +793,13 @@ class _Problems:
         sentences: list[str] = []
         if self.unknown:
             named = ", ".join(
-                f"{_join(path, key)}{_hint(key, _accepted(level), path)}"
-                for path, level, key in self.unknown
+                f"{_join(path, key)}{_hint(key, level, path)}" for path, level, key in self.unknown
             )
             config = f"the {self.command} config" if self.command else "the config"
             sentences.append(f"unknown key(s) in {config}: {named}.")
-            blocks = {path: level for path, level, _ in self.unknown}
+            # Once per block, not per entry: every entry of a list accepts
+            # the same keys.
+            blocks = {re.sub(r"\[\d+\]", "[]", path): level for path, level, _ in self.unknown}
             for path, level in blocks.items():
                 where = f"in {path}" if path else "at the top level"
                 sentences.append(f"Accepted {where}: {', '.join(_accepted(level))}.")
@@ -798,6 +864,17 @@ def _check_block(
             elif problems.applies(uses) and spec.get("default") is not None:
                 problems.nulls.append((where, spec))
             continue
+        if (
+            "keys" in spec
+            and not spec.get("required")
+            and isinstance(value, Mapping)
+            and all(_is_comment(name) for name in value)
+        ):
+            # An optional block with nothing in it, or nothing but comments,
+            # is a block left out: a file switches a block off by emptying
+            # it, without losing where it goes. A required block, or an entry
+            # of a list, is walked, and names the keys it lacks.
+            continue
         checked[key] = _check_value(value, spec, where, uses, problems)
     for key, spec in level.items():
         uses = spec.get("used_by", readers)
@@ -827,6 +904,16 @@ def _check_value(
                 continue
             entries.append(_check_block(entry, spec["items"], at, readers, problems))
         return entries
+    if "type" in spec:
+        # Without this a string where the list belongs was iterated a
+        # character at a time: shocks_bp "25" ran the shocks 2 and 5.
+        element, accepts = _LIST_TYPES[spec["type"]]
+        if not isinstance(value, (list, tuple)):
+            problems.shapes.append((where, f"a {spec['type']}", value))
+        else:
+            for index, item in enumerate(value):
+                if not accepts(item):
+                    problems.shapes.append((f"{where}[{index}]", element, item))
     return copy.deepcopy(value)
 
 
@@ -852,15 +939,23 @@ def _accepted(level: dict[str, Any]) -> list[str]:
     return sorted(key for key, spec in level.items() if "refused" not in spec)
 
 
-def _hint(key: Any, accepted: list[str], here: str) -> str:
+def _hint(key: Any, level: dict[str, Any], here: str) -> str:
     """The key probably meant, or the block the key belongs in.
 
-    The cutoff is 0.75 rather than difflib's 0.6: a transposition or a
-    dropped letter scores 0.75 or more (``rsik`` against ``risk`` is 0.75,
-    ``notionl`` against ``notional`` 0.93), while 0.6 also matched
-    ``strat`` to ``rate``, a guess that sends the caller the wrong way.
+    A key the block declares itself ``suggested_for`` comes first: ``rate``
+    in ``swap`` is the swap's ``fixed_rate``, not a par quote put in the
+    wrong block, though ``curve.par_swaps[]`` is where ``rate`` is accepted.
+
+    Then the closest spelling. The cutoff is 0.75 rather than difflib's 0.6:
+    a transposition or a dropped letter scores 0.75 or more (``rsik``
+    against ``risk`` is 0.75, ``notionl`` against ``notional`` 0.93), while
+    0.6 also matched ``strat`` to ``rate``, a guess that sends the caller the
+    wrong way.
     """
-    close = difflib.get_close_matches(str(key), accepted, n=1, cutoff=0.75)
+    for name, spec in sorted(level.items()):
+        if key in spec.get("suggested_for", ()):
+            return f" (did you mean {name}?)"
+    close = difflib.get_close_matches(str(key), _accepted(level), n=1, cutoff=0.75)
     if close:
         return f" (did you mean {close[0]}?)"
     homes = [home for home in _HOMES.get(str(key), []) if home != (here or "the top level")]
