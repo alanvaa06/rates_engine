@@ -18,8 +18,8 @@ arbitrage-free carry and how much is funding can read it off rather than
 recompute it.
 
 **From the spot date, not from the valuation date.** The quoted spot ``S``
-is the price for delivery on the spot date — two peso business days after
-the trade for USD/MXN, rolled to a day the Federal Reserve is open too
+is the price for delivery on the spot date — for USD/MXN, two business days
+after the trade on which both the Federal Reserve and BMV are open
 (:meth:`~rates_engine.conventions.currency_pair.CurrencyPair.spot_date`) —
 so parity carries each currency from *there* to delivery. Writing
 ``S * P_f(T) / P_d(T)`` instead, which this module did until the 2026-10-15
@@ -28,8 +28,8 @@ and the spot date: 76 to 78 pips too high on USD/MXN at every tenor from
 one week to a year, and 82 at three months when a Mexican holiday pushes
 the spot date to T+3. :func:`implied_basis` read that carry
 as basis, which on a one-week forward with no basis in it was -125 bp. The
-reference is QuantLib's ``FxSwapRateHelper`` with two fixing days, and the
-tests pin its numbers.
+reference is QuantLib's ``FxSwapRateHelper`` with two fixing days, on trade
+dates where its spot date is the peso rule's, and the tests pin its numbers.
 
 A delivery on or before the spot date is refused. On the spot date it is a
 spot trade; before it, it is a short date (overnight, tom-next) priced off
@@ -248,8 +248,8 @@ def _spot_date(pair: CurrencyPair, delivery: date, as_of: date) -> date:
     if delivery <= spot_date:
         raise ValueError(
             f"delivery {delivery} is not after the spot date {spot_date} ({pair.name} "
-            f"settles {pair.spot_lag_days} business days after the {as_of} valuation date "
-            f"on {' + '.join(c.name for c in pair.calendars)}). A delivery on the spot "
+            f"settles {pair.spot_lag_days} business days after the {as_of} valuation date, "
+            f"counted on {' + '.join(c.name for c in pair.lag_calendars)}). A delivery on the spot "
             "date is a spot trade, and one before it a short date priced off the spot "
             "by a swap this module does not model; price a delivery after the spot date."
         )
@@ -380,8 +380,7 @@ def forward_from_curves(
             "pair": pair.name,
             "spot": spot,
             "spot_date": spot_date.isoformat(),
-            "spot_lag_days": pair.spot_lag_days,
-            "settlement_calendars": [c.name for c in pair.calendars],
+            **pair.settlement_fields(),
             "delivery": delivery.isoformat(),
             "domestic_currency": domestic.currency.value,
             "foreign_currency": foreign.currency.value,
@@ -485,8 +484,7 @@ def implied_basis(
             "spot": spot,
             "market_forward": market_forward,
             "spot_date": spot_date.isoformat(),
-            "spot_lag_days": pair.spot_lag_days,
-            "settlement_calendars": [c.name for c in pair.calendars],
+            **pair.settlement_fields(),
             "delivery": delivery.isoformat(),
             "cip_forward": parity,
             "implied_basis_bp": basis_bp,

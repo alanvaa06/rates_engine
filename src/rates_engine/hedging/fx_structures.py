@@ -227,6 +227,47 @@ def _check_volatility(value: float) -> None:
         )
 
 
+def _reported(smile: object, name: str) -> float | None:
+    """What a smile says one of its inputs was, or ``None`` when it does not say.
+
+    An attribute or a method taking no arguments: a smile might expose its
+    forward either way, and reading a method as a number raised a bare
+    ``TypeError`` from inside the check.
+
+    Args:
+        smile: The volatility source.
+        name: The input to read: ``"forward"`` (quote per base), ``"spot"``
+            (quote per base), ``"expiry"`` (years) or ``"r_foreign"`` (a
+            decimal a year).
+
+    Returns:
+        The value as a float, in the units ``name`` names, or ``None``.
+
+    Raises:
+        ValueError: It is a method that needs arguments, or it is not a
+            number.
+    """
+    value = getattr(smile, name, None)
+    if callable(value):
+        try:
+            value = value()
+        except TypeError as exc:
+            raise ValueError(
+                f"the smile's {name} is a method that needs arguments, so it cannot be "
+                "checked against the legs. Expose it as a number, or as a method that "
+                "takes none."
+            ) from exc
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"the smile reports {name} = {value!r}, which is not a number, so it cannot "
+            "be checked against the legs."
+        ) from exc
+
+
 _UNVERIFIED_SMILE = Evidence(
     produced_by="hedging_structures.smile_check",
     warnings=(
@@ -300,17 +341,23 @@ class StructureQuote:
     def __post_init__(self) -> None:
         """Refuse a market no quote produces, and a smile on another forward.
 
-        A smile that reports its ``forward`` (and ``expiry``) has to match
-        this quote's, basis included: its at-the-money and delta pillars are
-        placed on its own forward, and a smile built without the basis read
-        every leg about one percent of strike away from the strike priced at
-        -100 bp. A smile that reports no forward cannot be checked, and its
-        readings carry a ``smile_forward_unverified`` degradation instead.
+        Whatever a smile reports of its ``forward``, ``expiry``, ``spot``
+        and ``r_foreign`` — as an attribute or as a method taking no
+        arguments — has to match this quote's, basis included: its
+        at-the-money and delta pillars are placed on its own forward, and a
+        smile built without the basis read every leg about one percent of
+        strike away from the strike priced at -100 bp. The spot and the
+        dollar rate are checked too, because a spot delta carries
+        ``exp(-r_f T)``: a smile on the same forward from another spot or
+        with both rates moved together places its delta pillars elsewhere. A
+        smile that reports no forward cannot be checked, and its readings
+        carry a ``smile_forward_unverified`` degradation instead.
 
         Raises:
             ValueError: A non-positive or non-finite spot, expiry or float
-                volatility, a normal :class:`Volatility`, or a smile on a
-                different forward or expiry.
+                volatility, a normal :class:`Volatility`, a smile on a
+                different forward, expiry, spot or dollar rate, or a smile
+                input that is a method needing arguments or not a number.
             VolUnitsError: A float volatility outside the FX band, or a
                 normal-units :class:`Volatility`.
             ImplausibleInputError: A rate or the basis outside its band.
@@ -338,20 +385,31 @@ class StructureQuote:
             _check_volatility(float(source))
 
     def _check_smile(self, smile: ReadableSmile) -> None:
-        forward = getattr(smile, "forward", None)
-        if forward is None:
-            return
-        expiry = getattr(smile, "expiry", None)
-        same_forward = math.isclose(float(forward), self.forward, rel_tol=1e-12)
-        same_expiry = expiry is None or math.isclose(float(expiry), self.expiry, rel_tol=1e-12)
-        if not (same_forward and same_expiry):
+        # Every input the smile reports is held to the legs'. The forward
+        # alone is not enough: a smile on the same forward from another
+        # spot, or with both rates moved together, places its spot-delta
+        # pillars elsewhere, because a spot delta carries exp(-r_f T).
+        legs = {
+            "forward": self.forward,
+            "expiry": self.expiry,
+            "spot": self.spot,
+            "r_foreign": self.r_foreign,
+        }
+        differ = []
+        for name, ours in legs.items():
+            theirs = _reported(smile, name)
+            if theirs is not None and not math.isclose(theirs, ours, rel_tol=1e-12, abs_tol=1e-15):
+                differ.append((name, theirs, ours))
+        if differ:
+            built = ", ".join(f"{name} {theirs!r}" for name, theirs, _ in differ)
+            struck = ", ".join(f"{name} {ours!r}" for name, _, ours in differ)
             raise ValueError(
-                f"the smile is built on a forward of {float(forward):.6f} (expiry "
-                f"{expiry!r}) and the legs on {self.forward:.6f} (expiry {self.expiry!r}), "
-                "so its at-the-money and delta pillars sit on another forward and every "
-                "leg would read a volatility from the wrong part of it. Build the smile "
-                "with the same spot and expiry and r_domestic = "
-                f"{self.r_domestic_effective!r}, the quote currency rate with the basis on it."
+                f"the smile is built on {built} and the legs on {struck}, so its "
+                "at-the-money and delta pillars sit somewhere else and every leg would "
+                "read a volatility from the wrong part of it. Build the smile with "
+                f"spot={self.spot!r}, expiry={self.expiry!r}, r_foreign={self.r_foreign!r} "
+                f"and r_domestic={self.r_domestic_effective!r}, the quote currency rate "
+                "with the basis on it."
             )
 
     @property
@@ -385,7 +443,7 @@ class StructureQuote:
         """
         collected = list(self.evidence)
         smile = self._smile
-        if smile is not None and getattr(smile, "forward", None) is None:
+        if smile is not None and _reported(smile, "forward") is None:
             collected.append(_UNVERIFIED_SMILE)
         if smile is not None:
             collected.extend(
@@ -486,7 +544,11 @@ class StructureResult(EngineResult):
             because every strike here is set off the forward, so mirror-image
             structures — a payable's call and a receivable's put at the same
             offset — keep the same share; a structure that sells a wing
-            inside the move reads lower on a wider ``grid_width``.
+            inside the move reads lower on a wider ``grid_width``. The move
+            is the favourable half of :attr:`spot_grid`, which is centred on
+            the forward, so the number can be read off the table: the
+            change in :attr:`payoff_grid` from the middle point to the
+            favourable end, over the change in spot.
         hedge_ratio: The fraction of the exposure covered *by a forward*.
             An option structure covers the whole exposure by a different
             mechanism, so this is ``None`` there rather than ``0.0`` —
@@ -495,7 +557,9 @@ class StructureResult(EngineResult):
         legs: ``(kind, strike, quantity)`` per option leg.
         forward_amount: Base currency sold or bought forward, signed.
         payoff_grid: Effective rate at each spot on the grid.
-        spot_grid: The spots it was evaluated at.
+        spot_grid: The spots at settlement it was evaluated at, in quote
+            currency per unit of base: ``grid_points`` evenly spaced from
+            ``(1 - grid_width)`` to ``(1 + grid_width)`` times the forward.
     """
 
     name: str
@@ -803,7 +867,8 @@ class StructureComparison(EngineResult):
     Attributes:
         exposure: What was hedged.
         structures: The rows, in the order they were built.
-        spot_grid: The spots every row was evaluated at.
+        spot_grid: The spots every row was evaluated at, centred on the
+            forward (see :attr:`StructureResult.spot_grid`).
         residual_variance: The variance decomposition for the forward row,
             or ``None`` when no correlation was supplied.
     """
@@ -852,10 +917,35 @@ class StructureComparison(EngineResult):
         }
 
 
-def _grid(spot: float, points: int, width: float) -> tuple[float, ...]:
-    lowest, highest = spot * (1.0 - width), spot * (1.0 + width)
+def _grid(centre: float, points: int, width: float) -> tuple[float, ...]:
+    """``points`` spots evenly spaced from ``(1 - width)`` to ``(1 + width)`` times ``centre``."""
+    lowest, highest = centre * (1.0 - width), centre * (1.0 + width)
     step = (highest - lowest) / (points - 1)
     return tuple(lowest + step * k for k in range(points))
+
+
+def _check_grid(points: int, width: float) -> None:
+    """Refuse a grid that measures no move, reaches a spot of zero, or has one end.
+
+    The width is also the size of the favourable move upside participation
+    is measured over, so it is an input to a reported number and not only
+    to the table's extent. Zero, or a negative width, made every row read
+    zero participation, the unhedged one included; a width of one or more
+    put the grid's low end at a spot of zero or below; one point divided by
+    zero building the grid.
+    """
+    if isinstance(points, bool) or not isinstance(points, int) or points < 2:
+        raise ValueError(
+            f"grid_points is a whole number of spots, two or more; got {points!r}. "
+            "The grid needs both of its ends, and an odd count puts the forward on it."
+        )
+    if not 0.0 < width < 1.0:
+        raise ValueError(
+            f"grid_width is the grid's half-width as a fraction of the forward, "
+            f"strictly between 0 and 1; got {width!r}. It is also the favourable move "
+            "upside participation is measured over: zero measures no move, and 1 or "
+            "more reaches a spot of zero or below. 0.20, the default, is twenty percent."
+        )
 
 
 def compare_structures(
@@ -884,9 +974,15 @@ def compare_structures(
             alongside it, with the sold strike solved rather than chosen.
         hedge_ratio: Fraction of the exposure the forward row covers, in
             ``[0, 1]``. AC-4.3.
-        grid_points: Points in the spot grid, odd so the forward-ish middle
-            is included.
-        grid_width: Half-width of the grid as a fraction of spot.
+        grid_points: Points in the spot grid, two or more; odd, as the
+            default 21 is, so that the forward is one of them.
+        grid_width: Half-width of the grid as a fraction of the forward,
+            strictly between 0 and 1. The grid is centred on the forward,
+            and the same width is the favourable move upside participation
+            is measured over, so the participation is the slope of the
+            grid's favourable half. It used to be centred on spot while
+            participation measured from the forward, and the two described
+            different moves.
         correlation: Correlation between the foreign asset return and the
             exchange rate, for the residual-variance decomposition. ``None``
             skips it rather than assuming zero.
@@ -898,12 +994,14 @@ def compare_structures(
 
     Raises:
         ValueError: ``hedge_ratio`` is outside ``[0, 1]``, an offset is not
-            positive, only one of the two variance inputs was given, the
-            correlation is outside ``[-1, 1]``, or the asset volatility is
-            negative or not finite.
+            positive, ``grid_points`` is not a whole number of at least two,
+            ``grid_width`` is not strictly between 0 and 1, only one of the
+            two variance inputs was given, the correlation is outside
+            ``[-1, 1]``, or the asset volatility is negative or not finite.
     """
     if not 0.0 <= hedge_ratio <= 1.0:
         raise ValueError(f"a hedge ratio is a fraction in [0, 1]; got {hedge_ratio!r}")
+    _check_grid(grid_points, grid_width)
     if otm_offset <= 0.0 or spread_offset <= otm_offset:
         raise ValueError(
             f"the spread's sold leg must sit further out than the protective one; "
@@ -925,8 +1023,11 @@ def compare_structures(
             f"{foreign_asset_volatility!r}"
         )
 
-    grid = _grid(quote.spot, grid_points, grid_width)
     outright = quote.forward
+    # Centred on the forward, which is where every strike is set and where
+    # participation measures from, so the favourable half of the grid is
+    # the move that number describes.
+    grid = _grid(outright, grid_points, grid_width)
     protective = exposure.direction.protective_kind
     away = 1.0 + otm_offset if protective is OptionKind.CALL else 1.0 - otm_offset
     far = 1.0 + spread_offset if protective is OptionKind.CALL else 1.0 - spread_offset
@@ -1080,6 +1181,7 @@ def compare_structures(
             "hedge_ratio": hedge_ratio,
             "grid_points": grid_points,
             "grid_width": grid_width,
+            "grid_centre": "forward",
             "residual_variance": decomposition,
             "trade_off": dict(TRADE_OFF_FRAME),
             **quote.to_dict(),

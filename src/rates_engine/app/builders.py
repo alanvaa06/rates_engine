@@ -276,9 +276,12 @@ def fx_inputs(config: dict[str, Any]) -> FXInputs:
     convention of :func:`flat_curve` and of Garman-Kohlhagen — and the
     result's evidence says so in one
     :class:`~rates_engine.core.evidence.Provenance` per rate.
-    ``spot`` is the price for delivery on the pair's spot date, two joint
-    business days after ``as_of``; the forward and the option structures
-    both run from there.
+    ``spot`` is the price for delivery on the pair's spot date: two business
+    days after ``as_of`` on which both the Federal Reserve and BMV are open,
+    because for the peso T+1 has to be a US business day too
+    (:meth:`~rates_engine.conventions.currency_pair.CurrencyPair.spot_date`).
+    The forward and the option structures both run from there, and the
+    forward's evidence names the calendars the lag was counted on.
 
     Args:
         config: The whole configuration mapping.
