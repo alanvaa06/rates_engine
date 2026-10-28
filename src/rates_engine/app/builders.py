@@ -12,7 +12,7 @@ import math
 from datetime import date, timedelta
 from typing import Any, NamedTuple
 
-from rates_engine.app.config import as_date, key_refusal
+from rates_engine.app.config import as_date, require_block
 from rates_engine.conventions.daycount import CURVE_TIME_BASIS, year_fraction
 from rates_engine.conventions.indices import SOFR, index_named
 from rates_engine.conventions.side import Side
@@ -48,8 +48,8 @@ def calibration_nodes(config: dict[str, Any], as_of: date) -> tuple[Any, ...]:
         OIS it describes.
 
     Raises:
-        ConfigurationError: A ``par_swaps`` entry uses the v0.3 shape or is
-            missing a required key.
+        ConfigurationError: A ``par_swaps`` entry fails its schema check:
+            the v0.3 shape, a required key missing, a key misspelt.
     """
     curve = config.get("curve") or {}
     instruments: list[Any] = []
@@ -121,6 +121,9 @@ def _futures_contract(entry: dict[str, Any], number: int) -> FuturesContract | N
 
 _LEGACY_PAR_SWAP_KEYS = ("start", "payment_dates", "year_fractions")
 _PAR_SWAP_REQUIRED = ("effective", "maturity", "rate")
+# Read by nothing: _par_swap_quote checks an entry against CONFIG_SCHEMA. The
+# two lines are deleted on top of the whole set (#21), because deleting them
+# here collides with the helper fix/futures-strip-hedge adds just above them.
 
 
 def _par_swap_quote(entry: dict[str, Any], number: int) -> SwapQuoteNode:
@@ -135,15 +138,12 @@ def _par_swap_quote(entry: dict[str, Any], number: int) -> SwapQuoteNode:
 
     Through a command the entry has already passed
     :func:`~rates_engine.app.config.require_config`, which refuses both
-    problems first. The check stays for a caller of :func:`calibration_nodes`
-    that went round it, in the same words.
+    problems first. A caller of :func:`calibration_nodes` that went round it
+    gets the same check of the entry against
+    :data:`~rates_engine.app.config.CONFIG_SCHEMA`, in the same words, rather
+    than a second list of the keys kept here.
     """
-    legacy = tuple(key for key in _LEGACY_PAR_SWAP_KEYS if key in entry)
-    missing = tuple(key for key in _PAR_SWAP_REQUIRED if key not in entry)
-    if legacy or missing:
-        raise ConfigurationError(
-            key_refusal(f"curve.par_swaps[{number}]", refused=legacy, missing=missing)
-        )
+    entry = require_block(entry, f"curve.par_swaps[{number}]")
     rate = float(entry["rate"])
     swap = OISSwap(
         effective=as_date(entry["effective"]),

@@ -228,6 +228,40 @@ class TestTheMessage:
         full["notional"] = full["swap"].pop("notional")
         assert "notional (it belongs under swap)" in _refusal("price", full)
 
+    @pytest.mark.parametrize(
+        ("block", "given", "meant"),
+        [
+            ("swap", "rate", "fixed_rate"),
+            ("swap", "start", "effective"),
+            ("swap", "end", "maturity"),
+            ("par_swap", "fixed_rate", "rate"),
+            ("par_swap", "end", "maturity"),
+        ],
+    )
+    def test_the_other_block_s_name_for_a_key_gets_this_block_s(self, block, given, meant, full):
+        # "belongs under" sent swap.rate to curve.par_swaps[] and swap.start
+        # to curve.futures[]: true of the name, wrong for the caller, who
+        # meant this swap's fixed_rate and effective (Alan's review of round
+        # 2, cleanup).
+        if block == "swap":
+            entry, where = full["swap"], "swap"
+        else:
+            entry, where = full["curve"]["par_swaps"][0], "curve.par_swaps[0]"
+        entry[given] = entry.pop(meant)
+        message = _refusal("price", full)
+        assert f"{where}.{given} (did you mean {meant}?)" in message
+        assert "belongs under" not in message
+
+    def test_what_a_list_accepts_is_said_once(self, full):
+        # It was said once per entry: three entries with the same typo read
+        # "Accepted in curve.futures[0]: ...", "[1]: ...", "[2]: ..." (Alan's
+        # review of round 2, cleanup).
+        for entry in full["curve"]["futures"][:3]:
+            entry["prise"] = entry["price"]
+        message = _refusal("bootstrap", full)
+        assert message.count("Accepted in") == 1
+        assert "Accepted in curve.futures[]: contract, end, label, price, start." in message
+
     def test_every_problem_is_listed_at_once(self, full):
         full["swap"]["fixed_rte"] = 0.09
         full["risk"]["key_tenor"] = [5.0]
@@ -276,7 +310,7 @@ class TestRefusedKeys:
         assert "did you mean start?" not in message
         # Nor a weak guess at an accepted key: strat is 0.67 from rate.
         assert "curve.par_swaps[0].strat." in message
-        accepted = message.split("Accepted in curve.par_swaps[0]: ")[1].split(".")[0]
+        accepted = message.split("Accepted in curve.par_swaps[]: ")[1].split(".")[0]
         for refused in ("start", "payment_dates", "year_fractions"):
             assert refused not in accepted.split(", ")
 
@@ -296,6 +330,18 @@ class TestRefusedKeys:
         ):
             assert sentence in str(direct.value)
             assert sentence in str(checked.value)
+
+    def test_the_builder_reads_the_schema_rather_than_a_list_of_its_own(self, as_of):
+        # It kept two tuples of par-swap keys beside CONFIG_SCHEMA, so it
+        # missed what they left out (Alan's review of round 2, cleanup): a
+        # misspelt key, or a null where a value is due.
+        entry = {"effective": "2026-01-15", "maturity": "2029-01-15", "rate": 0.041,
+                 "payment_lag_day": 0, "frequency_months": None}
+        with pytest.raises(ConfigurationError) as direct:
+            builders.calibration_nodes({"curve": {"par_swaps": [entry]}}, as_of)
+        message = str(direct.value)
+        assert "curve.par_swaps[0].payment_lag_day (did you mean payment_lag_days?)" in message
+        assert "curve.par_swaps[0].frequency_months is null" in message
 
 
 class TestNoFalsePositives:
@@ -394,6 +440,162 @@ class TestNullsAndShapes:
         change(full)
         assert said in _refusal("hedge", full)
 
+    def test_a_null_is_called_null(self, full):
+        # It was "not NoneType", Python's name for it rather than the file's
+        # (Alan's review of round 2, cleanup).
+        full["curve"]["futures"][3] = None
+        assert "curve.futures[3] must be a mapping of keys, not null" in _refusal("hedge", full)
+
+
+class TestAListIsAList:
+    """A string where a list belongs is refused, not read a character at a time.
+
+    On round 2 of #17 (f913dfc), through ``rateng --json`` on one desk file,
+    ``hedge.shocks_bp: "25"`` exited 0 with the shocks ``[2.0, 5.0]`` and
+    ``risk.key_tenors: "12"`` exited 0 with the key tenors ``[1.0, 2.0]``;
+    ``shocks_bp: 10``, ``key_tenors: 2.0`` and ``key_tenors: [null]``
+    reached a bare ``TypeError`` (Alan's review of round 2, point 1). The
+    schema checked blocks for their shape but not the leaves that hold a
+    list.
+    """
+
+    @pytest.mark.parametrize(
+        ("name", "block", "key", "value", "said"),
+        [
+            ("hedge", "hedge", "shocks_bp", "25", "hedge.shocks_bp must be a list of numbers, "
+             "not the string '25'"),
+            ("hedge", "hedge", "shocks_bp", 10, "hedge.shocks_bp must be a list of numbers, "
+             "not the number 10"),
+            ("price", "risk", "key_tenors", "12", "risk.key_tenors must be a list of numbers, "
+             "not the string '12'"),
+            ("price", "risk", "key_tenors", 2.0, "risk.key_tenors must be a list of numbers, "
+             "not the number 2.0"),
+            ("price", "risk", "key_tenors", [None], "risk.key_tenors[0] must be a finite "
+             "number, not null"),
+            ("price", "risk", "key_tenors", [1.0, "2"], "risk.key_tenors[1] must be a finite "
+             "number, not the string '2'"),
+            ("price", "risk", "key_tenors", [float("nan")], "risk.key_tenors[0] must be a "
+             "finite number, not the number nan"),
+            ("hedge", "hedge", "shocks_bp", [10, True], "hedge.shocks_bp[1] must be a finite "
+             "number, not true or false"),
+            ("hedge-structures", "hedge_program", "allowed_instruments", "collar",
+             "hedge_program.allowed_instruments must be a list of strings, not the string "
+             "'collar'"),
+        ],
+        ids=[
+            "shocks-string", "shocks-number", "tenors-string", "tenors-number", "tenors-null",
+            "tenors-numeral", "tenors-nan", "shocks-boolean", "instruments-string",
+        ],
+    )
+    def test_it_is_refused_by_path(self, name, block, key, value, said, full):
+        full[block][key] = value
+        assert said in _refusal(name, full)
+
+    def test_every_command_refuses_it(self, full):
+        # A shape, like a block's, is wrong in the file whichever command reads it.
+        full["hedge"]["shocks_bp"] = "25"
+        for name in CONFIG_COMMANDS:
+            assert "hedge.shocks_bp must be a list of numbers" in _refusal(name, full)
+
+    def test_every_list_in_the_full_config_says_what_it_holds(self, full):
+        # A list-valued key added without a type would be iterated letter by
+        # letter again; this names it first.
+        lists = {
+            path
+            for path, value in _leaves(full).items()
+            if isinstance(value, list) and "items" not in DOCUMENTED[path][0]
+        }
+        assert lists == {"risk.key_tenors", "hedge.shocks_bp", "hedge_program.allowed_instruments"}
+        for path in lists:
+            assert DOCUMENTED[path][0].get("type") in {"list of numbers", "list of strings"}, path
+
+
+class TestTheConvexityModelIsNamed:
+    """A convexity block names its model, or the sigma beside it prices nothing.
+
+    ``curve.convexity: {"sigma": 0.01}`` took the model ``none``, so ``rateng
+    price`` exited 0 with a PV of 114,866.89, the PV with no adjustment at
+    all; with ``model: ho_lee`` it is 92,199.33 (Alan's review of round 2,
+    point 2, reproduced on f913dfc). That is the PV the ``convexty`` typo
+    gave, reached with every key spelt right.
+    """
+
+    @pytest.mark.parametrize(
+        "block", [{"sigma": 0.01}, {"kappa": 0.03}, {"sigma": 0.01, "kappa": 0.03}],
+        ids=["sigma", "kappa", "both"],
+    )
+    @pytest.mark.parametrize("name", ["bootstrap", "price", "hedge"])
+    def test_a_block_without_a_model_is_refused(self, name, block, full):
+        full["curve"]["convexity"] = block
+        assert f"curve.convexity.model is missing, and {name} needs it" in _refusal(name, full)
+
+    def test_model_none_still_ignores_its_sigma(self, full):
+        # #15 lets "none" ignore the sigma it never uses, at Alan's request;
+        # naming the model is what this asks for, not dropping the sigma.
+        absent = copy.deepcopy(full)
+        del absent["curve"]["convexity"]
+        full["curve"]["convexity"] = {"model": "none", "sigma": 0.01}
+        none = commands.COMMANDS["price"](full)["measures"]["pv"]["value"]
+        assert none == commands.COMMANDS["price"](absent)["measures"]["pv"]["value"]
+
+
+class TestAnEmptyBlockIsLeftOut:
+    """An optional block with nothing in it, or nothing but comments, is no block.
+
+    Round 2 of #17 refused ``hedge_program: {}`` and ``curve.stub: {}`` for
+    the keys they lacked, and so a block holding only ``_disabled: true``;
+    round 1 had skipped them (Alan's review of round 2, point 3). Leaving a
+    block in place and empty is how a file switches it off without losing
+    where it goes.
+    """
+
+    @pytest.mark.parametrize("empty", [{}, {"_disabled": True}], ids=["empty", "comments"])
+    @pytest.mark.parametrize(
+        ("name", "path"),
+        [
+            ("hedge-structures", ("hedge_program",)),
+            ("bootstrap", ("curve", "stub")),
+            ("bootstrap", ("curve", "convexity")),
+            ("price", ("risk",)),
+            ("hedge", ("hedge",)),
+        ],
+        ids=["hedge_program", "curve.stub", "curve.convexity", "risk", "hedge"],
+    )
+    def test_it_is_checked_as_if_left_out(self, name, path, empty, full):
+        absent = copy.deepcopy(full)
+        *parents, last = path
+        given, left_out = full, absent
+        for part in parents:
+            given, left_out = given[part], left_out[part]
+        given[last] = empty
+        del left_out[last]
+        assert require_config(full, name) == require_config(absent, name)
+
+    @pytest.mark.parametrize("empty", [{}, {"_disabled": True}], ids=["empty", "comments"])
+    def test_an_empty_programme_audits_nothing(self, empty, full):
+        full["hedge_program"] = empty
+        assert "program_audit" not in commands.COMMANDS["hedge-structures"](full)
+
+    def test_a_comment_switches_nothing_off_in_a_block_with_keys(self, full):
+        # `_disabled` is a comment like any other: beside real keys, the
+        # block is read.
+        full["hedge_program"]["_disabled"] = True
+        assert "program_audit" in commands.COMMANDS["hedge-structures"](full)
+
+    def test_an_empty_required_block_still_names_its_keys(self, full):
+        full["swap"] = {"_note": "to be agreed"}
+        message = _refusal("price", full)
+        for key in ("effective", "maturity", "fixed_rate"):
+            assert f"swap.{key} is missing, and price needs it" in message
+
+    def test_an_empty_list_entry_is_still_refused(self, full):
+        # An entry is not a block: an empty one in a list is a quote left
+        # half-written, not a quote switched off.
+        full["curve"]["futures"][0] = {}
+        assert "curve.futures[0].start is missing, and bootstrap needs it" in _refusal(
+            "bootstrap", full
+        )
+
 
 class TestTheCheckedCopy:
     """What the handler reads is a clean copy, and the caller's mapping is untouched."""
@@ -450,13 +652,27 @@ def _given(value, prefix="") -> set[str]:
     return found
 
 
+def _leaves(value, prefix="") -> dict:
+    """Every documented path of a plain config with the value it holds; list entries at [0]."""
+    found: dict = {}
+    for key, child in value.items():
+        path = f"{prefix}{key}"
+        found[path] = child
+        if isinstance(child, dict):
+            found |= _leaves(child, f"{path}.")
+        elif isinstance(child, list) and child and isinstance(child[0], dict):
+            found |= _leaves(child[0], f"{path}[].")
+    return found
+
+
 class _Recorder(dict):
     """A test-only mapping that notes every key a handler looks up, by path.
 
     Paths use ``[]`` for a list entry. ``asked`` collects lookups of present
     and absent keys alike, ``read`` only the present ones; copying the block
     (``dict(block)``) reads all of it, as CPython copies a dict subclass that
-    overrides ``__iter__`` through ``__getitem__``.
+    overrides ``__iter__`` through ``__getitem__``, and so does walking its
+    ``items()`` or ``values()``.
     """
 
     def __init__(self, source, pattern, asked, read):
@@ -487,6 +703,16 @@ class _Recorder(dict):
     def __iter__(self):
         return dict.__iter__(self)
 
+    def items(self):
+        for key in dict.__iter__(self):
+            self._note(key)
+        return dict.items(self)
+
+    def values(self):
+        for key in dict.__iter__(self):
+            self._note(key)
+        return dict.values(self)
+
 
 def _recorded(value, pattern, asked, read):
     if isinstance(value, dict):
@@ -504,6 +730,28 @@ def _lookups(name: str, config: dict, monkeypatch) -> tuple[set[str], set[str]]:
     commands.COMMANDS[name](_recorded(copy.deepcopy(config), "", asked, read))
     monkeypatch.undo()
     return asked, read
+
+
+READ_ON_ANOTHER_BRANCH: dict[str, str] = {
+    "curve.futures[].contract": (
+        "#14 (fix/futures-strip-hedge): the builder hands it to FuturesNode, and the "
+        "hedge sizes the entry at that contract's tick"
+    ),
+    "hedge.require_full_coverage": (
+        "#14 (fix/futures-strip-hedge): the hedge passes it to strip_hedge, which "
+        "refuses a strip with a gap in the swap's span"
+    ),
+}
+"""Documented keys whose reader is in another PR of the set, by path.
+
+The schema documents them on this branch so that one file serves the whole
+set, and the declared merge order lands the reader first (#14 before #17).
+Until then nothing here reads them, and
+``test_every_documented_key_is_read_by_some_command`` would fail on this
+branch alone without this list. It holds keys, not a pattern, so it covers
+these two and nothing that comes after them; an entry is deleted once its
+reader is merged, which #21, built on every branch, does for both.
+"""
 
 
 class TestTheSchemaMatchesTheHandlers:
@@ -570,6 +818,26 @@ class TestTheSchemaMatchesTheHandlers:
             if spec.get("required") and name in (uses or ())
         }
         assert required - read == set()
+
+    def test_every_documented_key_is_read_by_some_command(self, full, monkeypatch):
+        # The schema is what makes a key pass, so a key documented here and
+        # read by no handler is the silent default this module exists to
+        # stop, with a description to make it look deliberate. Before this
+        # test only used_by paths and required keys were tied to a reader,
+        # and on this branch alone the two keys below were accepted and
+        # ignored with the suite green (Alan's review of round 2, point 5).
+        read: set[str] = set()
+        for name in CONFIG_COMMANDS:
+            read |= _lookups(name, full, monkeypatch)[1]
+        accepted = {path for path, (spec, _) in DOCUMENTED.items() if "refused" not in spec}
+        assert accepted - read - set(READ_ON_ANOTHER_BRANCH) == set()
+
+    def test_a_key_read_on_another_branch_is_documented(self):
+        # An entry below that the schema dropped would hide nothing, but it
+        # would no longer say anything true either.
+        for path, reader in READ_ON_ANOTHER_BRANCH.items():
+            assert path in DOCUMENTED, path
+            assert reader.startswith("#"), path
 
     def test_every_description_is_a_sentence(self):
         for path, (spec, _) in DOCUMENTED.items():

@@ -212,6 +212,19 @@ def describe(_config: dict[str, Any] | None) -> dict[str, Any]:
                 "path and the closest accepted key, before computing anything."
             ),
             "comments": "keys starting with '_' are ignored at any depth",
+            "nulls": (
+                "null is the same as leaving the key out where its default is null, "
+                "and missing where the key is required; anywhere else it is refused"
+            ),
+            "empty_blocks": (
+                "an optional block that is empty, or holds only comments, is the same "
+                "as leaving it out; a required block, or a list entry, still names the "
+                "keys it lacks"
+            ),
+            "lists": (
+                "a key whose type is 'list of numbers' or 'list of strings' takes a "
+                "JSON list of those values; a string or a number there is refused"
+            ),
             # A copy: the payload is the caller's to edit, the schema is what
             # every later config in the process is checked against.
             "keys": copy.deepcopy(CONFIG_SCHEMA),
