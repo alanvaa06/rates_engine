@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import replace
 from datetime import date, timedelta
 
+import numpy as np
 import pytest
 from conftest import AS_OF
 
@@ -248,16 +250,37 @@ class TestTheOptionExpiresAtTheFixing:
         with pytest.raises(ValueError, match="fixing_lag_days"):
             self._five_year("cap", lag=-1)
 
-    @pytest.mark.parametrize("lag", [1.5, 2.0, True, "2"])
+    @pytest.mark.parametrize("lag", [1.5, 2.0, True, "2", np.True_, np.float64(2.0)])
     def test_a_lag_that_is_not_a_whole_number_of_days_refuses_at_construction(self, lag):
         # 1.5 used to be accepted; add_business_days' countdown then never
         # reached zero, walked back for seconds and died on "year 0 is out
-        # of range". A bool is an int to Python and not a number of days.
+        # of range". A bool is an int to Python and not a number of days,
+        # and numpy's bool is not one either.
         with pytest.raises(ValueError, match="whole number"):
             self._five_year("cap", lag=lag)
         caplet = self._five_year("cap").caplets[0]
         with pytest.raises(ValueError, match="whole number"):
             replace(caplet, fixing_lag_days=lag)
+
+    @pytest.mark.parametrize("lag", [np.int64(2), np.int32(0), np.uint8(2)])
+    def test_a_numpy_integer_is_a_whole_number_of_days(self, option_curve_set, lag):
+        # df["lag"].iloc[0] is a numpy int64, not an int, and was refused as
+        # "must be a whole number". It is one: the strip prices as QuantLib
+        # does with that many fixing days, and its evidence still serialises.
+        # It is stored as an int: -np.uint8(2) is 254, which would have
+        # fixed each caplet 254 business days after its period started.
+        cap = self._five_year("cap", lag=lag)
+        assert type(cap.fixing_lag_days) is int
+        assert all(type(c.fixing_lag_days) is int for c in cap.caplets)
+        result = cap_floor_pv(cap, option_curve_set, Volatility.normal_bp(90.0))
+        assert result.value == pytest.approx(
+            QL_FIVE_YEAR[(int(lag), "cap", "normal")], rel=1e-13, abs=0.0
+        )
+        fields = json.loads(json.dumps(result.evidence.to_dict()))["fields"]
+        assert fields["fixing_lag_days"] == int(lag)
+        assert fields["instrument"]["fixing_lag_days"] == int(lag)
+        caplet = replace(self._five_year("cap").caplets[0], fixing_lag_days=lag)
+        assert caplet.fixing_date == replace(caplet, fixing_lag_days=int(lag)).fixing_date
 
 
 class TestStructure:
