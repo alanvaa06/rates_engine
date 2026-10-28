@@ -625,7 +625,8 @@ class _Recorder(dict):
     Paths use ``[]`` for a list entry. ``asked`` collects lookups of present
     and absent keys alike, ``read`` only the present ones; copying the block
     (``dict(block)``) reads all of it, as CPython copies a dict subclass that
-    overrides ``__iter__`` through ``__getitem__``.
+    overrides ``__iter__`` through ``__getitem__``, and so does walking its
+    ``items()`` or ``values()``.
     """
 
     def __init__(self, source, pattern, asked, read):
@@ -656,6 +657,16 @@ class _Recorder(dict):
     def __iter__(self):
         return dict.__iter__(self)
 
+    def items(self):
+        for key in dict.__iter__(self):
+            self._note(key)
+        return dict.items(self)
+
+    def values(self):
+        for key in dict.__iter__(self):
+            self._note(key)
+        return dict.values(self)
+
 
 def _recorded(value, pattern, asked, read):
     if isinstance(value, dict):
@@ -673,6 +684,28 @@ def _lookups(name: str, config: dict, monkeypatch) -> tuple[set[str], set[str]]:
     commands.COMMANDS[name](_recorded(copy.deepcopy(config), "", asked, read))
     monkeypatch.undo()
     return asked, read
+
+
+READ_ON_ANOTHER_BRANCH: dict[str, str] = {
+    "curve.futures[].contract": (
+        "#14 (fix/futures-strip-hedge): the builder hands it to FuturesNode, and the "
+        "hedge sizes the entry at that contract's tick"
+    ),
+    "hedge.require_full_coverage": (
+        "#14 (fix/futures-strip-hedge): the hedge passes it to strip_hedge, which "
+        "refuses a strip with a gap in the swap's span"
+    ),
+}
+"""Documented keys whose reader is in another PR of the set, by path.
+
+The schema documents them on this branch so that one file serves the whole
+set, and the declared merge order lands the reader first (#14 before #17).
+Until then nothing here reads them, and
+``test_every_documented_key_is_read_by_some_command`` would fail on this
+branch alone without this list. It holds keys, not a pattern, so it covers
+these two and nothing that comes after them; an entry is deleted once its
+reader is merged, which #21, built on every branch, does for both.
+"""
 
 
 class TestTheSchemaMatchesTheHandlers:
@@ -739,6 +772,26 @@ class TestTheSchemaMatchesTheHandlers:
             if spec.get("required") and name in (uses or ())
         }
         assert required - read == set()
+
+    def test_every_documented_key_is_read_by_some_command(self, full, monkeypatch):
+        # The schema is what makes a key pass, so a key documented here and
+        # read by no handler is the silent default this module exists to
+        # stop, with a description to make it look deliberate. Before this
+        # test only used_by paths and required keys were tied to a reader,
+        # and on this branch alone the two keys below were accepted and
+        # ignored with the suite green (Alan's review of round 2, point 5).
+        read: set[str] = set()
+        for name in CONFIG_COMMANDS:
+            read |= _lookups(name, full, monkeypatch)[1]
+        accepted = {path for path, (spec, _) in DOCUMENTED.items() if "refused" not in spec}
+        assert accepted - read - set(READ_ON_ANOTHER_BRANCH) == set()
+
+    def test_a_key_read_on_another_branch_is_documented(self):
+        # An entry below that the schema dropped would hide nothing, but it
+        # would no longer say anything true either.
+        for path, reader in READ_ON_ANOTHER_BRANCH.items():
+            assert path in DOCUMENTED, path
+            assert reader.startswith("#"), path
 
     def test_every_description_is_a_sentence(self):
         for path, (spec, _) in DOCUMENTED.items():

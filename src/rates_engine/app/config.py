@@ -18,7 +18,8 @@ another command reads, because one desk file serves every command.
 holds it, with a ``description`` that states its units; the schema's
 docstring lists the fields. Until the entry exists the key is refused as
 unknown, and ``tests/test_app_config.py`` fails for any key a handler looks
-up that the schema does not document.
+up that the schema does not document, and for any key the schema documents
+that no handler reads.
 """
 
 from __future__ import annotations
@@ -494,11 +495,11 @@ block -- the ``fixings`` a seasoned trade needs, say -- is one entry::
     },
 
 ``tests/test_app_config.py`` holds the schema to the handlers: every key a
-handler looks up must be documented, ``used_by`` must be exactly the
-commands that read the key, a required key must be read by every command
-that requires it, every list of plain values must have a ``type``, and
-leaving out or nulling any key must end in a refusal or a result, never a
-``KeyError`` or a ``TypeError``.
+handler looks up must be documented, every key documented must be read by
+some command, ``used_by`` must be exactly the commands that read the key, a
+required key must be read by every command that requires it, every list of
+plain values must have a ``type``, and leaving out or nulling any key must
+end in a refusal or a result, never a ``KeyError`` or a ``TypeError``.
 """
 
 
