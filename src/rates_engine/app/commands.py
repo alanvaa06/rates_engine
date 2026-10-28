@@ -21,10 +21,15 @@ from rates_engine.core.errors import ConfigurationError, UndefinedDurationError
 from rates_engine.core.errors import __all__ as EXCEPTION_NAMES
 from rates_engine.core.money import Currency
 from rates_engine.core.results import SCHEMA_VERSION
-from rates_engine.curves.bootstrap import bootstrap_discount_curve
+from rates_engine.curves.bootstrap import FuturesNode, bootstrap_discount_curve
 from rates_engine.curves.discount import CurveSet
 from rates_engine.curves.views import all_views
-from rates_engine.hedging.futures_strip import DEFAULT_SHOCKS_BP, SR3_DV01, shock_table, strip_hedge
+from rates_engine.hedging.futures_strip import (
+    DEFAULT_SHOCKS_BP,
+    _contract_sizing,
+    shock_table,
+    strip_hedge,
+)
 from rates_engine.hedging.fx_structures import (
     Exposure,
     ExposureDirection,
@@ -278,23 +283,76 @@ def hedge(config: dict[str, Any] | None) -> dict[str, Any]:
 
     Args:
         config: The whole configuration mapping. ``None`` is refused by name.
+            The optional ``hedge`` block takes ``shocks_bp`` (basis points),
+            ``contract_dv01`` (USD per basis point, for every contract;
+            left out, each futures entry is sized at its own contract's
+            tick, SR1 USD 41.67 or SR3 USD 25.00) and
+            ``require_full_coverage`` (``true`` by default; ``false`` sizes a
+            strip that leaves part of the swap uncovered).
 
     Returns:
         The ``HedgeResult`` payload with a ``shock_table`` block.
+
+    Raises:
+        ConfigurationError: ``hedge.require_full_coverage`` is not a boolean;
+            ``hedge.shocks_bp`` contains a zero shock; a
+            ``curve.futures[i].contract`` contradicts that entry's dates; or
+            ``hedge.contract_dv01`` contradicts an entry's contract. Each
+            message starts with the key at fault.
     """
     config = require_config(config, "hedge")
     as_of = as_date(config["as_of"])
     instruments = calibration_nodes(config, as_of)
     swap = ois_swap(config)
     settings = config.get("hedge") or {}
+    # No default tick here. Passing SR3's 25.00 whenever the block left it
+    # out sized every SR1 entry 1.67 times over; None lets each contract be
+    # sized at its own.
+    contract_dv01 = settings.get("contract_dv01")
+    # Checked rather than coerced: bool("false") is True, so coercing would
+    # enforce the check a config asked to waive.
+    require_full_coverage = settings.get("require_full_coverage", True)
+    if not isinstance(require_full_coverage, bool):
+        raise ConfigurationError(
+            f"hedge.require_full_coverage is {require_full_coverage!r}; it must be true or "
+            "false (true, the default, refuses a strip with a gap in the swap's span)"
+        )
+    # Checked here as well as in shock_table, and before the hedge is sized,
+    # so that the refusal names the key in the file that holds the zero.
+    shocks = tuple(float(s) for s in settings.get("shocks_bp", DEFAULT_SHOCKS_BP))
+    zeros = [index for index, shock in enumerate(shocks) if shock == 0.0]
+    if zeros:
+        raise ConfigurationError(
+            f"hedge.shocks_bp[{zeros[0]}] is 0. A zero shock moves nothing and its implied "
+            "money convexity, 2 x net / shock^2, is undefined; drop it from the grid"
+        )
+    # The contract checks strip_hedge makes, made here first and by the same
+    # function, entry by entry, for the same reason: the library knows a
+    # contract by its label, and the refusal should name the key in the file.
+    # The first pass leaves the tick out, so a contract that contradicts its
+    # own dates is told apart from a contract_dv01 that contradicts it.
+    tick = float(contract_dv01) if contract_dv01 is not None else None
+    futures = [node for node in instruments if isinstance(node, FuturesNode)]
+    for number, node in enumerate(futures):
+        try:
+            _contract_sizing(node, node.label, None)
+        except ConfigurationError as error:
+            raise ConfigurationError(f"curve.futures[{number}].contract: {error}") from error
+        if tick is None:
+            continue
+        try:
+            _contract_sizing(node, node.label, tick)
+        except ConfigurationError as error:
+            entry = f"curve.futures[{number}]" + (".contract" if node.contract else "")
+            raise ConfigurationError(f"hedge.contract_dv01 contradicts {entry}: {error}") from error
     result = strip_hedge(
         swap,
         instruments,
         as_of=as_of,
         long_end_source=(config.get("curve") or {}).get("long_end_source"),
-        contract_dv01=float(settings.get("contract_dv01", SR3_DV01)),
+        contract_dv01=float(contract_dv01) if contract_dv01 is not None else None,
+        require_full_coverage=require_full_coverage,
     )
-    shocks = tuple(float(s) for s in settings.get("shocks_bp", DEFAULT_SHOCKS_BP))
     table = shock_table(result, shocks)
     return result_payload(result, shock_table=table.to_dict(), command="hedge")
 

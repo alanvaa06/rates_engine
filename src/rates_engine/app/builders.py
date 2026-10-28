@@ -19,7 +19,7 @@ from rates_engine.conventions.side import Side
 from rates_engine.core.errors import ConfigurationError
 from rates_engine.core.evidence import DataQuality, Provenance
 from rates_engine.core.money import Currency
-from rates_engine.curves.bootstrap import FuturesNode, RealizedStubNode
+from rates_engine.curves.bootstrap import FuturesContract, FuturesNode, RealizedStubNode
 from rates_engine.curves.discount import DiscountCurve
 from rates_engine.instruments.swaps import OISSwap
 from rates_engine.models.convexity import ConvexityModel, convexity_adjustment
@@ -64,8 +64,9 @@ def calibration_nodes(config: dict[str, Any], as_of: date) -> tuple[Any, ...]:
     sigma = float(convexity.get("sigma", 0.0))
     kappa = convexity.get("kappa")
 
-    for entry in curve.get("futures", ()):
+    for number, entry in enumerate(curve.get("futures", ())):
         start, end = as_date(entry["start"]), as_date(entry["end"])
+        contract = _futures_contract(entry, number)
         adjustment = convexity_adjustment(
             year_fraction(as_of, start, CURVE_TIME_BASIS),
             year_fraction(as_of, end, CURVE_TIME_BASIS),
@@ -85,12 +86,36 @@ def calibration_nodes(config: dict[str, Any], as_of: date) -> tuple[Any, ...]:
                     "kappa": kappa,
                     "adjustment_bp": adjustment.adjustment_bp,
                 },
+                contract=contract,
             )
         )
 
     for number, entry in enumerate(curve.get("par_swaps", ())):
         instruments.append(_par_swap_quote(entry, number))
     return tuple(instruments)
+
+
+def _futures_contract(entry: dict[str, Any], number: int) -> FuturesContract | None:
+    """The optional ``contract`` of a ``curve.futures`` entry, checked by name.
+
+    One of :class:`~rates_engine.curves.bootstrap.FuturesContract`'s names,
+    exactly; left out, the hedge reads the contract off the period. It is
+    what sizes the hedge -- an SR1 is worth USD 41.67 a basis point and an
+    SR3 USD 25.00 -- so a misspelling is refused with the entry's path, which
+    the node's own refusal could not name, rather than sized as whichever
+    contract it falls back to.
+    """
+    value = entry.get("contract")
+    if value is None:
+        return None
+    names = [member.value for member in FuturesContract]
+    if value not in names:
+        raise ConfigurationError(
+            f"curve.futures[{number}].contract is {value!r}; it must be one of {names}, "
+            "or left out to read the contract from the period (a calendar month is SR1, "
+            "an IMM quarter SR3)"
+        )
+    return FuturesContract(value)
 
 
 _LEGACY_PAR_SWAP_KEYS = ("start", "payment_dates", "year_fractions")
