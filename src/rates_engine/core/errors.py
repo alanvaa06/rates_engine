@@ -145,11 +145,15 @@ class IncompatibleDependencyError(MissingDependencyError):
 
 
 class ConfigurationError(RatesEngineError):
-    """The configuration cannot be used as given.
+    """The configuration, or inputs that contradict each other, cannot be used as given.
 
-    It is absent, has a key a command reached that it neither reads nor
-    documents, or lacks a required key; or, under ``--json``, the command line
-    is one the parser rejects. The message names the path and what to write
+    The config is absent; a key anywhere in it is one the schema does not
+    document; a block, a list or a list's values have the wrong shape; or a
+    block the command reads lacks a required key, or holds a ``null`` where
+    the key's default is a value. Under ``--json``, a command line the parser
+    rejects is one too. The futures hedge raises it for inputs that
+    contradict each other, and ``load_program`` for a policy file it cannot
+    read. The message names the path or the input, and what to write
     instead.
     """
 

@@ -52,10 +52,15 @@ supported: 30/360, ACT/360, ACT/365F
 Also raised by `hull_white` without a `kappa`: the model has two parameters
 and there is no sensible default for the second.
 
-Also raised by `fred.fetch_series`, and by `load_series_csv` on a file in
-FRED's layout, when the series' units are not known to this package and
-`percent=` was not given: dividing by 100 on a guess is a hundredfold error
-that looks like data.
+Also raised by `fred.fetch_series` and the file provider when `percent=`
+was not given and the layout cannot say the units: a FRED series whose
+units this package does not know; a FRED column read under another
+series' name; FRED's older `DATE,<ID>` header, which a file of decimals
+carries just as often; or named columns holding a rate in any layout but
+FRED's `observation_date,<ID>` and this package's `date,value`. Dividing
+by 100 on a guess is a hundredfold error that looks like data, and at
+2020-22's rates no plausibility band can see it. Pass `percent=True` or
+`percent=False`.
 
 And for a swap on an overnight index not on ACT/360 once a period is in
 progress: its realised part is compounded by `MarketSnapshot.compounded`,
@@ -123,8 +128,13 @@ A trade that has started raises it when a fixing it needs was not passed.
 The rule is QuantLib's default: a fixing dated before the valuation date
 is required, one dated on it is read if supplied and forecast off the curve
 if not, and anything later is forecast. A forecast in place of a fixing
-dated `as_of` is reported, as the degradation
-`curve_forward_for_todays_fixing:<series>` (below), not raised.
+dated `as_of` is neither raised nor a degradation: it is the ordinary state
+of that fixing during the day, and the evidence records it
+(`fixings_dated_as_of` for swaps and FRAs; for a cap or floor, the
+period's `fixing_source` is `curve_forward_on_fixing_day`;
+`forecast_days_on_as_of` for the FOMC fit). A snapshot with no series named
+after the index is refused even for that fixing: it is a wrong snapshot,
+not a print still to come.
 
 - A swap or FRA needs the history of an overnight period up to the first
   day whose rate is not yet published (`as_of` on a business day, the next
@@ -135,19 +145,25 @@ dated `as_of` is reported, as the degradation
   or lacks the index's series (named after the index: `SOFR`,
   `TIIE_FONDEO`, `TERM_SOFR_3M`, `TIIE_28`) or a date it needs. The message
   names the trade, the period, the fixing date or window, the series and
-  the keyword.
+  the keyword. A snapshot without the index's series is refused even for a
+  term period fixing on `as_of`, which is otherwise forecast.
 - A cap or floor period whose rate fixed before the valuation date is
-  valued on its published fixing, so `cap_floor_pv`, `caplet_pv` and
-  `option_greeks` raise this when `fixings=` is absent or lacks that date.
-  They also raise it when the snapshot has no series named after the
-  index, even for a period fixing on the valuation date. The message names
-  the series (`TERM_SOFR_3M`) and the date. A NaN fixing never gets that
-  far: `Series` refuses it with `ValueError`.
+  valued on its published fixing, so `cap_floor_pv`, `cap_floor_periods`,
+  `caplet_pv` and `option_greeks` raise this when `fixings=` is absent or
+  lacks that date. They also raise it when `fixings=` is passed without a
+  series named after the index, or with it under another name, and a
+  period fixes on the valuation date, although that day's fixing alone may
+  be absent and is then forecast. A strip whose periods all fix after the
+  valuation date never reads `fixings=`, so a wrong snapshot passes there
+  unread. The message names the series (`TERM_SOFR_3M`) and the date. A NaN
+  fixing never gets that far: `Series` refuses it with `ValueError`.
 - `caplet_forward_rate` raises it for a period that began before the
   projection curve's date: its rate is a fixing, not a forward.
 - `fit_fomc_step_curve` raises it when a contract started before `as_of`
-  and its `fixings` snapshot is absent or lacks the `"SOFR"` series or a
-  business day of it.
+  and its `fixings` snapshot is absent or lacks a business day of it, or
+  when a contract prices a business day on or before `as_of` (`as_of`
+  itself included) and the snapshot has no `"SOFR"` series. A snapshot no
+  contract needs is not asked for the series.
 - The risk measures and `strip_hedge` raise it like `pv`, and take
   `fixings=` the same way. Under `rateng price` and `hedge` the message
   names the config key, `fixings.SOFR.values`.
@@ -215,8 +231,10 @@ a rate written in percent, such as 9.5 for 9.5%. `MAX_PLAUSIBLE_SIGMA`
 
 Also raised by the file and FRED providers when units were not stated and
 a series known to be a rate reads above `MAX_PLAUSIBLE_DECIMAL_RATE` (30%)
-as a decimal: the file is in percent. Pass `percent=True`, or
-`percent=False` to keep the values.
+as a decimal: in practice a percent file in this package's `date,value`
+layout. Pass `percent=True`, or `percent=False` to keep the values. Below
+0.30% the band cannot tell percent from decimals, which is why the other
+layouts refuse with `UnsupportedConventionError` instead.
 
 The error is also raised for a NaN, an infinite, or a too-large-to-price
 input (a finite quote whose residual overflows) before anything is solved:
@@ -255,30 +273,50 @@ renamed `FastMCP` to `MCPServer` and the import looked in the 1.x place.
 
 **Exit code 1. Recoverable: pass the config, or fix the key the message names.**
 
-Raised when a command that reads a configuration has none; when the file
-has a key, anywhere in it, that the schema `rateng describe --json`
-publishes under `config` does not document (the message names the path
-and the closest accepted key; keys starting with `_` are comments); or when
-a block the command reads has a required key missing, or a `null` where the
-key's default is a value (the message names the path). The whole file is
-checked before anything is computed. Under `--json` the CLI also raises it
-for a command line its
-parser rejects, exit code 1; without `--json` argparse prints its usage and
-exits 2. The MCP tools take the config as an optional argument, so a call
-with none is this rather than a `KeyError`. `describe` and
-`list-instruments` need no config and do not open one.
+Raised when a command that reads a configuration has none, or when the
+file cannot be used as given. The whole file is checked, whichever command
+reads it, before anything is computed, and one refusal lists every problem
+by path:
+
+- a key, anywhere in the file, that the schema `rateng describe --json`
+  publishes under `config` does not document. The message names the
+  closest accepted key, or, for a name another block uses, the key this
+  block takes for it (`swap.rate (did you mean fixed_rate?)`). Keys
+  starting with `_` are comments;
+- a key the schema refuses, with its migration: the v0.3 `par_swaps`
+  shape (`start`, `payment_dates`, `year_fractions`);
+- a block that is not a mapping, a list of entries that is not a list, or
+  a list of numbers or of strings holding anything else
+  (`hedge.shocks_bp: "25"`, `risk.key_tenors[0]: null`);
+- for the blocks the command reads, a required key missing
+  (`curve.convexity.model` included, whenever that block is given), or a
+  `null` where the key's default is a value.
+
+A `null` whose default is `null` means absent, and so does an optional
+block that is empty or holds only comments. `app.config.require_block`
+applies the same check to one block, and `calibration_nodes` runs it on
+each `par_swaps` entry for a caller that skips `require_config`.
+
+Under `--json` the CLI also raises it for a command line its parser
+rejects, exit code 1; without `--json` argparse prints its usage and exits
+2. The MCP tools take the config as an optional argument, so a call with
+none is this rather than a `KeyError`. `describe` and `list-instruments`
+need no config and do not open one.
 
 Also raised by the futures hedge, library and CLI alike, for inputs that
 contradict each other or cannot be told apart, each fixed by editing the
 input: a `FuturesNode.contract` (a CLI `curve.futures[n].contract`) that is
 not `"SR1"` or `"SR3"`; a declared contract its period contradicts (an
-SR1 on an IMM quarter, an SR3 on a calendar month); a `contract_dv01`
-(`hedge.contract_dv01`) that contradicts a contract the node declares or
-its period names -- 25.00 on a calendar month, which is an SR1 at 41.67;
-calibration instruments whose keys still collide after the node date is
-appended to repeated labels; a zero in `shock_table`'s `shocks_bp`
-(`hedge.shocks_bp[i]`); and a `hedge.require_full_coverage` that is not a
-JSON boolean.
+SR1 on an IMM quarter, an SR3 on a calendar month, or either on a period
+further than three days from its reference length: SR1 25 to 34 days, SR3
+81 to 101); a `contract_dv01` (`hedge.contract_dv01`) that contradicts a
+contract the node declares or its period names -- 25.00 on a calendar
+month, which is an SR1 at 41.67; calibration instruments whose keys still
+collide after the node date is appended to repeated labels; a zero in
+`shock_table`'s `shocks_bp` (`hedge.shocks_bp[i]`); and a
+`hedge.require_full_coverage` that is not a JSON boolean. Over the CLI each
+message starts with the key at fault: `curve.futures[i].contract: …` or
+`hedge.contract_dv01 contradicts curve.futures[i]: …`.
 
 A `fixings` rate of 1 or more (a percent written for a decimal) or a date
 given twice is refused by its path.
@@ -385,8 +423,10 @@ No instruments at all, or two instruments pinning the same node, which leaves
 some other node without a quote of its own. The message names the clashing
 labels or the nodes.
 
-`fit_fomc_step_curve` also raises it for a meeting on or before `as_of`, or
-a segment no contract prices a day of.
+`fit_fomc_step_curve` also raises it for a meeting on or before `as_of`, a
+segment no contract prices a day of, or segments the strip prices only in
+combinations it cannot separate (the contract-by-segment weight matrix is
+rank deficient); the message names those segments.
 
 ### `NoTenorQuoteSourceError`
 
@@ -414,8 +454,11 @@ cashflow on a dollar curve, or summing present values in different
 currencies. Exit code 2 rather than 1 because each input is fine on its own
 — it is the combination that has no meaning.
 
-Both halves of that are enforced. `pv` checks every flow against the
-discount curve, and `PriceResult.__add__` checks the two units, which is
+Both halves of that are enforced. `pv` and every linear measure check the
+instrument's currency before projecting it, so a seasoned trade in the
+wrong currency is refused as that and not for missing fixings, then every
+flow against the discount curve; `fra_fair_rate` checks the FRA's. And
+`PriceResult.__add__` checks the two units, which is
 why adding present values is spelled `a + b` rather than
 `a.value + b.value`: the obvious spelling is the one that refuses, and it
 carries both evidence chains into the total instead of dropping them.
@@ -451,8 +494,13 @@ a delta above its peak names no strike at all.
 **Exit code 2. Recoverable: supply the missing contract, or waive the check.**
 
 The futures strip has no contract covering part of the swap's span. The
-message names the gap. A missing contract is never extrapolated from its
-neighbours, because the hedge would then report as complete when it is not.
+message names the gap and what to pass instead: `swap_start=` or
+`swap_end=` for a shorter span, or `require_full_coverage=False`. A gap at
+either end made only of days the swap's roll calendar closes is not
+refused; the evidence lists it under `coverage_tolerated_gaps`. A gap
+between contracts always is. A missing contract is never extrapolated from
+its neighbours, because the hedge would then report as complete when it is
+not.
 
 Pass `require_full_coverage=False` when a partial hedge is what you want.
 From a CLI or MCP config, set `"require_full_coverage": false` in the
@@ -547,9 +595,8 @@ evidence chain:
 | `treasury_par_proxy` | The long end rests on Treasury par yields standing in for OIS par. The swap spread they carry is negative and variable, and the bias is known to exist and is not quantified. |
 | `outside_quoted_strikes` | A cube volatility at a strike outside the quoted strikes of its smile: SABR extrapolated beyond its data. The reading has `reliable=False` and is `assumed`. |
 | `outside_quoted_smile` | An FX smile volatility at a strike beyond the outermost quoted pillars, held flat at the nearest one; vanna-volga is not arbitrage free there. `assumed`. |
-| `curve_forward_for_todays_fixing:<series>` | A fixing dated the valuation date was not among the fixings passed, so the curve's forward stands in for it, as QuantLib does by default. Raised by the linear pricers, the cap and floor pricers and `fit_fomc_step_curve`, one per series. `proxy`. Pass the fixing to price on the print. |
-| `sr1_notional_assumed` | The hedge holds SR1 contracts, sized at 41.67 USD per basis point from a 5,000,000 USD notional that has not been read from the CME contract spec. `assumed`. |
-| `futures_contract_assumed` | A futures period is neither a calendar month (SR1) nor one IMM date to the next (SR3), so the contract is sized as SR3. Declare `FuturesNode.contract`, or pass `contract_dv01`. `assumed`. |
+| `sr1_notional_assumed` | A contract is sized at the SR1 tick, 41.67 USD per basis point, whoever gave it, from a 5,000,000 USD notional not read from the CME spec. `assumed`. |
+| `futures_contract_assumed` | A futures period is neither a calendar month (SR1) nor one IMM date to the next (SR3), so its contract is sized as SR3, or at the caller's `contract_dv01` unchecked. Declare `FuturesNode.contract` (`curve.futures[i].contract`); the message names the contract a rolled period's length suggests. `assumed`. |
 | `smile_forward_unverified` | The smile given to a hedge structure does not report the forward it was built on, so it could not be checked against the forward the legs are struck on, basis included. `assumed`. |
 | `nelson_siegel_tau_at_bound` | The fitted decay `tau` sits on a bound of `tau_bounds`: the range set it, not the data. Widen the bounds if the range was not a deliberate constraint. `assumed`. |
 | `term_rate_without_convexity` | A term rate read off a futures-fitted curve is the expected average overnight rate, with no convexity adjustment (`TERM_RATE_CAVEAT`). `assumed`. |
