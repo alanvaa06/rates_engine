@@ -408,6 +408,8 @@ def write_bmv_holidays() -> None:
     """The BMV calendar this package implements, dumped for human review."""
     path = HERE / "bmv_holidays.csv"
     rows = []
+    # Closures only: holidays(year) leaves out a fixed-date holiday on a
+    # weekend, which this calendar does not roll and which closes nothing.
     for year in range(2022, 2032):
         for day in sorted(BMV.holidays(year)):
             rows.append((year, day.isoformat(), WEEKDAY_NAMES[day.weekday()]))
@@ -430,7 +432,10 @@ def write_bmv_holidays() -> None:
             "because this environment cannot reach banxico.org.mx (403 at the "
             "egress proxy). Two lines to confirm first: whether Banxico observes "
             "Holy Thursday, and whether it applies any weekend-observance roll, "
-            "which this calendar does not."
+            "which this calendar does not. Only weekday closures are listed: a "
+            "fixed-date holiday on a Saturday or Sunday is not observed here and "
+            "closes nothing, so it is absent by design, not missing (until v0.4 "
+            "the file listed those dates too)."
         ),
     )
 
