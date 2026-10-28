@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from rates_engine.app.builders import calibration_nodes, flat_curve, fx_inputs, ois_swap
 from rates_engine.app.config import as_date, require_config
@@ -48,6 +48,10 @@ from rates_engine.risk.sensitivities import (
 )
 from rates_engine.volatility.fx_smile import ATMConvention
 from rates_engine.volatility.units import VolUnits
+
+if TYPE_CHECKING:
+    from rates_engine.app.builders import FXInputs
+    from rates_engine.pricing.fx_forward import FXForwardResult
 
 __all__ = [
     "COMMANDS",
@@ -299,6 +303,26 @@ def hedge(config: dict[str, Any] | None) -> dict[str, Any]:
     return result_payload(result, shock_table=table.to_dict(), command="hedge")
 
 
+def _usdmxn_forward(inputs: FXInputs) -> FXForwardResult:
+    """The one USD/MXN forward both FX commands report, from the ``fx`` block.
+
+    Parity from the spot date on two flat curves, with the block's basis and
+    the rates' convention in the evidence. Shared rather than written out in
+    each command: when hedge-structures built its own, it ignored
+    ``basis_bp`` and measured from ``as_of``, and its forward row sat 1,941
+    pips from fx-forward's at a year on -100 bp.
+    """
+    return forward_from_curves(
+        USDMXN,
+        inputs.spot,
+        inputs.delivery,
+        flat_curve(inputs.as_of, inputs.r_domestic, Currency.MXN, inputs.years),
+        flat_curve(inputs.as_of, inputs.r_foreign, Currency.USD, inputs.years),
+        basis_bp=inputs.basis_bp,
+        inputs=inputs.provenance,
+    )
+
+
 def fx_forward(config: dict[str, Any] | None) -> dict[str, Any]:
     """The USD/MXN forward, with the cross-currency basis kept separate.
 
@@ -307,26 +331,15 @@ def fx_forward(config: dict[str, Any] | None) -> dict[str, Any]:
 
     Returns:
         The ``FXForwardResult`` payload, the basis reported apart from the
-        covered-interest-parity forward.
+        covered-interest-parity forward, parity run from the spot date, and
+        the two rates' convention (continuous, ACT/365F) in the evidence.
     """
     config = require_config(config, "fx-forward")
-    as_of, block, years = fx_inputs(config)
-    delivery = as_date(block["delivery"])
-    domestic = flat_curve(as_of, float(block["r_domestic"]), Currency.MXN, years)
-    foreign = flat_curve(as_of, float(block["r_foreign"]), Currency.USD, years)
-    result = forward_from_curves(
-        USDMXN,
-        float(block["spot"]),
-        delivery,
-        domestic,
-        foreign,
-        basis_bp=float(block.get("basis_bp", 0.0)),
-    )
-    return result_payload(result, command="fx-forward")
+    return result_payload(_usdmxn_forward(fx_inputs(config)), command="fx-forward")
 
 
 def hedge_structures(config: dict[str, Any] | None) -> dict[str, Any]:
-    """Compare the seven hedge structures against a transaction exposure.
+    """Compare the eight hedge structures against a transaction exposure.
 
     Args:
         config: The whole configuration mapping. ``None`` is refused by name.
@@ -336,24 +349,36 @@ def hedge_structures(config: dict[str, Any] | None) -> dict[str, Any]:
         when the config carries a ``hedge_program``.
     """
     config = require_config(config, "hedge-structures")
-    as_of, block, years = fx_inputs(config)
+    inputs = fx_inputs(config)
     exposure_block = config.get("exposure") or {}
     if not exposure_block:
         raise ConfigurationError(
             "hedge-structures needs an `exposure` block with amount and direction "
             "('payable' or 'receivable')."
         )
+    if inputs.block.get("volatility") is None:
+        raise ConfigurationError(
+            "hedge-structures needs `fx.volatility`, the lognormal volatility as a "
+            "decimal (0.115 for 11.5%)."
+        )
+    # The forward fx-forward reports. Its evidence carries the peso curve's
+    # assumptions into every row, and its span is the structures' expiry:
+    # the premium is paid on the spot date, and an option delivering on the
+    # settlement date expires the spot lag before it.
+    forward = _usdmxn_forward(inputs)
     quote = StructureQuote(
-        spot=float(block["spot"]),
-        expiry=years,
-        r_domestic=float(block["r_domestic"]),
-        r_foreign=float(block["r_foreign"]),
-        volatility=float(block["volatility"]),
+        spot=inputs.spot,
+        expiry=forward.year_fraction,
+        r_domestic=inputs.r_domestic,
+        r_foreign=inputs.r_foreign,
+        volatility=float(inputs.block["volatility"]),
+        evidence=(forward.evidence,),
+        basis_bp=inputs.basis_bp,
     )
     exposure = Exposure(
         amount=float(exposure_block["amount"]),
         direction=ExposureDirection(str(exposure_block["direction"])),
-        settlement=as_date(block["delivery"]),
+        settlement=inputs.delivery,
         pair=USDMXN,
     )
     comparison = compare_structures(
