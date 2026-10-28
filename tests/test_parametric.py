@@ -837,6 +837,77 @@ def _sofr_snapshot(as_of: date, first: date, last: date, rate_for) -> MarketSnap
     return MarketSnapshot(as_of=as_of, series={"SOFR": series})
 
 
+class TestFOMCStepFitSeparatesEverySegment:
+    """Alan Vazquez's PR #15 round-3 review, point 1: touched is not identified.
+
+    ``as_of`` 2026-01-15, meetings 2026-01-29, 03-19, 04-30 and 06-18, and
+    five SR3 quarters from 2025-12-17 to 2027-03-17 priced off
+    365/340/315/290/265 bp, the first already running on fixings at 3.65%.
+    Five contracts for five segments, and every segment priced by a day
+    still to come, so the count and the touch checks both passed. But the
+    last two quarters see only the last segment, so the strip pins four
+    combinations of five rates, and the first three segments share the one
+    it lacks. ``least_squares`` picked a point on that line: the fit passed
+    ``strict`` with -561.6, 610.3 and 308.6 bp for them, and reported a move
+    of +1172.0 bp at the January meeting.
+    """
+
+    AS_OF = date(2026, 1, 15)
+    MEETINGS = (date(2026, 1, 29), date(2026, 3, 19), date(2026, 4, 30), date(2026, 6, 18))
+    PATH = (0.0365, 0.0340, 0.0315, 0.0290, 0.0265)
+    QUARTERS = (
+        ("SR3-Z5", date(2025, 12, 17), date(2026, 3, 18)),
+        ("SR3-H6", date(2026, 3, 18), date(2026, 6, 17)),
+        ("SR3-M6", date(2026, 6, 17), date(2026, 9, 16)),
+        ("SR3-U6", date(2026, 9, 16), date(2026, 12, 16)),
+        ("SR3-Z6", date(2026, 12, 16), date(2027, 3, 17)),
+    )
+
+    def _rate(self, day: date) -> float:
+        """The fixing before ``as_of`` is the first segment's rate, as in the review."""
+        if day < self.AS_OF:
+            return self.PATH[0]
+        return self.PATH[sum(1 for meeting in self.MEETINGS if day >= meeting)]
+
+    def _strip(self) -> tuple[tuple[str, date, date, str, float], ...]:
+        return tuple(
+            (label, start, end, "SR3", _cme_price("SR3", start, end, self._rate))
+            for label, start, end in self.QUARTERS
+        )
+
+    def _snapshot(self) -> MarketSnapshot:
+        return _sofr_snapshot(
+            self.AS_OF, date(2025, 12, 1), self.AS_OF - timedelta(days=1), self._rate
+        )
+
+    def test_a_strip_that_pins_fewer_combinations_than_segments_is_refused(self):
+        with pytest.raises(UnderdeterminedCurveError) as excinfo:
+            fit_fomc_step_curve(
+                self.AS_OF, self.MEETINGS, self._strip(), fixings=self._snapshot(), strict=False
+            )
+        message = str(excinfo.value)
+        assert "4 independent combinations of 5" in message
+        for tangled in (
+            "2026-01-15 to 2026-01-29",
+            "2026-01-29 to 2026-03-19",
+            "2026-03-19 to 2026-04-30",
+        ):
+            assert tangled in message
+        for separable in ("2026-04-30 to 2026-06-18", "2026-06-18 onwards"):
+            assert separable not in message
+
+    def test_a_month_inside_the_tangle_separates_it(self):
+        """SR1 February sits wholly in the second segment and pins it, and
+        with it the two either side: the fit then finds the path."""
+        start, end = date(2026, 2, 1), date(2026, 3, 1)
+        february = ("SR1-Feb26", start, end, "SR1", _cme_price("SR1", start, end, self._rate))
+        fit = fit_fomc_step_curve(
+            self.AS_OF, self.MEETINGS, (*self._strip(), february), fixings=self._snapshot()
+        )
+        assert fit.curve.segment_rates == pytest.approx(self.PATH, abs=1e-9)
+        assert fit.max_residual_bp < 1e-6
+
+
 class TestFOMCStepFitAsksForSofrOnlyWhenADayNeedsIt:
     """Alan Vazquez's PR #15 round-3 review, point 3: a snapshot is not a demand for SOFR.
 

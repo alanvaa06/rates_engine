@@ -754,12 +754,19 @@ def fit_fomc_step_curve(
     forecast lowers no quality: ``forecast_days_on_as_of`` in the evidence
     counts, per contract, the calendar days that rest on it.
 
-    **Every segment must price a day still to come.** A meeting on or before
-    ``as_of`` is refused: the rate it set is in the fixings, and the segment
-    before it covers only days already fixed, so nothing pins it --
+    **Every segment must be pinned, and pinned on its own.** A meeting on or
+    before ``as_of`` is refused: the rate it set is in the fixings, and the
+    segment before it covers only days already fixed, so nothing pins it --
     ``least_squares`` returned it at its starting point and reported a move
     for a meeting already held. The same holds for a segment the strip never
-    reaches, after a meeting beyond the last contract.
+    reaches, after a meeting beyond the last contract. Touching every
+    segment is not enough either: the strip has to determine each rate, not
+    only some combinations of them. Two quarters that both sit in the last
+    segment pin one thing, not two, and five contracts can then leave the
+    first three segments free to trade off against each other with every
+    price unchanged; the fit found a point on that line and passed
+    ``strict`` with a move of +1172 bp. The strip's contract-by-segment
+    weights, from its days still to come, must have full column rank.
 
     Args:
         as_of: Valuation date, where the first segment starts.
@@ -784,8 +791,9 @@ def fit_fomc_step_curve(
 
     Raises:
         UnderdeterminedCurveError: Fewer contracts than segments, a meeting
-            on or before ``as_of``, or a segment no contract prices a day of,
-            so some segment is pinned by nothing.
+            on or before ``as_of``, a segment no contract prices a day of, or
+            segments the strip prices only in combinations it cannot
+            separate -- named in the message.
         UnsupportedConventionError: A contract is neither SR1 nor SR3.
         ImplausibleInputError: A price or a fixing is NaN or infinite.
         MissingFixingError: A contract covers a business day before ``as_of``
@@ -847,7 +855,7 @@ def fit_fomc_step_curve(
             f"{{{SOFR.name!r}: Series(...)}}); the path starts at as_of and does not know "
             "what the overnight rate did before it."
         )
-    _require_every_segment_priced(as_of, meeting_dates, priced)
+    _require_every_segment_identified(as_of, meeting_dates, priced)
 
     targets = np.array([(100.0 - price) / 100.0 for *_, price in contracts])
     start = float(targets[0])
@@ -961,15 +969,44 @@ def _sofr_series(
     return None
 
 
-def _require_every_segment_priced(
-    as_of: date, meeting_dates: tuple[date, ...], priced: Sequence[_PricedContract]
+_NULL_SHARE = 1e-9
+"""How much a direction the strip cannot see must move a segment to name it.
+
+Directions of unit length; rounding leaves components around 1e-16 on the
+segments a direction does not involve, and a real share is a ratio of day
+counts. A segment moved less than this by every such direction is pinned
+for any purpose a price quoted to a hundredth of a basis point can serve.
+"""
+
+
+def _require_every_segment_identified(
+    as_of: date,
+    meeting_dates: tuple[date, ...],
+    priced: Sequence[_PricedContract],
 ) -> None:
-    """Refuse a path with a segment that no contract prices a day of.
+    """Refuse a path whose free segments the strip does not determine one by one.
 
     Counting contracts is not enough: one whose period is wholly fixed pins
     nothing, and a meeting beyond the strip's last day leaves the segment
     after it untouched. ``least_squares`` returns such a segment at its
-    starting value, with nothing in the fit to say so.
+    starting value, with nothing in the fit to say so. Touching every
+    segment is not enough either. The strip pins each rate only if its
+    contract-by-segment weights -- the calendar days each contract prices
+    from each segment, its fixed days left out -- have full column rank;
+    otherwise some move of several rates together leaves every price where
+    it was, and the solver returns an arbitrary point on that line.
+
+    The weights are SR1's exactly and SR3's to first order: compounding
+    scales each day's weight by a factor within a few parts in ten thousand
+    of one, which moves no rank but a coincidence's. They are whole numbers
+    of days, so a dependence among the columns is exact and leaves a singular
+    value at rounding level. ``numpy.linalg.matrix_rank``'s default threshold
+    is the largest singular value times the larger dimension times machine
+    epsilon -- 1e-15 to 2e-15 of the largest for these strips -- and it sits
+    far from both sides. The review's dependent strip has its smallest
+    singular value at 1e-20 of the largest. The least well separated strip
+    in the tests, where one day of one quarter tells a segment apart, keeps
+    3.4e-3, and a full year of SR1 and SR3 against eight meetings keeps 0.21.
     """
     live = [p for p in priced if p.priced_by_path]
     segments = len(meeting_dates) + 1
@@ -979,17 +1016,36 @@ def _require_every_segment_priced(
             "segments; the others are wholly fixed and pin nothing. Extend the strip or "
             "drop the meetings it does not reach."
         )
-    touched = {bisect_right(meeting_dates, day) for p in live for day in p.priced_by_path}
     bounds = (as_of, *meeting_dates)
-    idle = [
+    names = [
         f"{bounds[i].isoformat()} onwards"
         if i == segments - 1
         else f"{bounds[i].isoformat()} to {bounds[i + 1].isoformat()}"
         for i in range(segments)
-        if i not in touched
     ]
+    weights = np.zeros((len(live), segments))
+    for row, contract in enumerate(live):
+        for day, count in contract.terms:
+            if day not in contract.fixed:
+                weights[row, bisect_right(meeting_dates, day)] += count
+    idle = [names[j] for j in range(segments) if not weights[:, j].any()]
     if idle:
         raise UnderdeterminedCurveError(
             f"no contract prices a day in the segments {idle}, so nothing pins their rate. "
             "Drop the meetings the strip does not reach, or add a contract that covers them."
+        )
+    rank = int(np.linalg.matrix_rank(weights))
+    if rank < segments:
+        _, _, directions = np.linalg.svd(weights)
+        unseen = directions[rank:]
+        tangled = [
+            names[j] for j in range(segments) if float(np.abs(unseen[:, j]).max()) > _NULL_SHARE
+        ]
+        raise UnderdeterminedCurveError(
+            f"the strip pins {rank} independent combinations of {segments} segment rates, not "
+            f"each one: the segments {tangled} cannot be told apart, since some move of their "
+            "rates together leaves every contract's price where it is. Contracts that price "
+            "the same segments in the same proportions count once. Add a contract that "
+            "prices one of them on its own -- an SR1 for a month between two meetings -- or "
+            "drop a meeting."
         )
