@@ -34,8 +34,10 @@ v1.1. Neither is ever served as effective duration under another name.
 fixings ``pv`` takes, and passes them to each reprice: the history of a
 coupon already decided does not move with the curve, only its forecast and
 its discounting do. Their record, and any forecast standing in for a fixing
-dated ``as_of``, is chained into the result's evidence once, from the base
-curve, by :func:`~rates_engine.pricing.linear.history_evidence`.
+dated ``as_of``, is chained into the result's evidence once. It is the same
+on every moved curve, so it is taken from the first reprice the measure
+makes anyway (:func:`~rates_engine.risk.bumps.repriced_with_history`), not
+from a projection of its own.
 """
 
 from __future__ import annotations
@@ -53,12 +55,17 @@ from rates_engine.market.snapshot import MarketSnapshot
 from rates_engine.pricing.collateral import valuation_warnings
 from rates_engine.pricing.linear import (
     PriceResult,
-    discounted_value,
-    history_evidence,
+    discounted_value_with_history,
     valuation_evidence,
 )
 from rates_engine.pricing.projection import Priceable
-from rates_engine.risk.bumps import BUMP_BP, repriced, shift_from_bp, tent_shift
+from rates_engine.risk.bumps import (
+    BUMP_BP,
+    repriced,
+    repriced_with_history,
+    shift_from_bp,
+    tent_shift,
+)
 
 __all__ = [
     "RiskResult",
@@ -179,13 +186,9 @@ def _normalise_tenors(curve_set: CurveSet, key_tenors: tuple[float | date, ...])
 
 
 def _with_history(
-    instrument: Priceable,
-    curve_set: CurveSet,
-    fixings: MarketSnapshot | None,
-    source_evidence: tuple[Evidence, ...],
+    source_evidence: tuple[Evidence, ...], history: Evidence | None
 ) -> tuple[Evidence, ...]:
-    """``source_evidence`` and, when the trade has a decided coupon, what it rests on."""
-    history = history_evidence(instrument, curve_set, fixings=fixings)
+    """``source_evidence`` and, when the trade has a decided coupon, the record of it."""
     return source_evidence if history is None else (*source_evidence, history)
 
 
@@ -222,8 +225,7 @@ def dv01(
             ``fixings`` does not cover it.
     """
     shift = shift_from_bp(bump_bp)
-    sources = _with_history(instrument, curve_set, fixings, source_evidence)
-    up = repriced(instrument, curve_set, shift, fixings=fixings)
+    up, history = repriced_with_history(instrument, curve_set, shift, fixings=fixings)
     down = repriced(instrument, curve_set, -shift, fixings=fixings)
     value = (down - up) / 2.0 / bump_bp
     return PriceResult(
@@ -237,7 +239,7 @@ def dv01(
                 "bump_shape": "parallel",
                 "difference": "central",
             },
-            sources,
+            _with_history(source_evidence, history),
         ),
         value=value,
         measure="dv01",
@@ -276,10 +278,14 @@ def key_rate_dv01(
     """
     shift = shift_from_bp(bump_bp)
     years = _normalise_tenors(curve_set, key_tenors)
-    sources = _with_history(instrument, curve_set, fixings, source_evidence)
     values: dict[float, float] = {}
+    history: Evidence | None = None
     for index, tenor in enumerate(years):
-        up = repriced(instrument, curve_set, tent_shift(index, years, shift), fixings=fixings)
+        up_shift = tent_shift(index, years, shift)
+        if index == 0:
+            up, history = repriced_with_history(instrument, curve_set, up_shift, fixings=fixings)
+        else:
+            up = repriced(instrument, curve_set, up_shift, fixings=fixings)
         down = repriced(instrument, curve_set, tent_shift(index, years, -shift), fixings=fixings)
         values[tenor] = (down - up) / 2.0 / bump_bp
 
@@ -299,7 +305,7 @@ def key_rate_dv01(
             "interpolation_caveat": INTERPOLATION_CAVEAT,
             "partition_of_unity": True,
         },
-        sources=sources,
+        sources=_with_history(source_evidence, history),
         warnings=valuation_warnings(instrument, curve_set),
     )
     return KeyRateResult(
@@ -318,9 +324,9 @@ def _require_normalisable(
     curve_set: CurveSet,
     measure: str,
     fixings: MarketSnapshot | None = None,
-) -> float:
-    """Return the price, or refuse because normalising by it is undefined."""
-    price = discounted_value(instrument, curve_set, fixings=fixings)
+) -> tuple[float, Evidence | None]:
+    """Return the price and the record of its history, or refuse: normalising by it is undefined."""
+    price, history = discounted_value_with_history(instrument, curve_set, fixings=fixings)
     notional = float(getattr(instrument, "notional", 1.0)) or 1.0
     if abs(price) <= ZERO_PRICE_TOLERANCE * abs(notional):
         raise UndefinedDurationError(
@@ -329,7 +335,7 @@ def _require_normalisable(
             f"{notional:,.0f}). A par swap has no duration in that sense. The defined "
             "measures here are dv01, key_rate_dv01 and money_convexity."
         )
-    return price
+    return price, history
 
 
 def key_rate_duration(
@@ -366,7 +372,7 @@ def key_rate_duration(
             does. Use :func:`key_rate_dv01` there.
         KeyTenorOutOfRangeError: A key tenor falls outside the curve's span.
     """
-    price = _require_normalisable(instrument, curve_set, "key_rate_duration", fixings)
+    price, _ = _require_normalisable(instrument, curve_set, "key_rate_duration", fixings)
     raw = key_rate_dv01(
         instrument,
         curve_set,
@@ -515,8 +521,7 @@ def money_convexity(
             ``fixings`` does not cover it.
     """
     shift = shift_from_bp(bump_bp)
-    sources = _with_history(instrument, curve_set, fixings, source_evidence)
-    base = discounted_value(instrument, curve_set, fixings=fixings)
+    base, history = discounted_value_with_history(instrument, curve_set, fixings=fixings)
     up = repriced(instrument, curve_set, shift, fixings=fixings)
     down = repriced(instrument, curve_set, -shift, fixings=fixings)
     value = (up + down - 2.0 * base) / (shift * shift)
@@ -531,7 +536,7 @@ def money_convexity(
                 "base_pv": base,
                 "defined_at_zero_price": True,
             },
-            sources=sources,
+            sources=_with_history(source_evidence, history),
             warnings=valuation_warnings(instrument, curve_set),
         ),
         value=value,
@@ -572,8 +577,7 @@ def effective_duration(
         ValueError: ``bump_bp`` is not positive.
     """
     shift = shift_from_bp(bump_bp)
-    price = _require_normalisable(instrument, curve_set, "effective_duration", fixings)
-    sources = _with_history(instrument, curve_set, fixings, source_evidence)
+    price, history = _require_normalisable(instrument, curve_set, "effective_duration", fixings)
     up = repriced(instrument, curve_set, shift, fixings=fixings)
     down = repriced(instrument, curve_set, -shift, fixings=fixings)
     value = (down - up) / (2.0 * price * shift)
@@ -592,7 +596,7 @@ def effective_duration(
                     "yield to maturity. Not modified duration."
                 ),
             },
-            sources=sources,
+            sources=_with_history(source_evidence, history),
             warnings=valuation_warnings(instrument, curve_set),
         ),
         value=value,
@@ -628,7 +632,7 @@ def effective_convexity(
             :func:`money_convexity` there.
         ValueError: ``bump_bp`` is not positive.
     """
-    price = _require_normalisable(instrument, curve_set, "effective_convexity", fixings)
+    price, _ = _require_normalisable(instrument, curve_set, "effective_convexity", fixings)
     money = money_convexity(
         instrument, curve_set, bump_bp=bump_bp, source_evidence=source_evidence, fixings=fixings
     )

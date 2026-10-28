@@ -57,7 +57,7 @@ from rates_engine.instruments.futures import (
     SOFRFuture1M,
 )
 from rates_engine.market.snapshot import MarketSnapshot
-from rates_engine.pricing.linear import discounted_value, history_evidence
+from rates_engine.pricing.linear import discounted_value
 from rates_engine.pricing.projection import Priceable
 from rates_engine.risk.bumps import shifted as shift_curves
 from rates_engine.risk.sensitivities import dv01
@@ -324,7 +324,11 @@ def strip_hedge(
     # is what a contract passed twice is, under its own name.
     base = bootstrap_discount_curve(as_of, instruments, long_end_source=long_end_source)
     curve_set = CurveSet(base.curve)
-    swap_dv01 = dv01(swap, curve_set, source_evidence=(base.evidence,), fixings=fixings).value
+    # The DV01's evidence chains the curve's and, for a swap that has started,
+    # the record of its history; the hedge's evidence chains the same pair
+    # rather than projecting the swap again to record it.
+    swap_risk = dv01(swap, curve_set, source_evidence=(base.evidence,), fixings=fixings)
+    swap_dv01 = swap_risk.value
 
     # Every dict below is keyed per contract, not per label. Two futures with
     # the same label -- the default "future", or "SR3" on every row of a CLI
@@ -399,7 +403,7 @@ def strip_hedge(
                 "at 4%, and answer different questions; see rates_engine.key_rate_dv01."
             ),
         },
-        sources=_with_history(swap, curve_set, fixings, (base.evidence,)),
+        sources=swap_risk.evidence.sources,
         warnings=_sizing_warnings(futures, keys, sizing, contract_dv01),
     )
     return HedgeResult(
@@ -419,17 +423,6 @@ def strip_hedge(
         total_contracts_by_contract=total_by_contract,
         fixings=fixings,
     )
-
-
-def _with_history(
-    swap: Priceable,
-    curve_set: CurveSet,
-    fixings: MarketSnapshot | None,
-    sources: tuple[Evidence, ...],
-) -> tuple[Evidence, ...]:
-    """``sources`` and, for a swap with a decided coupon, what that coupon rests on."""
-    history = history_evidence(swap, curve_set, fixings=fixings)
-    return sources if history is None else (*sources, history)
 
 
 def _quote_parallel_dv01(

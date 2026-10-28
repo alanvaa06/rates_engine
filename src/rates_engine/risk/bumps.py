@@ -16,6 +16,9 @@ is the constant ``1e-4``; a key-rate shock is a tent (:func:`tent_weights`).
 partly decided by published fixings; :func:`repriced` hands them to the
 pricer, so a bump moves the forecast and the discounting and leaves the
 history where it is. Without them such a trade is refused, as by ``pv``.
+Because the history is the same on every moved curve, a measure records it
+from one of the reprices it makes anyway, :func:`repriced_with_history`,
+rather than projecting the trade once more for it.
 
 **Central differences.** ``(PV(y - h) - PV(y + h)) / 2``, not a one-sided
 bump. The symmetric form cancels the second-order term exactly, which is what
@@ -29,12 +32,22 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from rates_engine.core.evidence import Evidence
 from rates_engine.curves.discount import CurveSet
 from rates_engine.market.snapshot import MarketSnapshot
-from rates_engine.pricing.linear import discounted_value
+from rates_engine.pricing.linear import discounted_value, discounted_value_with_history
 from rates_engine.pricing.projection import Priceable
 
-__all__ = ["BUMP_BP", "Shift", "shift_from_bp", "tent_weights", "tent_shift", "shifted", "repriced"]
+__all__ = [
+    "BUMP_BP",
+    "Shift",
+    "shift_from_bp",
+    "tent_weights",
+    "tent_shift",
+    "shifted",
+    "repriced",
+    "repriced_with_history",
+]
 
 BUMP_BP = 1.0
 """Default bump size in basis points for every risk measure."""
@@ -160,3 +173,33 @@ def repriced(
             ``fixings`` does not cover it.
     """
     return discounted_value(instrument, shifted(curve_set, shift), fixings=fixings)
+
+
+def repriced_with_history(
+    instrument: Priceable,
+    curve_set: CurveSet,
+    shift: Shift,
+    *,
+    fixings: MarketSnapshot | None = None,
+) -> tuple[float, Evidence | None]:
+    """:func:`repriced`, and the record of the history that reprice read.
+
+    The record is the same on every moved curve, so a measure asks for it
+    on the first of its reprices and chains it into its evidence once.
+
+    Args:
+        instrument: Anything with cashflows.
+        curve_set: The unshifted curves.
+        shift: A constant decimal shift or a function of time in years.
+        fixings: Published fixings, as for :func:`repriced`.
+
+    Returns:
+        The present value on the shifted curves, and the record of what its
+        floating coupons rest on, or ``None``; see
+        :func:`~rates_engine.pricing.linear.discounted_value_with_history`.
+
+    Raises:
+        MissingFixingError: A floating coupon is already decided and
+            ``fixings`` does not cover it.
+    """
+    return discounted_value_with_history(instrument, shifted(curve_set, shift), fixings=fixings)

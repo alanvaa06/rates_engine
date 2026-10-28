@@ -43,7 +43,6 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
-from rates_engine.conventions.indices import RateIndex
 from rates_engine.conventions.side import Side
 from rates_engine.core.errors import CurrencyMismatchError
 from rates_engine.core.evidence import Evidence, Provenance
@@ -64,7 +63,6 @@ from rates_engine.pricing.projection import (
     Swappable,
     float_leg,
     is_paid,
-    may_have_history,
     project,
 )
 
@@ -76,7 +74,7 @@ __all__ = [
     "annuity_value",
     "par_rate_value",
     "valuation_evidence",
-    "history_evidence",
+    "discounted_value_with_history",
     "par_rate",
     "annuity",
     "price_on_parametric",
@@ -306,45 +304,11 @@ def _history_used(
     return fields, tuple(inputs)
 
 
-def history_evidence(
-    instrument: Priceable,
-    curve_set: CurveSet,
-    *,
-    fixings: MarketSnapshot | None = None,
+def _history_record(
+    instrument: Priceable, flows: Iterable[Cashflow], as_of: date
 ) -> Evidence | None:
-    """What an instrument's decided floating coupons rest on, for a measure that reprices it.
-
-    A risk measure reprices on moved curves and keeps none of the flows, so
-    the fixings behind them -- and any forecast standing in for a fixing
-    dated ``as_of`` -- would be missing from its evidence. This is that part
-    of a price's evidence on its own, for the measure to chain in as a
-    source: ``realised_fixings`` and ``fixings_dated_as_of`` in the fields,
-    and the fixings' provenance among the inputs, so ``worst_quality`` sees
-    their data quality. The forecast is recorded, not degraded, exactly as
-    in a price. A history does not move with the curve, so it is recorded
-    once, at the base curve.
-
-    Args:
-        instrument: Anything :func:`~rates_engine.pricing.projection.project` handles.
-        curve_set: The base curves.
-        fixings: Published fixings, as for :func:`pv`.
-
-    Returns:
-        The evidence record, or ``None`` when no coupon of the instrument is
-        decided yet -- found without projecting it when its index says the
-        first period starts too far after ``as_of`` to have fixed.
-
-    Raises:
-        MissingFixingError: A floating coupon is already decided and
-            ``fixings`` does not cover it.
-    """
-    index = getattr(instrument, "rate_index", None)
-    if isinstance(index, RateIndex) and not may_have_history(
-        index, instrument.span[0], curve_set.as_of
-    ):
-        return None
-    flows = _priced_flows(instrument, curve_set, fixings)
-    history, inputs = _history_used(flows, instrument, curve_set.as_of)
+    """The part of a price's evidence that says what its floating coupons rest on, or ``None``."""
+    history, inputs = _history_used(flows, instrument, as_of)
     if not history:
         return None
     return Evidence(
@@ -440,6 +404,49 @@ def discounted_value(
             does not cover its history.
     """
     return _pv_of(_priced_flows(instrument, curve_set, fixings), curve_set)
+
+
+def discounted_value_with_history(
+    instrument: Priceable,
+    curve_set: CurveSet,
+    *,
+    fixings: MarketSnapshot | None = None,
+) -> tuple[float, Evidence | None]:
+    """:func:`discounted_value`, and the record of the history it read, from one projection.
+
+    A risk measure reprices on moved curves and keeps none of the flows, so
+    the fixings behind them, and any forecast standing in for a fixing dated
+    ``as_of``, would be missing from its evidence. This is that part of a
+    price's evidence on its own, for the measure to chain in as a source:
+    ``realised_fixings`` and ``fixings_dated_as_of`` in the fields, and the
+    fixings' provenance among the inputs, so ``worst_quality`` sees their
+    data quality. The forecast is recorded, not degraded, as in a price.
+
+    A history does not move with the curve: the fixings read, and which
+    period fixes on ``as_of``, are the same on every curve a measure moves
+    to. So the record of any one reprice is the record of them all, and a
+    measure takes it from a reprice it makes anyway. Recording it from a
+    projection of its own, as the first cut of this did, cost a spot
+    ten-year OIS a third more per DV01.
+
+    Args:
+        instrument: Anything :func:`~rates_engine.pricing.projection.project` handles.
+        curve_set: Discount and projection curves, moved or not.
+        fixings: Published fixings, as for :func:`pv`.
+
+    Returns:
+        The present value in the discount curve's currency, exactly
+        :func:`discounted_value`'s, and the evidence record, or ``None``
+        when no floating coupon rests on a fixing or on a forecast of one
+        dated ``as_of``.
+
+    Raises:
+        CurrencyMismatchError: As :func:`discounted_value`.
+        MissingFixingError: A floating coupon is already decided and ``fixings``
+            does not cover its history.
+    """
+    flows = _priced_flows(instrument, curve_set, fixings)
+    return _pv_of(flows, curve_set), _history_record(instrument, flows, curve_set.as_of)
 
 
 def annuity_value(swap: Swappable, curve_set: CurveSet) -> float:

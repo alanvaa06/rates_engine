@@ -403,6 +403,69 @@ class TestRiskTakesTheFixings:
         assert "TERM_SOFR_3M" in {p.series_id for p in _inputs(read.evidence)}
 
 
+class TestTheHistoryCostsNoProjectionOfItsOwn:
+    """A measure records the history from a reprice it makes anyway.
+
+    The first cut projected the whole trade once more inside every measure
+    of a trade that could have history, which is every spot trade: a spot
+    ten-year OIS's DV01 went from 0.192 to 0.311 ms on the review's machine,
+    a thirty-year quarterly IRS's from 1.42 to 2.38 ms, and ``strip_hedge``
+    recorded it twice. The history is the same on every moved curve, so
+    counting projections pins the fix; ``benchmarks/bench_core.py`` times it.
+    """
+
+    @staticmethod
+    def _counting(monkeypatch) -> list[int]:
+        from rates_engine.pricing import linear
+
+        calls = [0]
+        project = linear.project
+
+        def counted(*args, **kwargs):
+            calls[0] += 1
+            return project(*args, **kwargs)
+
+        monkeypatch.setattr(linear, "project", counted)
+        return calls
+
+    def test_a_dv01_projects_the_trade_twice_and_still_records_its_history(
+        self, monkeypatch, strip_curve
+    ):
+        from rates_engine.instruments.swaps import IRSwap
+        from rates_engine.risk.sensitivities import dv01, key_rate_dv01, money_convexity
+
+        irs = IRSwap(effective=_SPOT, maturity=date(2046, 1, 22), fixed_rate=0.039,
+                     notional=NOTIONAL)
+        curve_set = CurveSet(strip_curve)
+        calls = self._counting(monkeypatch)
+        result = dv01(irs, curve_set)
+        assert calls[0] == 2
+        assert any(s.produced_by == "pricing.history" for s in result.evidence.sources)
+        calls[0] = 0
+        money_convexity(irs, curve_set)
+        assert calls[0] == 3
+        calls[0] = 0
+        key_rate_dv01(irs, curve_set, (1.0, 5.0, 10.0))
+        assert calls[0] == 6
+
+    def test_strip_hedge_records_it_once_through_its_dv01(self, monkeypatch):
+        from rates_engine.hedging.futures_strip import strip_hedge
+        from rates_engine.instruments.swaps import OISSwap
+
+        nodes, start, end = TestTheStripHedgeTakesTheFixings._strip()
+        swap = OISSwap(effective=date(2025, 7, 15), maturity=end, fixed_rate=0.04,
+                       notional=NOTIONAL)
+        calls = self._counting(monkeypatch)
+        hedge = strip_hedge(swap, nodes, as_of=AS_OF, require_full_coverage=False,
+                            fixings=_fixings(_sofr_history()))
+        futures = len(nodes) - 1
+        # Two for the DV01, two per contract for its quote bumps, two for the
+        # quote parallel: nothing for the record.
+        assert calls[0] == 2 + 2 * futures + 2
+        history = [s for s in hedge.evidence.sources if s.produced_by == "pricing.history"]
+        assert len(history) == 1 and history[0].fields["realised_fixings"]
+
+
 class TestTheStripHedgeTakesTheFixings:
     """A seasoned swap can be hedged: sized, and shocked, on the trade ``pv`` prices."""
 
