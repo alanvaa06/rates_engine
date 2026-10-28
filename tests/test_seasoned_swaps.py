@@ -671,6 +671,70 @@ class TestThePeriodInProgressNeedsItsFixings:
             pv(swap, CurveSet(_flat_curve()), fixings=_fixings(_history("TEST_ON")))
 
 
+class TestTheWrongCurrencyIsRefusedBeforeAnyFixingIsAskedFor:
+    """A trade on a curve of another currency is refused as that, whatever it would need.
+
+    The review of #12 (Alan, 2026-10-22): the currency was checked after the
+    projection, which asks for fixings first, so both trades below raised
+    ``MissingFixingError`` ("pass the published fixings", exit 1). Supplying
+    them only reached ``CurrencyMismatchError`` (exit 2) on the second try.
+    """
+
+    PESO_OIS = OISSwap(effective=date(2025, 7, 15), maturity=date(2027, 7, 15), fixed_rate=0.04,
+                       index=TIIE_FONDEO)
+    PESO_FRA = FRA(start=date(2025, 12, 1), end=date(2026, 2, 1), rate=0.075, index=TIIE_28)
+
+    @pytest.mark.parametrize(
+        "measure", [pv, discounted_value, par_rate, par_rate_value, annuity]
+    )
+    def test_a_seasoned_peso_ois_on_the_dollar_curve(self, measure):
+        with pytest.raises(CurrencyMismatchError, match="MXN") as caught:
+            measure(self.PESO_OIS, CurveSet(_flat_curve()))
+        assert caught.value.exit_code == 2
+
+    @pytest.mark.parametrize("measure", [pv, discounted_value, fra_fair_rate])
+    def test_a_seasoned_tiie_28_fra_on_the_dollar_curve(self, measure):
+        with pytest.raises(CurrencyMismatchError, match="MXN") as caught:
+            measure(self.PESO_FRA, CurveSet(_flat_curve()))
+        assert caught.value.exit_code == 2
+
+    def test_supplying_the_fixings_the_old_message_asked_for_changes_nothing(self):
+        snapshot = _fixings(
+            _history("TIIE_FONDEO", 0.07, calendar=BMV),
+            _term("TIIE_28", {date(2025, 12, 1): 0.0745}),
+        )
+        for instrument in (self.PESO_OIS, self.PESO_FRA):
+            with pytest.raises(CurrencyMismatchError, match="MXN"):
+                pv(instrument, CurveSet(_flat_curve()), fixings=snapshot)
+
+    def test_a_parametric_comparison_refuses_it_too(self):
+        from dataclasses import dataclass
+        from typing import Any
+
+        from rates_engine.core.evidence import Evidence
+        from rates_engine.core.results import EngineResult
+        from rates_engine.pricing.linear import price_on_parametric
+
+        @dataclass(frozen=True)
+        class Fit(EngineResult):
+            def payload_fields(self) -> dict[str, Any]:
+                return {"curve_kind": "parametric", "model": "flat"}
+
+        with pytest.raises(CurrencyMismatchError, match="MXN"):
+            price_on_parametric(
+                self.PESO_OIS,
+                CurveSet(_flat_curve(0.0405)),
+                CurveSet(_flat_curve()),
+                fit=Fit(evidence=Evidence(produced_by="test.fit")),
+            )
+
+    def test_an_unseasoned_peso_fra_has_no_dollar_fair_rate(self):
+        # main returned the dollar curve's forward for it, without a word.
+        fra = FRA(start=date(2026, 4, 15), end=date(2026, 5, 13), rate=0.075, index=TIIE_28)
+        with pytest.raises(CurrencyMismatchError, match="MXN"):
+            fra_fair_rate(fra, CurveSet(_flat_curve()))
+
+
 class TestClosedForms:
     """With the history and the curve both known exactly, so is the answer."""
 

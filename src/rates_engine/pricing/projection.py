@@ -87,7 +87,7 @@ from rates_engine.conventions.indices import (
 )
 from rates_engine.conventions.side import fixed_leg_sign
 from rates_engine.core.errors import MissingFixingError, UnsupportedConventionError
-from rates_engine.core.money import Currency
+from rates_engine.core.money import Currency, require_same_currency
 from rates_engine.curves.discount import CurveSet
 from rates_engine.instruments.cashflow import Cashflow, RealisedFixing
 from rates_engine.instruments.fra import FRA
@@ -579,6 +579,11 @@ def fra_fair_rate(
     verified). A fixing dated ``curve_set.as_of`` is used when ``fixings``
     holds it and forecast when it does not, as QuantLib does.
 
+    The FRA's currency is checked against the curves' before anything else,
+    as :func:`~rates_engine.pricing.linear.pv` checks it: a peso FRA on the
+    dollar curve has no fair rate there, and v0.3 returned the dollar
+    forward for it.
+
     Args:
         fra: The contract.
         curve_set: Discount and projection curves.
@@ -590,10 +595,12 @@ def fra_fair_rate(
         The fair rate as a decimal on the FRA's day count.
 
     Raises:
+        CurrencyMismatchError: The FRA is in another currency than the curves.
         MissingFixingError: The index fixed before ``curve_set.as_of`` and
             ``fixings`` does not hold that fixing, or it fixes on that date
             and ``fixings`` has no series named after the index.
     """
+    require_same_currency(fra.currency, curve_set.currency, operation="the fair rate of a FRA")
     rate, _, _ = _fra_rate(fra, curve_set, fixings)
     return rate
 

@@ -17,9 +17,10 @@ over USD 100m valued eighteen months in, the fixed coupon paid six months
 earlier came back as -4.06m USD. Which flows are paid is
 :func:`~rates_engine.pricing.projection.is_paid`'s to say; the built-in
 projections ask it per period, and :func:`_live` asks it again of whatever
-a caller's own projection returns. The currency is checked on every flow
-before that cut and on the instrument itself, so a matured trade in the
-wrong currency is still refused.
+a caller's own projection returns. The instrument's currency is checked
+before anything is projected, and every flow's before that cut, so a trade
+in the wrong currency is refused as that -- matured, or seasoned and
+missing the fixings the projection would ask for first.
 
 **A floating coupon already decided needs its fixings.** Every valuation
 here takes ``fixings``, a :class:`~rates_engine.market.snapshot.MarketSnapshot`
@@ -165,12 +166,16 @@ class PriceResult(EngineResult):
 def _require_currency(instrument: Priceable, curve_set: CurveSet) -> None:
     """Refuse an instrument paid in another currency than the curve, whatever is left of it.
 
-    The built-in projections never produce a paid flow, so a check on flows
-    alone never sees a matured trade: a peso swap that finished last year,
-    priced on the dollar curve, came back as 0.0. A trade in the wrong
-    currency is wrong whatever part of it is left. The flows are checked
-    first, by :func:`_live`, because their refusal names the flow; this
-    covers the trade that has none left.
+    Called before the instrument is projected. The projection asks for the
+    fixings a seasoned trade needs before it produces a flow, so a check on
+    the flows alone answered a peso OIS from 2025-07-15 on the dollar curve
+    with ``MissingFixingError`` (exit 1, "pass the published fixings"), and
+    the caller who did so reached ``CurrencyMismatchError`` (exit 2) only on
+    the second try. And the built-in projections never produce a paid flow,
+    so a flow check never sees a matured trade at all: a peso swap that
+    finished last year came back as 0.0. :func:`_live` still checks every
+    flow, which catches a caller's own product that declares one currency
+    and pays another.
     """
     require_same_currency(
         instrument.currency,
@@ -208,10 +213,9 @@ def _pv_of(flows: tuple[Cashflow, ...], curve_set: CurveSet) -> float:
 def _priced_flows(
     instrument: Priceable, curve_set: CurveSet, fixings: MarketSnapshot | None
 ) -> tuple[Cashflow, ...]:
-    """The flows a value counts: projected, checked for currency and cut at ``as_of``."""
-    live = _live(project(instrument, curve_set, **_passing(fixings)), curve_set)
+    """The flows a value counts: checked for currency, projected and cut at ``as_of``."""
     _require_currency(instrument, curve_set)
-    return live
+    return _live(project(instrument, curve_set, **_passing(fixings)), curve_set)
 
 
 def _passing(fixings: MarketSnapshot | None) -> dict[str, MarketSnapshot]:
@@ -373,7 +377,8 @@ def discounted_value(
         The present value in the discount curve's currency.
 
     Raises:
-        CurrencyMismatchError: A flow is in another currency than the curve.
+        CurrencyMismatchError: The instrument, or a flow, is in another
+            currency than the curve. Checked before any fixing is asked for.
         MissingFixingError: A floating coupon is already decided and ``fixings``
             does not cover its history.
     """
@@ -390,20 +395,18 @@ def annuity_value(swap: Swappable, curve_set: CurveSet) -> float:
     Returns:
         The annuity in years of discounted accrual.
     """
-    unit_swap = swap.with_terms(fixed_rate=1.0, side=Side.RECEIVER)
-    live = _live(unit_swap.fixed_cashflows(), curve_set)
     _require_currency(swap, curve_set)
-    return _pv_of(live, curve_set) / swap.notional
+    unit_swap = swap.with_terms(fixed_rate=1.0, side=Side.RECEIVER)
+    return _pv_of(_live(unit_swap.fixed_cashflows(), curve_set), curve_set) / swap.notional
 
 
 def _float_leg(
     swap: Swappable, curve_set: CurveSet, fixings: MarketSnapshot | None
 ) -> tuple[Cashflow, ...]:
     """The payer's floating flows still to be paid, which a par rate prices."""
-    payer = swap.with_terms(side=Side.PAYER)
-    live = _live(float_leg(payer, curve_set, **_passing(fixings)), curve_set)
     _require_currency(swap, curve_set)
-    return live
+    payer = swap.with_terms(side=Side.PAYER)
+    return _live(float_leg(payer, curve_set, **_passing(fixings)), curve_set)
 
 
 def par_rate_value(
@@ -476,7 +479,8 @@ def pv(
         value counts: none paid on or before the valuation date.
 
     Raises:
-        CurrencyMismatchError: A flow is in another currency than the curve.
+        CurrencyMismatchError: The instrument, or a flow, is in another
+            currency than the curve. Checked before any fixing is asked for.
         MissingFixingError: A floating coupon is already decided and ``fixings``
             is absent, lacks the index's series, or lacks a business day of
             its history; or a term coupon fixes on ``as_of`` and ``fixings``
