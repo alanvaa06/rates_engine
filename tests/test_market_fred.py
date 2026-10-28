@@ -107,9 +107,9 @@ class TestUnits:
     ):
         # Whether FRED sends one is not known here. If it does, the download
         # and the saved file must still agree: the first version refused the
-        # download (its header read "﻿observation_date") and loaded the
+        # download (its header read "\ufeffobservation_date") and loaded the
         # file, because only the file was decoded with utf-8-sig.
-        payload = "﻿observation_date,SOFR\n2026-01-13,4.31\n"
+        payload = "\ufeffobservation_date,SOFR\n2026-01-13,4.31\n"
         _serve(monkeypatch, payload)
         path = tmp_path / "SOFR.csv"
         path.write_text(payload, encoding="utf-8")

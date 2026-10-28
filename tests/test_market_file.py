@@ -117,7 +117,7 @@ class TestUnits:
         assert series.values == (pytest.approx(0.0364), pytest.approx(0.0365))
 
     @pytest.mark.parametrize(
-        "header", ["﻿observation_date,SOFR", "OBSERVATION_DATE,SOFR", "Observation_Date,sofr"]
+        "header", ["\ufeffobservation_date,SOFR", "OBSERVATION_DATE,SOFR", "Observation_Date,sofr"]
     )
     def test_fred_s_header_is_recognised_in_any_case_and_after_a_bom(self, tmp_path, header):
         path = tmp_path / "SOFR.csv"

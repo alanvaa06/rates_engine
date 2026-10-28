@@ -161,7 +161,7 @@ def parse_series_csv(
             rate FRED quotes in percent, and a value read as a decimal is
             above :data:`MAX_PLAUSIBLE_DECIMAL_RATE`: it was in percent.
     """
-    reader = csv.reader(io.StringIO(text.removeprefix("﻿")))
+    reader = csv.reader(io.StringIO(text.removeprefix("\ufeff")))
     header = next(reader, None)
     if header is None:
         raise InsufficientDataError(
