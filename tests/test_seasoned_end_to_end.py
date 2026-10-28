@@ -343,8 +343,52 @@ class TestRiskTakesTheFixings:
         down = discounted_value(irs, shifted(curve_set, -1e-4), fixings=snapshot)
         measured = dv01(irs, curve_set, fixings=snapshot).value
         assert measured == (down - up) / 2.0
+        # Regression pins only, from this implementation on the engine's own
+        # bootstrap; the independent references are the closed form below
+        # and the QuantLib constants of TestTheSeasonedHedgeAgainstQuantLib.
         assert measured == pytest.approx(-17_203.37, abs=0.01)
         assert dv01(irs, curve_set).value == pytest.approx(-19_666.17, abs=0.01)
+
+    @pytest.mark.parametrize("fixing", [None, 0.0405])
+    def test_a_spot_irs_dv01_reads_today_s_fixing_in_closed_form(self, fixing):
+        # On a flat continuous 4% curve, P_y(t) = exp(-(0.04 + y) t) with t
+        # in ACT/365F days. The floating leg is N (P(s) - P(e)) per forecast
+        # period and N tau K0 P(e0) for the first, whose Term SOFR fixes on
+        # as_of (two SIFMA days before 2026-01-20, across MLK Day); the fixed
+        # leg N K tau P(e), annual ACT/360. The dates are the IRS's schedule,
+        # every one a SIFMA business day.
+        from rates_engine.instruments.swaps import IRSwap
+        from rates_engine.risk.sensitivities import dv01
+
+        floating = [date(2026, 1, 20), date(2026, 4, 20), date(2026, 7, 20), date(2026, 10, 20),
+                    date(2027, 1, 20), date(2027, 4, 20), date(2027, 7, 20), date(2027, 10, 20),
+                    date(2028, 1, 20)]
+        fixed = [date(2026, 1, 20), date(2027, 1, 20), date(2028, 1, 20)]
+
+        def value(y: float) -> float:
+            def p(day: date) -> float:
+                return math.exp(-(0.04 + y) * (day - AS_OF).days / 365.0)
+
+            first, second = floating[0], floating[1]
+            pairs = list(zip(floating[:-1], floating[1:], strict=True))
+            if fixing is None:
+                leg = sum(p(s) - p(e) for s, e in pairs)
+            else:
+                leg = sum(p(s) - p(e) for s, e in pairs[1:])
+                leg += fixing * (second - first).days / 360.0 * p(second)
+            annuity = sum(
+                (e - s).days / 360.0 * p(e) for s, e in zip(fixed[:-1], fixed[1:], strict=True)
+            )
+            return NOTIONAL * (leg - 0.039 * annuity)
+
+        irs = IRSwap(effective=_SPOT, maturity=date(2028, 1, 20), fixed_rate=0.039,
+                     notional=NOTIONAL)
+        snapshot = (
+            None if fixing is None else _fixings(_published("TERM_SOFR_3M", {AS_OF: fixing}))
+        )
+        expected = (value(-1e-4) - value(1e-4)) / 2.0
+        measured = dv01(irs, CurveSet(_flat_curve()), fixings=snapshot).value
+        assert measured == pytest.approx(expected, rel=1e-10)
 
     def test_a_coupon_already_fixed_does_not_move_under_a_bump(self):
         # A FRA that fixed at 4.25% on 2025-12-11: its settlement is a known
@@ -526,6 +570,136 @@ class TestTheHistoryCostsNoProjectionOfItsOwn:
         assert calls[0] == 2 + 2 * futures + 2
         history = [s for s in hedge.evidence.sources if s.produced_by == "pricing.history"]
         assert len(history) == 1 and history[0].fields["realised_fixings"]
+
+
+class TestTheSeasonedHedgeAgainstQuantLib:
+    """The hedge and the shock table of a swap with history, against QuantLib 1.44.
+
+    Review 3, point 7: the seasoned hedge tests checked only finiteness and
+    row counts. These are QuantLib's numbers, computed in the review's
+    scratch by ``ql_hedge_risk.py`` and pasted here:
+
+    - curve: :meth:`TestTheStripHedgeTakesTheFixings._strip`, its node
+      discount factors in closed form, ``P(e) = P(s) / (1 + 0.04 tau)``,
+      in ``ql.DiscountCurve`` on Actual365Fixed (log-linear, as the
+      engine's ``log_linear_df``);
+    - swaps: ``ql.OvernightIndexedSwap`` payer, USD 100m, 4%, annual,
+      ACT/360, payment lag 2 (Following), UnitedStates(SOFR), Modified
+      Following, backward, to 2028-06-21. ``S`` from 2025-07-15 with
+      ``ql.Sofr`` fixed at 4.30% on every business day to 2026-01-14;
+      ``T`` from as_of, 2026-01-15, with only that day's 4.30%;
+    - a parallel shock: ``ql.ZeroSpreadedTermStructure``, continuous on
+      Actual365Fixed, on discounting and forecasting alike; a quote bump:
+      one contract's forward moved 1 bp and the node factors rebuilt.
+
+    ``T`` is the case a dropped snapshot cannot hide: without the fixing
+    of as_of, nothing is refused, the day is forecast, and the post-shock
+    DV01 at +25 bp is QuantLib's -23,424.14 instead of -23,396.75.
+    """
+
+    QUANTLIB = {
+        "S": {
+            "pv": 334864.0776166469,
+            "dv01": -23652.776560653932,
+            "money_convexity": -569333857.8566909,
+            "swap_pnl": {-25.0: -593102.1729864124, 25.0: 589543.8254622538},
+            "post_dv01": {-25.0: -23795.54181419965, 25.0: -23510.873136985116},
+            "deltas": (-2549.130642056465, -2460.7170258909464, -2455.7049002051353,
+                       -2455.704900204204, -2455.7049002051353, -2365.407432194799,
+                       -2360.191495971754, -2360.1914959726855, -2539.7581305131316),
+            "contracts": 880.1004369285703,
+        },
+        "T": {
+            "pv": 122958.65465028025,
+            "dv01": -23538.554601969197,
+            "money_convexity": -568944211.3041878,
+            "swap_pnl": {-25.0: -590245.4059357308, 25.0: 586689.4936993085},
+            "post_dv01": {-25.0: -23681.222391138785, 25.0: -23396.748536942527},
+            "deltas": (-2498.866500252858, -2458.071806671098, -2455.704900204204,
+                       -2455.704900204204, -2455.704900204204, -2365.407432194799,
+                       -2360.191495971754, -2360.191495971754, -2539.758130514063),
+            "contracts": 877.9840624875575,
+        },
+    }
+    #: QuantLib's post-shock DV01 of ``T`` at +25 bp without the fixing of as_of.
+    T_FORECAST_POST_DV01 = -23424.13951762952
+
+    @staticmethod
+    def _case(name: str):
+        from rates_engine.hedging.futures_strip import strip_hedge
+        from rates_engine.instruments.swaps import OISSwap
+
+        nodes, _, end = TestTheStripHedgeTakesTheFixings._strip()
+        if name == "S":
+            effective, snapshot = date(2025, 7, 15), _fixings(_sofr_history())
+        else:
+            effective, snapshot = AS_OF, _fixings(_published("SOFR", {AS_OF: 0.0430}))
+        swap = OISSwap(effective=effective, maturity=end, fixed_rate=0.04, notional=NOTIONAL)
+        return swap, snapshot, strip_hedge(swap, nodes, as_of=AS_OF, fixings=snapshot)
+
+    @pytest.mark.parametrize("name", ["S", "T"])
+    def test_the_hedge_is_sized_on_quantlib_s_deltas(self, name):
+        reference = self.QUANTLIB[name]
+        _, _, hedge = self._case(name)
+        assert hedge.swap_dv01 == pytest.approx(reference["dv01"], rel=1e-9)
+        deltas = tuple(hedge.bucketed_delta_by_instrument.values())
+        assert deltas == pytest.approx(reference["deltas"], rel=1e-9)
+        assert hedge.total_contracts == pytest.approx(reference["contracts"], rel=1e-9)
+
+    @pytest.mark.parametrize("name", ["S", "T"])
+    def test_the_risk_measures_are_quantlib_s(self, name):
+        from rates_engine.risk.sensitivities import dv01, money_convexity
+
+        reference = self.QUANTLIB[name]
+        swap, snapshot, hedge = self._case(name)
+        assert pv(swap, hedge.curve_set, fixings=snapshot).value == pytest.approx(
+            reference["pv"], rel=1e-12
+        )
+        assert dv01(swap, hedge.curve_set, fixings=snapshot).value == pytest.approx(
+            reference["dv01"], rel=1e-9
+        )
+        # A second difference at 1 bp: QuantLib's carries about 4e-9 of noise.
+        assert money_convexity(swap, hedge.curve_set, fixings=snapshot).value == pytest.approx(
+            reference["money_convexity"], rel=1e-7
+        )
+
+    @pytest.mark.parametrize("name", ["S", "T"])
+    def test_the_shock_table_reprices_the_swap_with_its_fixings(self, name):
+        # The swap's P&L and post-shock DV01 are QuantLib's; the strip's P&L
+        # is the closed form of each contract's forward move on the shocked
+        # curve, ((1 + f tau) exp(y (t_e - t_s)) - 1) / tau, at QuantLib's
+        # contract counts (minus delta over the SR3 tick, 25 USD a bp).
+        from rates_engine.hedging.futures_strip import shock_table
+
+        reference = self.QUANTLIB[name]
+        _, _, hedge = self._case(name)
+        rows = shock_table(hedge, (-25.0, 25.0)).table.set_index("shock_bp")
+        for shock in (-25.0, 25.0):
+            row = rows.loc[shock]
+            assert row["swap_pnl"] == pytest.approx(reference["swap_pnl"][shock], rel=1e-9)
+            assert row["swap_dv01_post_shock"] == pytest.approx(
+                reference["post_dv01"][shock], rel=1e-9
+            )
+            strip = 0.0
+            for delta, (start, end) in zip(reference["deltas"], hedge.periods.values(),
+                                           strict=True):
+                tau = (end - start).days / 360.0
+                years = (end - start).days / 365.0
+                moved = ((1.0 + 0.04 * tau) * math.exp(shock * 1e-4 * years) - 1.0) / tau
+                strip += delta * (moved - 0.04) * 1e4
+            assert row["strip_pnl"] == pytest.approx(strip, rel=1e-8)
+            assert row["net_pnl"] == pytest.approx(reference["swap_pnl"][shock] + strip, rel=1e-6)
+
+    def test_a_shock_table_without_the_fixings_would_not_match(self):
+        # What a regression dropping fixings from the post-shock DV01 would
+        # give on T: no refusal, and a number 27.39 USD/bp off, a thousand
+        # times the tolerance above.
+        from rates_engine.hedging.futures_strip import shock_table
+
+        _, _, hedge = self._case("T")
+        post = shock_table(hedge, (25.0,)).table["swap_dv01_post_shock"].iloc[0]
+        assert post == pytest.approx(self.QUANTLIB["T"]["post_dv01"][25.0], rel=1e-9)
+        assert abs(post - self.T_FORECAST_POST_DV01) > 1e3 * 1e-9 * abs(post)
 
 
 class TestTheStripHedgeTakesTheFixings:
