@@ -935,8 +935,41 @@ class TestTheHedgeCommand:
         # The old documented default, 25, on SR1 months: refused, not obeyed.
         config = _sr1_config(as_of)
         config["hedge"]["contract_dv01"] = 25
-        with pytest.raises(ConfigurationError, match="SR1-02"):
+        with pytest.raises(ConfigurationError, match="SR1-02") as caught:
             commands.hedge(config)
+        # By the keys in the file, not only the label (round-2 review, point 4).
+        assert str(caught.value).startswith("hedge.contract_dv01 contradicts curve.futures[0]:")
+
+    def test_a_contract_dv01_that_contradicts_a_declared_row_names_its_contract(self, as_of):
+        config = _hedge_config(as_of)
+        config["curve"]["futures"][0]["contract"] = "SR3"
+        config["hedge"]["contract_dv01"] = 41.67
+        with pytest.raises(ConfigurationError) as caught:
+            commands.hedge(config)
+        assert str(caught.value).startswith(
+            "hedge.contract_dv01 contradicts curve.futures[0].contract:"
+        )
+
+    def test_a_declared_contract_that_contradicts_its_period_names_the_row(self, as_of):
+        config = _hedge_config(as_of)
+        config["curve"]["futures"][3]["contract"] = "SR1"
+        with pytest.raises(ConfigurationError) as caught:
+            commands.hedge(config)
+        assert str(caught.value).startswith("curve.futures[3].contract: SR3-4 is declared SR1")
+
+    def test_rolled_sr1_rows_sized_at_a_caller_tick_are_flagged(self, as_of):
+        # The review's CLI case: `hedge.contract_dv01: 25` on SR1 rows whose
+        # dates were rolled to business days exited 0 reading "observed".
+        config = _sr1_config(as_of)
+        config["curve"]["stub"] = {"end": "2026-02-02", "accrual_factor": 1.0 + 0.04 * 18 / 360}
+        config["curve"]["futures"] = [
+            {"label": "SR1-2", "start": "2026-02-02", "end": "2026-03-02", "price": 96.0},
+            {"label": "SR1-3", "start": "2026-03-02", "end": "2026-04-01", "price": 96.0},
+        ]
+        config["swap"].update(effective="2026-02-02", maturity="2026-04-01")
+        config["hedge"].update(contract_dv01=25, require_full_coverage=False)
+        warnings = commands.hedge(config)["evidence"]["warnings"]
+        assert "futures_contract_assumed" in {w["code"] for w in warnings}
 
     @pytest.mark.parametrize("tick", [41.67, SR1_TICK, None])
     def test_the_assumed_sr1_notional_is_flagged_whoever_gave_the_tick(self, as_of, tick):

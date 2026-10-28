@@ -499,6 +499,9 @@ def _contract_sizing(
     result showed it, because the strip DV01 was multiplied back by the same
     tick; the error was in the number of contracts a trader would buy.
 
+    One contract at a time so that the ``hedge`` command can make the same
+    checks entry by entry and name the key in the file a refusal comes from.
+
     Args:
         contract: The futures node.
         key: Its name in the result and in any refusal.
