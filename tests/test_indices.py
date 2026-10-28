@@ -14,7 +14,7 @@ from datetime import date, timedelta
 import pytest
 from test_sifma_publication_record import NO_SOFR_PUBLISHED, RECORD_FIRST, RECORD_LAST
 
-from rates_engine.conventions.calendar import SIFMA_US
+from rates_engine.conventions.calendar import SIFMA_US, HolidayCalendar, SIFMAUSCalendar
 from rates_engine.conventions.indices import (
     COLLATERAL_INDEX,
     INDICES,
@@ -43,6 +43,50 @@ PUBLICATION_RECORDS = {
 The SIFMA one is the FRED transcription in ``tests/test_sifma_publication_record.py``:
 first day, last day, and the weekdays with no SOFR between them.
 """
+
+
+def _disagreements_with_record(calendar: HolidayCalendar) -> list[date]:
+    """The weekdays of ``calendar``'s verified stretch on which it and its record part.
+
+    A disagreement is a weekday the calendar calls a business day although
+    the record has no publication for it, or a holiday although the record
+    has one. The three preconditions are asserted first -- a record under
+    the calendar's name, a declared verified stretch, a record that covers
+    it -- so a calendar that misses one fails here instead of returning an
+    empty list, and an empty list always means the loop ran over the whole
+    stretch and found nothing.
+    """
+    assert calendar.name in PUBLICATION_RECORDS, calendar.name
+    first, last, closed = PUBLICATION_RECORDS[calendar.name]
+    verified_from = getattr(calendar, "VERIFIED_FROM", None)
+    verified_through = getattr(calendar, "VERIFIED_THROUGH", None)
+    assert verified_from is not None and verified_through is not None, calendar.name
+    assert first <= verified_from < verified_through <= last, calendar.name
+    day, disagreements = verified_from, []
+    while day <= verified_through:
+        if day.weekday() < 5 and calendar.is_business_day(day) == (day in closed):
+            disagreements.append(day)
+        day += timedelta(days=1)
+    return disagreements
+
+
+class _ThanksgivingADayLate(SIFMAUSCalendar):
+    """``SIFMA_US`` with one holiday moved: Thanksgiving 2024 on the Friday.
+
+    Thursday 28 November 2024 has no SOFR in the record and Friday the 29th
+    has one, so this calendar disagrees with the record on exactly those two
+    days and on no other. It inherits the verified stretch, which is the
+    point: it declares everything ``SIFMA_US`` declares, and only the
+    day-by-day check can tell the two apart.
+    """
+
+    name = "SIFMA_US_THANKSGIVING_2024_A_DAY_LATE"
+
+    def holidays(self, year: int) -> frozenset[date]:
+        days = super().holidays(year)
+        if year != 2024:
+            return days
+        return (days - {date(2024, 11, 28)}) | {date(2024, 11, 29)}
 
 
 def _curve(currency: Currency, rate: float = 0.05) -> DiscountCurve:
@@ -94,37 +138,55 @@ class TestTheRegistry:
         Declaring a verified stretch is not enough to pass here: the calendar
         must have a publication record in :data:`PUBLICATION_RECORDS`, the
         record must cover the stretch, and the calendar must agree with it on
-        every weekday of the stretch. A calendar that names two dates and has
-        no record behind them fails.
+        every weekday of the stretch. The two tests below make each half of
+        that fail: a calendar with no record, and one with a record and a
+        holiday moved.
         """
-        for index in INDICES.values():
-            if not index.is_verified:
-                continue
-            calendar = index.calendar
-            assert calendar.name in PUBLICATION_RECORDS, (index.name, calendar.name)
-            first, last, closed = PUBLICATION_RECORDS[calendar.name]
-            verified_from = getattr(calendar, "VERIFIED_FROM", None)
-            verified_through = getattr(calendar, "VERIFIED_THROUGH", None)
-            assert verified_from is not None and verified_through is not None, index.name
-            assert first <= verified_from < verified_through <= last, index.name
-            day, disagreements = verified_from, []
-            while day <= verified_through:
-                if day.weekday() < 5 and calendar.is_business_day(day) == (day in closed):
-                    disagreements.append(day)
-                day += timedelta(days=1)
-            assert disagreements == [], (index.name, disagreements[:5])
+        checked = {
+            index.name: _disagreements_with_record(index.calendar)
+            for index in INDICES.values()
+            if index.is_verified
+        }
+        assert "SOFR" in checked
+        failing = {name: days[:5] for name, days in checked.items() if days}
+        assert failing == {}, failing
 
     def test_a_calendar_with_dates_but_no_record_does_not_pass(self, monkeypatch):
-        """The check above, run against a peso index made to claim verification."""
+        """A peso index made to claim verification, on a calendar that declares
+        a verified stretch with no record behind it. It fails on the first
+        precondition, before any day is compared; the next test is the one
+        that reaches the comparison."""
         from dataclasses import replace
 
         from rates_engine.conventions.calendar import BMV
 
         monkeypatch.setattr(type(BMV), "VERIFIED_FROM", date(2018, 4, 3), raising=False)
         monkeypatch.setattr(type(BMV), "VERIFIED_THROUGH", date(2026, 10, 14), raising=False)
+        with pytest.raises(AssertionError, match="BMV"):
+            _disagreements_with_record(BMV)
         claimed = replace(TIIE_FONDEO, unresolved=())
         monkeypatch.setitem(INDICES, claimed.name, claimed)
         with pytest.raises(AssertionError):
+            self.test_a_verified_index_fixes_on_a_calendar_that_agrees_with_a_record()
+
+    def test_a_calendar_with_a_record_and_one_holiday_moved_does_not_pass(self, monkeypatch):
+        """Review finding (round 3): the test above stops at its first assertion,
+        so the day-by-day comparison never ran in a test that expects it to
+        fail. Here every precondition holds -- the record is SIFMA's, the
+        stretch is SIFMA's -- and only the comparison can find the two days
+        on which Thanksgiving 2024 was moved. Any change to the loop that
+        skips days, swaps the comparison or drops the weekday filter returns
+        a different list."""
+        from dataclasses import replace
+
+        moved = _ThanksgivingADayLate()
+        monkeypatch.setitem(PUBLICATION_RECORDS, moved.name, PUBLICATION_RECORDS["SIFMA_US"])
+        assert _disagreements_with_record(moved) == [date(2024, 11, 28), date(2024, 11, 29)]
+        assert _disagreements_with_record(SIFMA_US) == []
+        claimed = replace(SOFR, name="SOFR_ON_A_MOVED_CALENDAR", calendar=moved)
+        assert claimed.is_verified
+        monkeypatch.setitem(INDICES, claimed.name, claimed)
+        with pytest.raises(AssertionError, match="SOFR_ON_A_MOVED_CALENDAR"):
             self.test_a_verified_index_fixes_on_a_calendar_that_agrees_with_a_record()
 
     def test_sofr_s_calendar_covers_its_whole_published_history_so_far(self):
