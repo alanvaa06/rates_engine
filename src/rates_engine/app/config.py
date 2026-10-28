@@ -151,10 +151,12 @@ CONFIG_SCHEMA: dict[str, Any] = {
                     },
                     "maturity": {
                         "required": True,
+                        "suggested_for": ["end"],
                         "description": "End date of the swap the quote is for.",
                     },
                     "rate": {
                         "required": True,
+                        "suggested_for": ["fixed_rate"],
                         "description": "Par fixed rate as a decimal a year: 0.041 is 4.1%.",
                     },
                     "frequency_months": {
@@ -245,10 +247,19 @@ CONFIG_SCHEMA: dict[str, Any] = {
         "required": True,
         "description": "The OIS swap price values and hedge sizes the futures strip against.",
         "keys": {
-            "effective": {"required": True, "description": "Start of the first accrual period."},
-            "maturity": {"required": True, "description": "End of the last accrual period."},
+            "effective": {
+                "required": True,
+                "suggested_for": ["start"],
+                "description": "Start of the first accrual period.",
+            },
+            "maturity": {
+                "required": True,
+                "suggested_for": ["end"],
+                "description": "End of the last accrual period.",
+            },
             "fixed_rate": {
                 "required": True,
+                "suggested_for": ["rate"],
                 "description": "Fixed rate as a decimal a year: 0.04 is 4%.",
             },
             "notional": {
@@ -482,6 +493,11 @@ is a mapping with these fields:
     (JSON numbers, finite, not booleans) or ``"list of strings"``. A string
     given where the list belongs is refused rather than read a character at
     a time.
+``suggested_for``
+    Names of other blocks' keys that a caller writing this block is likely
+    to mean this key by, such as ``rate`` for ``swap.fixed_rate``. They stay
+    unknown keys; the refusal suggests this one instead of sending the
+    caller to the block where the name is accepted.
 ``refused``
     A key recognised in order to refuse it; the text is the migration.
 
@@ -716,12 +732,13 @@ class _Problems:
         sentences: list[str] = []
         if self.unknown:
             named = ", ".join(
-                f"{_join(path, key)}{_hint(key, _accepted(level), path)}"
-                for path, level, key in self.unknown
+                f"{_join(path, key)}{_hint(key, level, path)}" for path, level, key in self.unknown
             )
             config = f"the {self.command} config" if self.command else "the config"
             sentences.append(f"unknown key(s) in {config}: {named}.")
-            blocks = {path: level for path, level, _ in self.unknown}
+            # Once per block, not per entry: every entry of a list accepts
+            # the same keys.
+            blocks = {re.sub(r"\[\d+\]", "[]", path): level for path, level, _ in self.unknown}
             for path, level in blocks.items():
                 where = f"in {path}" if path else "at the top level"
                 sentences.append(f"Accepted {where}: {', '.join(_accepted(level))}.")
@@ -861,15 +878,23 @@ def _accepted(level: dict[str, Any]) -> list[str]:
     return sorted(key for key, spec in level.items() if "refused" not in spec)
 
 
-def _hint(key: Any, accepted: list[str], here: str) -> str:
+def _hint(key: Any, level: dict[str, Any], here: str) -> str:
     """The key probably meant, or the block the key belongs in.
 
-    The cutoff is 0.75 rather than difflib's 0.6: a transposition or a
-    dropped letter scores 0.75 or more (``rsik`` against ``risk`` is 0.75,
-    ``notionl`` against ``notional`` 0.93), while 0.6 also matched
-    ``strat`` to ``rate``, a guess that sends the caller the wrong way.
+    A key the block declares itself ``suggested_for`` comes first: ``rate``
+    in ``swap`` is the swap's ``fixed_rate``, not a par quote put in the
+    wrong block, though ``curve.par_swaps[]`` is where ``rate`` is accepted.
+
+    Then the closest spelling. The cutoff is 0.75 rather than difflib's 0.6:
+    a transposition or a dropped letter scores 0.75 or more (``rsik``
+    against ``risk`` is 0.75, ``notionl`` against ``notional`` 0.93), while
+    0.6 also matched ``strat`` to ``rate``, a guess that sends the caller the
+    wrong way.
     """
-    close = difflib.get_close_matches(str(key), accepted, n=1, cutoff=0.75)
+    for name, spec in sorted(level.items()):
+        if key in spec.get("suggested_for", ()):
+            return f" (did you mean {name}?)"
+    close = difflib.get_close_matches(str(key), _accepted(level), n=1, cutoff=0.75)
     if close:
         return f" (did you mean {close[0]}?)"
     homes = [home for home in _HOMES.get(str(key), []) if home != (here or "the top level")]

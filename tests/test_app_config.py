@@ -228,6 +228,40 @@ class TestTheMessage:
         full["notional"] = full["swap"].pop("notional")
         assert "notional (it belongs under swap)" in _refusal("price", full)
 
+    @pytest.mark.parametrize(
+        ("block", "given", "meant"),
+        [
+            ("swap", "rate", "fixed_rate"),
+            ("swap", "start", "effective"),
+            ("swap", "end", "maturity"),
+            ("par_swap", "fixed_rate", "rate"),
+            ("par_swap", "end", "maturity"),
+        ],
+    )
+    def test_the_other_block_s_name_for_a_key_gets_this_block_s(self, block, given, meant, full):
+        # "belongs under" sent swap.rate to curve.par_swaps[] and swap.start
+        # to curve.futures[]: true of the name, wrong for the caller, who
+        # meant this swap's fixed_rate and effective (Alan's review of round
+        # 2, cleanup).
+        if block == "swap":
+            entry, where = full["swap"], "swap"
+        else:
+            entry, where = full["curve"]["par_swaps"][0], "curve.par_swaps[0]"
+        entry[given] = entry.pop(meant)
+        message = _refusal("price", full)
+        assert f"{where}.{given} (did you mean {meant}?)" in message
+        assert "belongs under" not in message
+
+    def test_what_a_list_accepts_is_said_once(self, full):
+        # It was said once per entry: three entries with the same typo read
+        # "Accepted in curve.futures[0]: ...", "[1]: ...", "[2]: ..." (Alan's
+        # review of round 2, cleanup).
+        for entry in full["curve"]["futures"][:3]:
+            entry["prise"] = entry["price"]
+        message = _refusal("bootstrap", full)
+        assert message.count("Accepted in") == 1
+        assert "Accepted in curve.futures[]: contract, end, label, price, start." in message
+
     def test_every_problem_is_listed_at_once(self, full):
         full["swap"]["fixed_rte"] = 0.09
         full["risk"]["key_tenor"] = [5.0]
@@ -276,7 +310,7 @@ class TestRefusedKeys:
         assert "did you mean start?" not in message
         # Nor a weak guess at an accepted key: strat is 0.67 from rate.
         assert "curve.par_swaps[0].strat." in message
-        accepted = message.split("Accepted in curve.par_swaps[0]: ")[1].split(".")[0]
+        accepted = message.split("Accepted in curve.par_swaps[]: ")[1].split(".")[0]
         for refused in ("start", "payment_dates", "year_fractions"):
             assert refused not in accepted.split(", ")
 
