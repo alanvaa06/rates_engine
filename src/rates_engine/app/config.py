@@ -697,18 +697,22 @@ def require_config(config: Mapping[str, Any] | None, command: str) -> dict[str, 
     return checked
 
 
-def require_block(block: Any, where: str) -> dict[str, Any]:
+def require_block(block: Any, where: str, *, command: str | None = None) -> dict[str, Any]:
     """One block checked against its entry in :data:`CONFIG_SCHEMA`, as :func:`require_config` would.
 
     For a builder that a caller can reach without :func:`require_config`, so
     that the builder keeps no list of keys of its own, and a caller who went
     round the whole-file check reads the same refusal as one who did not.
-    Every check of :func:`require_config` applies, for every command.
+    Every check of :func:`require_config` applies, for every command unless
+    ``command`` names one.
 
     Args:
         block: The block as the caller holds it.
         where: Its path in a config, with list indices
             (``"curve.par_swaps[0]"``).
+        command: Check required keys and nulls as this command reads the
+            block (``"fx-forward"`` does not need ``fx.volatility``);
+            ``None`` checks them for every command.
 
     Returns:
         The checked copy, as :func:`require_config` makes one.
@@ -717,7 +721,7 @@ def require_block(block: Any, where: str) -> dict[str, Any]:
         ConfigurationError: The block is not a mapping, or fails a check of
             :func:`require_config`; one refusal lists every problem.
     """
-    problems = _Problems(None)
+    problems = _Problems(command)
     checked = _check_value(block, {"keys": _level_at(where)}, where, None, problems)
     if problems:
         raise ConfigurationError(problems.message())

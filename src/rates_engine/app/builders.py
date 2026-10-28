@@ -175,13 +175,6 @@ def _futures_contract(entry: dict[str, Any], number: int) -> FuturesContract | N
     return FuturesContract(value)
 
 
-_LEGACY_PAR_SWAP_KEYS = ("start", "payment_dates", "year_fractions")
-_PAR_SWAP_REQUIRED = ("effective", "maturity", "rate")
-# Read by nothing: _par_swap_quote checks an entry against CONFIG_SCHEMA. The
-# two lines are deleted on top of the whole set (#21), because deleting them
-# here collides with the helper fix/futures-strip-hedge adds just above them.
-
-
 def _par_swap_quote(entry: dict[str, Any], number: int) -> SwapQuoteNode:
     """One ``par_swaps`` entry as a quote on a real SOFR OIS.
 
@@ -441,8 +434,6 @@ def flat_curve(as_of: date, rate: float, currency: Currency, years: float) -> Di
     return DiscountCurve(as_of, (node,), (math.exp(-rate * span),), currency=currency)
 
 
-_FX_REQUIRED = ("spot", "delivery", "r_domestic", "r_foreign")
-
 _RATE_CONVENTION_NOTE = (
     "Read as a continuously compounded rate on ACT/365F, as a decimal a year: "
     "P(t) = exp(-r t). A money-market quote (simple interest on ACT/360, how SOFR "
@@ -503,24 +494,19 @@ def fx_inputs(config: dict[str, Any]) -> FXInputs:
         The :class:`FXInputs`.
 
     Raises:
-        ConfigurationError: The ``fx`` block is missing or empty, or lacks
-            one of ``spot``, ``delivery``, ``r_domestic`` and ``r_foreign``.
+        ConfigurationError: The ``fx`` block is missing or empty, lacks one
+            of ``spot``, ``delivery``, ``r_domestic`` and ``r_foreign``, or
+            fails another check of its schema entry; one refusal names every
+            key at fault, as :func:`~rates_engine.app.config.require_config`
+            would.
         ImplausibleInputError: A rate is outside
             :data:`~rates_engine.pricing.fx_forward.MAX_PLAUSIBLE_RATE`,
             which is what a rate written in percent looks like.
     """
-    block = config.get("fx") or {}
-    if not block:
-        raise ConfigurationError(
-            "this command needs an `fx` block with spot, delivery, r_domestic and "
-            "r_foreign. See `rateng describe --json` for the shape."
-        )
-    missing = [key for key in _FX_REQUIRED if block.get(key) is None]
-    if missing:
-        raise ConfigurationError(
-            f"the `fx` block is missing {', '.join(missing)}; it needs spot, delivery, "
-            "r_domestic and r_foreign (continuously compounded, ACT/365F, decimals)."
-        )
+    # The schema is the one list of what the block takes, as for a par swap
+    # entry. Checked as fx-forward reads it, which is what every FX command
+    # needs; hedge-structures' fx.volatility is required by require_config.
+    block = require_block(config.get("fx") or {}, "fx", command="fx-forward")
     as_of = as_date(config["as_of"])
     delivery = as_date(block["delivery"])
     r_domestic = float(block["r_domestic"])

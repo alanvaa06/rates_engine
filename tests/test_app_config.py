@@ -732,34 +732,31 @@ def _recorded(value, pattern, asked, read):
 
 
 def _lookups(name: str, config: dict, monkeypatch) -> tuple[set[str], set[str]]:
-    """What a handler body looks up on ``config`` when nothing checks it first."""
+    """What a handler body looks up on ``config`` when nothing checks it first.
+
+    ``require_block``, the same check on one block, is taken out with
+    ``require_config``: its walk reads every key of the block, so through it
+    fx-forward would read ``fx.volatility``, which only hedge-structures uses.
+    """
     asked: set[str] = set()
     read: set[str] = set()
     monkeypatch.setattr(commands, "require_config", lambda config, command: config)
+    monkeypatch.setattr(builders, "require_block", lambda block, where, command=None: block)
     commands.COMMANDS[name](_recorded(copy.deepcopy(config), "", asked, read))
     monkeypatch.undo()
     return asked, read
 
 
-READ_ON_ANOTHER_BRANCH: dict[str, str] = {
-    "curve.futures[].contract": (
-        "#14 (fix/futures-strip-hedge): the builder hands it to FuturesNode, and the "
-        "hedge sizes the entry at that contract's tick"
-    ),
-    "hedge.require_full_coverage": (
-        "#14 (fix/futures-strip-hedge): the hedge passes it to strip_hedge, which "
-        "refuses a strip with a gap in the swap's span"
-    ),
-}
+READ_ON_ANOTHER_BRANCH: dict[str, str] = {}
 """Documented keys whose reader is in another PR of the set, by path.
 
-The schema documents them on this branch so that one file serves the whole
-set, and the declared merge order lands the reader first (#14 before #17).
-Until then nothing here reads them, and
-``test_every_documented_key_is_read_by_some_command`` would fail on this
-branch alone without this list. It holds keys, not a pattern, so it covers
-these two and nothing that comes after them; an entry is deleted once its
-reader is merged, which #21, built on every branch, does for both.
+On #17 alone it held ``curve.futures[].contract`` and
+``hedge.require_full_coverage``, which the schema documents so that one
+file serves the whole set and which #14 reads; without them
+``test_every_documented_key_is_read_by_some_command`` failed on that branch.
+It holds keys, not a pattern, and an entry is deleted once its reader is
+merged. #21 is built on every branch and reads both, so here it is empty
+and any documented key nothing reads fails the test.
 """
 
 
@@ -789,6 +786,18 @@ class TestTheSchemaMatchesTheHandlers:
         # describe for this shape.
         fx = CONFIG_SCHEMA["fx"]["keys"]
         assert set(fx) == {"spot", "delivery", "r_domestic", "r_foreign", "basis_bp", "volatility"}
+
+    def test_fx_inputs_checks_its_block_against_the_schema(self):
+        # The builder kept its own list of the four keys; it now runs the
+        # schema's check on the block, as fx-forward reads it, for a caller
+        # that skips require_config. fx.volatility is hedge-structures' own.
+        block = {"spot": 17.0, "delivery": "2026-07-15", "r_domestic": 0.09}
+        with pytest.raises(ConfigurationError, match=r"fx\.r_foreign is missing"):
+            builders.fx_inputs({"as_of": "2026-01-15", "fx": block})
+        with pytest.raises(ConfigurationError, match=r"fx\.spot is missing"):
+            builders.fx_inputs({"as_of": "2026-01-15"})
+        inputs = builders.fx_inputs({"as_of": "2026-01-15", "fx": {**block, "r_foreign": 0.04}})
+        assert inputs.spot == 17.0
 
     @pytest.mark.parametrize("key", ["r_domestic", "r_foreign"])
     def test_the_fx_rates_say_which_rate_they_are(self, key):

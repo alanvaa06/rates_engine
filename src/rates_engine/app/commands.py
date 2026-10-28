@@ -606,19 +606,11 @@ def hedge_structures(config: dict[str, Any] | None) -> dict[str, Any]:
         The ``StructureComparison`` payload, with a ``program_audit`` block
         when the config carries a ``hedge_program``.
     """
+    # require_config has refused a missing exposure block or fx.volatility,
+    # both required for this command, by path.
     config = require_config(config, "hedge-structures")
     inputs = fx_inputs(config)
-    exposure_block = config.get("exposure") or {}
-    if not exposure_block:
-        raise ConfigurationError(
-            "hedge-structures needs an `exposure` block with amount and direction "
-            "('payable' or 'receivable')."
-        )
-    if inputs.block.get("volatility") is None:
-        raise ConfigurationError(
-            "hedge-structures needs `fx.volatility`, the lognormal volatility as a "
-            "decimal (0.115 for 11.5%)."
-        )
+    exposure_block = config["exposure"]
     # The forward fx-forward reports. Its evidence carries the peso curve's
     # assumptions into every row, and its span is the structures' expiry:
     # the premium is paid on the spot date, and an option delivering on the
