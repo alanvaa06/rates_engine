@@ -44,6 +44,7 @@ from rates_engine.conventions.settlement import (
     FEDERAL_RESERVE,
     SETTLEMENT_CALENDARS,
 )
+from rates_engine.core.errors import UnsupportedConventionError
 from rates_engine.core.money import Currency
 
 FIRST, LAST = date(2026, 1, 1), date(2027, 12, 31)
@@ -180,7 +181,7 @@ class TestTheSpotDate:
 
     def test_the_pair_states_its_lag_and_calendars(self):
         assert USDMXN.spot_lag_days == 2
-        assert USDMXN.calendars == (FEDERAL_RESERVE, BMV)
+        assert dict(USDMXN.calendars) == {Currency.USD: FEDERAL_RESERVE, Currency.MXN: BMV}
         assert USDMXN.lag_calendars == (FEDERAL_RESERVE, BMV)
 
     def test_a_zero_lag_rolls_the_trade_date_to_a_joint_business_day(self):
@@ -327,10 +328,12 @@ class TestTheFederalReserveCalendar:
 class TestThePairCarriesItsSettlement:
     def test_calendars_default_from_the_currencies(self):
         built = CurrencyPair(Currency.USD, Currency.MXN, pip=1e-4)
-        assert built.calendars == (
-            SETTLEMENT_CALENDARS[Currency.USD], SETTLEMENT_CALENDARS[Currency.MXN]
-        )
+        assert dict(built.calendars) == {
+            Currency.USD: SETTLEMENT_CALENDARS[Currency.USD],
+            Currency.MXN: SETTLEMENT_CALENDARS[Currency.MXN],
+        }
         assert built == USDMXN
+        assert hash(built) == hash(USDMXN)
 
     def test_every_currency_has_a_settlement_calendar(self):
         """A new currency fails here until it says where it settles."""
@@ -342,7 +345,7 @@ class TestThePairCarriesItsSettlement:
     def test_the_payload_names_the_lag_and_the_calendars(self):
         stored = USDMXN.to_dict()
         assert stored["spot_lag_days"] == 2
-        assert stored["settlement_calendars"] == ["FEDERAL_RESERVE", "BMV"]
+        assert stored["settlement_calendars"] == {"USD": "FEDERAL_RESERVE", "MXN": "BMV"}
         assert stored["spot_lag_calendars"] == ["FEDERAL_RESERVE", "BMV"]
 
     @pytest.mark.parametrize("bad", [-1, 1.5, True])
@@ -351,6 +354,54 @@ class TestThePairCarriesItsSettlement:
             CurrencyPair(Currency.USD, Currency.MXN, pip=1e-4, spot_lag_days=bad)
 
 
-    def test_calendars_come_in_pairs(self):
-        with pytest.raises(ValueError, match="base calendar, quote calendar"):
-            CurrencyPair(Currency.USD, Currency.MXN, pip=1e-4, calendars=(BMV,))
+class TestTheCalendarsAreKeyedByCurrency:
+    """Alan Vazquez's round-3 finding 1: round 2 made ``calendars`` a
+    positional ``(base, quote)`` pair checked only by length, so
+    ``calendars=(BMV, FEDERAL_RESERVE)`` settled 15 September 2026 on the
+    17th instead of the 18th, raised nothing, and compared unequal to the
+    default pair. A calendar is now named by its currency."""
+
+    def test_the_order_they_are_given_in_does_not_matter(self):
+        one = CurrencyPair(
+            Currency.USD, Currency.MXN, pip=1e-4,
+            calendars={Currency.MXN: BMV, Currency.USD: FEDERAL_RESERVE},
+        )
+        assert one == USDMXN
+        assert one.spot_date(date(2026, 9, 15)) == date(2026, 9, 18)
+        assert one.calendars[Currency.USD] is FEDERAL_RESERVE
+
+    @pytest.mark.parametrize("positional", [(BMV, FEDERAL_RESERVE), (FEDERAL_RESERVE, BMV), [BMV]])
+    def test_a_sequence_of_calendars_refuses(self, positional):
+        with pytest.raises(ValueError, match="keyed by currency"):
+            CurrencyPair(Currency.USD, Currency.MXN, pip=1e-4, calendars=positional)
+
+    def test_one_currency_can_be_overridden_alone(self):
+        """The other keeps its calendar from SETTLEMENT_CALENDARS."""
+        on_sifma = CurrencyPair(
+            Currency.USD, Currency.MXN, pip=1e-4, calendars={Currency.USD: SIFMA_US}
+        )
+        assert dict(on_sifma.calendars) == {Currency.USD: SIFMA_US, Currency.MXN: BMV}
+        assert on_sifma != USDMXN
+        # SIFMA closes Friday 3 July 2026, the Federal Reserve does not.
+        assert on_sifma.spot_date(date(2026, 7, 1)) == date(2026, 7, 6)
+
+    def test_a_currency_outside_the_pair_refuses(self):
+        class Nowhere:
+            name = "NOWHERE"
+
+            def is_business_day(self, day: date) -> bool:
+                return True
+
+        with pytest.raises(ValueError, match="not a currency of USD/MXN"):
+            CurrencyPair(
+                Currency.USD, Currency.MXN, pip=1e-4,
+                calendars={Currency.USD: FEDERAL_RESERVE, "EUR": Nowhere()},
+            )
+
+    def test_a_currency_with_no_calendar_anywhere_refuses(self, monkeypatch):
+        monkeypatch.delitem(currency_pair.SETTLEMENT_CALENDARS, Currency.MXN)
+        with pytest.raises(UnsupportedConventionError, match="MXN"):
+            CurrencyPair(Currency.USD, Currency.MXN, pip=1e-4)
+        assert CurrencyPair(
+            Currency.USD, Currency.MXN, pip=1e-4, calendars={Currency.MXN: BMV}
+        ) == USDMXN

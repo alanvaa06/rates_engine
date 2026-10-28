@@ -248,8 +248,8 @@ def _spot_date(pair: CurrencyPair, delivery: date, as_of: date) -> date:
     if delivery <= spot_date:
         raise ValueError(
             f"delivery {delivery} is not after the spot date {spot_date} ({pair.name} "
-            f"settles {pair.spot_lag_days} business days after the {as_of} valuation date "
-            f"on {' + '.join(c.name for c in pair.calendars)}). A delivery on the spot "
+            f"settles {pair.spot_lag_days} business days after the {as_of} valuation date, "
+            f"counted on {' + '.join(c.name for c in pair.lag_calendars)}). A delivery on the spot "
             "date is a spot trade, and one before it a short date priced off the spot "
             "by a swap this module does not model; price a delivery after the spot date."
         )
@@ -380,8 +380,7 @@ def forward_from_curves(
             "pair": pair.name,
             "spot": spot,
             "spot_date": spot_date.isoformat(),
-            "spot_lag_days": pair.spot_lag_days,
-            "settlement_calendars": [c.name for c in pair.calendars],
+            **pair.settlement_fields(),
             "delivery": delivery.isoformat(),
             "domestic_currency": domestic.currency.value,
             "foreign_currency": foreign.currency.value,
@@ -485,8 +484,7 @@ def implied_basis(
             "spot": spot,
             "market_forward": market_forward,
             "spot_date": spot_date.isoformat(),
-            "spot_lag_days": pair.spot_lag_days,
-            "settlement_calendars": [c.name for c in pair.calendars],
+            **pair.settlement_fields(),
             "delivery": delivery.isoformat(),
             "cip_forward": parity,
             "implied_basis_bp": basis_bp,

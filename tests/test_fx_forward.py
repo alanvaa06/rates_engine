@@ -495,6 +495,28 @@ class TestTheForwardRunsFromTheSpotDate:
         assert USDMXN.pips(from_the_27th - from_the_30th) == pytest.approx(81.643, abs=1e-3)
         assert result.year_fraction == pytest.approx(0.2410958904109589, rel=1e-12)
 
+    def test_the_evidence_names_the_calendars_the_lag_was_counted_on(self):
+        """Alan Vazquez's round-3 finding 4: the evidence named the settlement
+        calendars but not the ones the lag was counted on, which is the half
+        of the rule that moved."""
+        as_of, delivery = date(2026, 11, 25), date(2027, 2, 26)
+        mxn = self._flat(as_of, 0.095, Currency.MXN)
+        usd = self._flat(as_of, 0.042, Currency.USD)
+        forward = forward_from_curves(USDMXN, 18.50, delivery, mxn, usd)
+        back = implied_basis(USDMXN, 18.50, forward.outright, delivery, mxn, usd)
+        for fields in (forward.evidence.fields, back.evidence.fields):
+            assert fields["spot_lag_days"] == 2
+            assert fields["spot_lag_calendars"] == ["FEDERAL_RESERVE", "BMV"]
+            assert fields["settlement_calendars"] == {"USD": "FEDERAL_RESERVE", "MXN": "BMV"}
+            assert fields["spot_date"] == "2026-11-30"
+
+    def test_a_delivery_before_the_spot_date_names_the_lag_calendars(self):
+        as_of = date(2026, 11, 25)
+        mxn = self._flat(as_of, 0.095, Currency.MXN)
+        usd = self._flat(as_of, 0.042, Currency.USD)
+        with pytest.raises(ValueError, match=r"2026-11-30 .*counted on FEDERAL_RESERVE \+ BMV"):
+            forward_from_curves(USDMXN, 18.50, date(2026, 11, 27), mxn, usd)
+
 
 class TestAForwardInheritsItsCurvesAssumptions:
     """The review's finding 1.4 (evidence): a peso forward came back `observed`.
