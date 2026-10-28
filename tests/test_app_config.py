@@ -394,6 +394,75 @@ class TestNullsAndShapes:
         change(full)
         assert said in _refusal("hedge", full)
 
+    def test_a_null_is_called_null(self, full):
+        # It was "not NoneType", Python's name for it rather than the file's
+        # (Alan's review of round 2, cleanup).
+        full["curve"]["futures"][3] = None
+        assert "curve.futures[3] must be a mapping of keys, not null" in _refusal("hedge", full)
+
+
+class TestAListIsAList:
+    """A string where a list belongs is refused, not read a character at a time.
+
+    On round 2 of #17 (f913dfc), through ``rateng --json`` on one desk file,
+    ``hedge.shocks_bp: "25"`` exited 0 with the shocks ``[2.0, 5.0]`` and
+    ``risk.key_tenors: "12"`` exited 0 with the key tenors ``[1.0, 2.0]``;
+    ``shocks_bp: 10``, ``key_tenors: 2.0`` and ``key_tenors: [null]``
+    reached a bare ``TypeError`` (Alan's review of round 2, point 1). The
+    schema checked blocks for their shape but not the leaves that hold a
+    list.
+    """
+
+    @pytest.mark.parametrize(
+        ("name", "block", "key", "value", "said"),
+        [
+            ("hedge", "hedge", "shocks_bp", "25", "hedge.shocks_bp must be a list of numbers, "
+             "not the string '25'"),
+            ("hedge", "hedge", "shocks_bp", 10, "hedge.shocks_bp must be a list of numbers, "
+             "not the number 10"),
+            ("price", "risk", "key_tenors", "12", "risk.key_tenors must be a list of numbers, "
+             "not the string '12'"),
+            ("price", "risk", "key_tenors", 2.0, "risk.key_tenors must be a list of numbers, "
+             "not the number 2.0"),
+            ("price", "risk", "key_tenors", [None], "risk.key_tenors[0] must be a finite "
+             "number, not null"),
+            ("price", "risk", "key_tenors", [1.0, "2"], "risk.key_tenors[1] must be a finite "
+             "number, not the string '2'"),
+            ("price", "risk", "key_tenors", [float("nan")], "risk.key_tenors[0] must be a "
+             "finite number, not the number nan"),
+            ("hedge", "hedge", "shocks_bp", [10, True], "hedge.shocks_bp[1] must be a finite "
+             "number, not true or false"),
+            ("hedge-structures", "hedge_program", "allowed_instruments", "collar",
+             "hedge_program.allowed_instruments must be a list of strings, not the string "
+             "'collar'"),
+        ],
+        ids=[
+            "shocks-string", "shocks-number", "tenors-string", "tenors-number", "tenors-null",
+            "tenors-numeral", "tenors-nan", "shocks-boolean", "instruments-string",
+        ],
+    )
+    def test_it_is_refused_by_path(self, name, block, key, value, said, full):
+        full[block][key] = value
+        assert said in _refusal(name, full)
+
+    def test_every_command_refuses_it(self, full):
+        # A shape, like a block's, is wrong in the file whichever command reads it.
+        full["hedge"]["shocks_bp"] = "25"
+        for name in CONFIG_COMMANDS:
+            assert "hedge.shocks_bp must be a list of numbers" in _refusal(name, full)
+
+    def test_every_list_in_the_full_config_says_what_it_holds(self, full):
+        # A list-valued key added without a type would be iterated letter by
+        # letter again; this names it first.
+        lists = {
+            path
+            for path, value in _leaves(full).items()
+            if isinstance(value, list) and "items" not in DOCUMENTED[path][0]
+        }
+        assert lists == {"risk.key_tenors", "hedge.shocks_bp", "hedge_program.allowed_instruments"}
+        for path in lists:
+            assert DOCUMENTED[path][0].get("type") in {"list of numbers", "list of strings"}, path
+
 
 class TestTheCheckedCopy:
     """What the handler reads is a clean copy, and the caller's mapping is untouched."""
@@ -447,6 +516,19 @@ def _given(value, prefix="") -> set[str]:
     elif isinstance(value, list):
         for child in value:
             found |= _given(child, prefix.removesuffix(".") + "[].")
+    return found
+
+
+def _leaves(value, prefix="") -> dict:
+    """Every documented path of a plain config with the value it holds; list entries at [0]."""
+    found: dict = {}
+    for key, child in value.items():
+        path = f"{prefix}{key}"
+        found[path] = child
+        if isinstance(child, dict):
+            found |= _leaves(child, f"{path}.")
+        elif isinstance(child, list) and child and isinstance(child[0], dict):
+            found |= _leaves(child[0], f"{path}[].")
     return found
 
 

@@ -26,8 +26,9 @@ from __future__ import annotations
 import copy
 import difflib
 import json
+import math
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -273,6 +274,7 @@ CONFIG_SCHEMA: dict[str, Any] = {
         "keys": {
             "key_tenors": {
                 "default": None,
+                "type": "list of numbers",
                 "description": (
                     "Key tenors for key_rate_dv01, in years on the curve's ACT/365F time "
                     "axis, as numbers. Absent leaves key_rate_dv01 null."
@@ -304,6 +306,7 @@ CONFIG_SCHEMA: dict[str, Any] = {
             },
             "shocks_bp": {
                 "default": list(DEFAULT_SHOCKS_BP),
+                "type": "list of numbers",
                 "description": (
                     "Parallel shocks for the hedged position's shock table, in basis points, "
                     "none of them zero: a zero shock is refused."
@@ -433,6 +436,7 @@ CONFIG_SCHEMA: dict[str, Any] = {
             },
             "allowed_instruments": {
                 "default": [],
+                "type": "list of strings",
                 "description": (
                     "Structure names the programme permits; empty permits every structure."
                 ),
@@ -459,9 +463,15 @@ is a mapping with these fields:
 ``used_by``
     The commands that read the key; a nested key without it is read by its
     block's commands. ``required`` and ``null`` are checked only for those
-    commands, while an unknown key is refused by every command.
+    commands, while an unknown key, a block or list of the wrong shape and a
+    list holding the wrong things are refused by every command.
 ``keys`` / ``items``
     A nested block, or a list of blocks, each a mapping of entries like this.
+``type``
+    For a key whose value is a list of plain values: ``"list of numbers"``
+    (JSON numbers, finite, not booleans) or ``"list of strings"``. A string
+    given where the list belongs is refused rather than read a character at
+    a time.
 ``refused``
     A key recognised in order to refuse it; the text is the migration.
 
@@ -477,8 +487,9 @@ block -- the ``fixings`` a seasoned trade needs, say -- is one entry::
 ``tests/test_app_config.py`` holds the schema to the handlers: every key a
 handler looks up must be documented, ``used_by`` must be exactly the
 commands that read the key, a required key must be read by every command
-that requires it, and leaving out or nulling any key must end in a refusal
-or a result, never a ``KeyError`` or a ``TypeError``.
+that requires it, every list of plain values must have a ``type``, and
+leaving out or nulling any key must end in a refusal or a result, never a
+``KeyError`` or a ``TypeError``.
 """
 
 
@@ -549,7 +560,8 @@ def require_config(config: Mapping[str, Any] | None, command: str) -> dict[str, 
     - every key must be documented where it sits, or start with ``_`` (a
       comment, at any depth); anything else is a typo or an invention;
     - a key documented as ``refused`` is refused with its migration;
-    - a block documented as a mapping or a list must be one.
+    - a block documented as a mapping or a list must be one;
+    - a list documented with a ``type`` must be a list of those values.
 
     For the blocks ``command`` reads (``used_by``) it also checks that every
     ``required`` key is there, and that a key whose default is a value is not
@@ -624,6 +636,8 @@ def _join(path: str, key: Any) -> str:
 
 def _kind(value: Any) -> str:
     """What a JSON reader would call ``value``."""
+    if value is None:
+        return "null"
     if isinstance(value, bool):
         return "true or false"
     if isinstance(value, (int, float)):
@@ -634,7 +648,28 @@ def _kind(value: Any) -> str:
         return "a mapping"
     if isinstance(value, (list, tuple)):
         return "a list"
-    return type(value).__name__
+    # A YAML date, say: what the loader made of it, in words.
+    return f"a {type(value).__name__}"
+
+
+def _is_number(value: Any) -> bool:
+    """A JSON number: not a boolean, which Python counts as an int, nor NaN or infinity."""
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
+
+
+def _is_string(value: Any) -> bool:
+    return isinstance(value, str)
+
+
+_LIST_TYPES: dict[str, tuple[str, Callable[[Any], bool]]] = {
+    "list of numbers": ("a finite number", _is_number),
+    "list of strings": ("a string", _is_string),
+}
+"""Each ``type`` a schema entry may declare: what one element must be, and the test."""
 
 
 def _level_at(where: str) -> dict[str, Any]:
@@ -768,6 +803,16 @@ def _check_value(
                 continue
             entries.append(_check_block(entry, spec["items"], at, readers, problems))
         return entries
+    if "type" in spec:
+        # Without this a string where the list belongs was iterated a
+        # character at a time: shocks_bp "25" ran the shocks 2 and 5.
+        element, accepts = _LIST_TYPES[spec["type"]]
+        if not isinstance(value, (list, tuple)):
+            problems.shapes.append((where, f"a {spec['type']}", value))
+        else:
+            for index, item in enumerate(value):
+                if not accepts(item):
+                    problems.shapes.append((f"{where}[{index}]", element, item))
     return copy.deepcopy(value)
 
 
