@@ -656,7 +656,8 @@ class _PricedContract:
             is in the snapshot.
         realised_days: Calendar days priced from ``fixed``.
         forecast_days: Calendar days on the ``as_of`` fixing that the path
-            priced because the snapshot did not hold it.
+            priced because there was no snapshot, or it did not hold that
+            day yet.
         missing_from: The first business day before ``as_of`` with no fixing,
             or ``None`` when every one has one.
     """
@@ -743,10 +744,10 @@ def fit_fomc_step_curve(
     before -- prices a month that straddled a meeting already held as if the
     meeting had not happened, and bends the first segment to absorb it. The
     fixing dated ``as_of`` itself is read when the snapshot has it and
-    forecast by the path when it does not, with a
-    ``curve_forward_for_todays_fixing:SOFR`` warning (quality ``proxy``, the
-    code pricing uses for the same substitution) naming the contracts that
-    rest on it.
+    forecast by the path when it does not, QuantLib's default. Not yet
+    published is the ordinary state of that fixing during the day, so the
+    forecast lowers no quality: ``forecast_days_on_as_of`` in the evidence
+    counts, per contract, the calendar days that rest on it.
 
     **Every segment must price a day still to come.** A meeting on or before
     ``as_of`` is refused: the rate it set is in the fixings, and the segment
@@ -772,7 +773,8 @@ def fit_fomc_step_curve(
 
     Returns:
         The :class:`FOMCStepFit`. Its evidence records how many calendar days
-        of each contract were priced from fixings.
+        of each contract were priced from fixings, and how many rest on a
+        forecast of the ``as_of`` fixing.
 
     Raises:
         UnderdeterminedCurveError: Fewer contracts than segments, a meeting
@@ -902,7 +904,6 @@ def fit_fomc_step_curve(
                 message=TERM_RATE_CAVEAT,
                 data_quality=DataQuality.ASSUMED,
             ),
-            *_forecast_warning(as_of, priced),
         ),
     )
     return FOMCStepFit(
@@ -946,22 +947,3 @@ def _require_every_segment_priced(
             f"no contract prices a day in the segments {idle}, so nothing pins their rate. "
             "Drop the meetings the strip does not reach, or add a contract that covers them."
         )
-
-
-def _forecast_warning(as_of: date, priced: Sequence[_PricedContract]) -> tuple[Degradation, ...]:
-    """The degradation for contracts that rest on an ``as_of`` fixing the path forecast."""
-    resting = [p.label for p in priced if p.forecast_days]
-    if not resting:
-        return ()
-    return (
-        Degradation(
-            code=f"curve_forward_for_todays_fixing:{SOFR.name}",
-            message=(
-                f"The {SOFR.name} fixing dated {as_of.isoformat()} is not in the snapshot, so "
-                f"the fitted path stands in for it in {resting}. A fixing dated as_of is read "
-                "when it is there and forecast when it is not; pass it in fixings= to fit on "
-                "the print."
-            ),
-            data_quality=DataQuality.PROXY,
-        ),
-    )

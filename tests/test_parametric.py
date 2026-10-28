@@ -645,21 +645,23 @@ class TestFOMCStepFitInProgress:
         assert realised["SR1-Nov26"] == 0
         assert fit.evidence.inputs[0].instrument_kind == "sofr_fixing"
 
-    def test_the_as_of_fixing_is_forecast_when_absent_and_says_so(self):
+    def test_the_as_of_fixing_is_forecast_when_absent_without_a_degradation(self):
         """The convention on as_of: a fixing dated as_of is read when it is
-        there and forecast when it is not, and the forecast is a warning."""
+        there and forecast when it is not. Not yet published is the ordinary
+        state of that fixing during the day, not a defect of the data, so
+        the forecast is recorded as a field and lowers no quality (Alan
+        Vazquez's suggestion on PR #12, adopted across the set). It used to
+        add ``curve_forward_for_todays_fixing:SOFR`` at ``proxy``."""
         fit = fit_fomc_step_curve(
             self.IN_PROGRESS_AS_OF,
             self.MEETINGS,
             self._strip(),
             fixings=self._snapshot(self._days()),
         )
-        warnings = {w.code: w for w in fit.evidence.warnings}
-        code = "curve_forward_for_todays_fixing:SOFR"
-        assert code in warnings
-        assert "SR1-Oct26" in warnings[code].message
-        assert warnings[code].data_quality is DataQuality.PROXY
+        assert {w.code for w in fit.evidence.warnings} == {"term_rate_without_convexity"}
         assert fit.evidence.fields["forecast_days_on_as_of"]["SR1-Oct26"] == 1
+        assert fit.evidence.fields["forecast_days_on_as_of"]["SR3-Sep26"] == 1
+        assert fit.curve.segment_rates == pytest.approx(self.PATH, abs=1e-10)
 
     def test_the_as_of_fixing_is_read_when_present(self):
         days = self._days(through_as_of=True)
