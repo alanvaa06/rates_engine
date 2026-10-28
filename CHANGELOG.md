@@ -122,9 +122,12 @@ hedge's tolerance of a gap made of closed days lets through.
   made only of days the swap's calendar closes (a maturity on Juneteenth
   2030, the June IMM date, rolled to the 20th) is tolerated and listed in
   the evidence field `coverage_tolerated_gaps`; a real gap's message names
-  `swap_start=`/`swap_end=` and `require_full_coverage`. A swaption
-  expiring on the 30th is refused. Nothing moves when both dates are
-  business days.
+  `swap_start=`/`swap_end=` and `require_full_coverage`. `strip_hedge`
+  checks a swap that has started from `as_of`, and a `RealizedStubNode`
+  covers `as_of` to its end, so such a swap hedges under the default
+  `require_full_coverage`; the evidence lists the stub under
+  `coverage_realised_stub`. A swaption expiring on the 30th is refused.
+  Nothing moves when both dates are business days.
 - **A schedule the roll convention leaves with no accrual period raises
   `ConventionError` when the instrument is built.** Friday 2026-05-29 to
   Sunday 2026-05-31 under Modified Following used to construct and then
@@ -186,10 +189,15 @@ hedge's tolerance of a gap made of closed days lets through.
   needs, a trade raises `MissingFixingError` (exit code 1) naming the
   period, the fixing date or window, the series and how to pass it. It used
   to return a number with the decided part priced off the curve, or at zero
-  once begun. The risk measures and `strip_hedge` take the same `fixings=`,
-  `shock_table` reprices with the hedge's (`HedgeResult.fixings`), and the
-  CLI and MCP read them from a `fixings` block in the config; the refusal
-  names the config key there.
+  once begun. The risk measures and `strip_hedge` take the same `fixings=`
+  and record the history once, from a reprice they already make, so a spot
+  ten-year OIS's DV01 costs about what it did before. `shock_table`
+  reprices with the hedge's (`HedgeResult.fixings`). The CLI and MCP read
+  them from a `fixings` block in the config, and only the swap's own
+  refusal names `fixings.SOFR.values`. A curve entry that needs history is
+  refused by its path: `curve.futures[i]` (give the rest of a started
+  contract as `curve.stub`) or `curve.par_swaps[i]` (a par quote starts on
+  or after `as_of`, and the fixings block cannot help it).
 - **`key_rate_duration` is in years.** It is `KR DV01 / (PV x 1bp)`, and its
   `total` equals `effective_duration`; it was reported per basis point,
   1e4 smaller.
@@ -668,10 +676,16 @@ hedge's tolerance of a gap made of closed days lets through.
   statement of the paid-flow convention (a payment on `as_of` has happened,
   QuantLib's default).
 - `RateIndex.fixing_lag_days` (Term SOFR 2, SOFR, TIIE de Fondeo and TIIE
-  28 0) and the unresolved convention `tiie_28_fixing_lag`.
+  28 0), a whole number (an int or a numpy integer, stored as an int, as
+  on a cap), and the unresolved convention `tiie_28_fixing_lag`.
+  `tiie_28_fixing_lag` is stamped on TIIE 28 curves and instruments, not
+  on TIIE de Fondeo ones; `strict_conventions` on a TIIE 28 curve
+  describes it.
 - `fixings=` on `risk.bumps.repriced`, every measure in
   `risk.sensitivities`, and `strip_hedge`; `HedgeResult.fixings`;
-  `pricing.linear.history_evidence`; `pricing.projection.may_have_history`.
+  `pricing.linear.discounted_value_with_history`;
+  `risk.bumps.repriced_with_history`;
+  `pricing.projection.may_have_history`.
 - `bootstrap_discount_curve(max_iterations=, iteration_tolerance=)`,
   `DEFAULT_MAX_ITERATIONS`, `DEFAULT_ITERATION_TOLERANCE`; evidence
   `iterations`, `max_iterations`, `iteration_tolerance`.
@@ -698,7 +712,8 @@ hedge's tolerance of a gap made of closed days lets through.
 - `StructureQuote.basis_bp`, `.r_domestic_effective`, `.carried()`;
   `StructureQuote` accepts a lognormal `Volatility`;
   `hedging.fx_structures.MIN_PLAUSIBLE_FX_VOLATILITY`.
-- `pricing.fx_forward.MAX_PLAUSIBLE_RATE`, `require_plausible_rate`,
+- `pricing.fx_forward.MAX_PLAUSIBLE_RATE`, `require_plausible_rate`
+  (`limit=`, `limit_name=`, `convention=` for a narrower band),
   `require_plausible_basis`; `forward_from_curves(inputs=...)`;
   `FXForwardResult.spot_date` and `.year_fraction`.
 - `ButterflyConvention` (`SMILE`, the default, and `BROKER`),
@@ -710,10 +725,19 @@ hedge's tolerance of a gap made of closed days lets through.
   each list of plain values has a `type`, and the `nulls`, `empty_blocks`
   and `lists` notes state the rules the check applies.
 - `app.config.require_config`, and `app.config.require_block`, the same
-  check on one block, which `calibration_nodes` applies to each
-  `par_swaps` entry for a caller that skips `require_config`.
+  check on one block (`command=` checks it as one command reads it), which
+  `calibration_nodes` applies to each `par_swaps` entry and `fx_inputs` to
+  the `fx` block, for a caller that skips `require_config`.
 - The config's `fixings` block (`fixings.SOFR.values`, `source`,
-  `data_quality`) for `price` and `hedge`; `app.builders.fixings_snapshot`.
+  `data_quality`) for `price` and `hedge`, checked by path. A date that is
+  not ISO 8601 or falls on a SIFMA closed day, a date given twice, a
+  non-numeric rate or an unknown `data_quality` is a `ConfigurationError`.
+  A rate beyond `MAX_PLAUSIBLE_OVERNIGHT_FIXING` (20%), or a latest fixing
+  more than `FIXING_CURVE_FACTOR` (4) times and more than
+  `FIXING_CURVE_GAP` (50 bp) off the curve's overnight rate, is an
+  `ImplausibleInputError`: 0.43 for 0.043 priced a seasoned payer at
+  14,200,798.33 instead of 255,311.41, and 0.05 meaning 0.05% read as 5%.
+  Also `app.builders.fixings_snapshot(curve=)` and the three constants.
 - `describe` lists `FEDERAL_RESERVE` among `calendars`.
 - The sdist now carries `tests/conftest.py`, `tests/fixtures/`, `scripts/`,
   `AGENTS.md`, `CHANGELOG.md`, `llms.txt` and `docs/**/*.md` (new
