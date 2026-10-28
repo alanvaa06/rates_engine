@@ -165,8 +165,14 @@ not a print still to come.
   itself included) and the snapshot has no `"SOFR"` series. A snapshot no
   contract needs is not asked for the series.
 - The risk measures and `strip_hedge` raise it like `pv`, and take
-  `fixings=` the same way. Under `rateng price` and `hedge` the message
-  names the config key, `fixings.SOFR.values`.
+  `fixings=` the same way. Under `rateng price` and `hedge`, a refusal of
+  the swap's own valuation names `fixings.SOFR.values`. A curve entry that
+  needs history is refused first, by path: `curve.futures[i]`, a contract
+  that has started (give the rest of its period as `curve.stub`), or
+  `curve.par_swaps[i]`, a par swap whose schedule rolls its start before
+  `as_of`. A curve node takes no fixings, so the message gives the way out
+  that works: an effective date on a business day on or after `as_of`, or,
+  on a weekend, valuing as of the business day the quotes are from.
 - `DiscountCurve.forward` raises it for a period starting before `as_of`,
   and a bootstrap for a futures period that has started: a curve holds no
   history, and the realised part belongs in a `RealizedStubNode`.
@@ -236,6 +242,16 @@ layout. Pass `percent=True`, or `percent=False` to keep the values. Below
 0.30% the band cannot tell percent from decimals, which is why the other
 layouts refuse with `UnsupportedConventionError` instead.
 
+The config's `fixings` block has two more checks. Every rate must be
+within `MAX_PLAUSIBLE_OVERNIGHT_FIXING` (20% a year), checked through
+`require_plausible_rate`: 0.43 typed for 0.043 stops there. The latest
+fixing on or before `as_of` is refused when it is more than
+`FIXING_CURVE_FACTOR` (4) times and more than `FIXING_CURVE_GAP` (50 bp)
+away from the curve's overnight forward from `as_of`: a tenfold typo the
+band lets through (0.15 for 0.015 on a curve near 1.5%), or a percent file
+from 2020-22 where 0.05 meant 0.05%. Each message starts with
+`fixings.SOFR.values[i].rate`.
+
 The error is also raised for a NaN, an infinite, or a too-large-to-price
 input (a finite quote whose residual overflows) before anything is solved:
 by `bootstrap_discount_curve` (naming every instrument),
@@ -294,8 +310,16 @@ by path:
 
 A `null` whose default is `null` means absent, and so does an optional
 block that is empty or holds only comments. `app.config.require_block`
-applies the same check to one block, and `calibration_nodes` runs it on
-each `par_swaps` entry for a caller that skips `require_config`.
+applies the same check to one block, for every command or, with
+`command=`, as that command reads it; `calibration_nodes` runs it on each
+`par_swaps` entry and `fx_inputs` on the `fx` block.
+
+Once the file has passed that check, `price` and `hedge` read the
+`fixings` block and refuse, each by its path: a date that is not ISO 8601
+or falls on a day the index's calendar closes (no rate is published then);
+a date given twice; a rate that is not a number; or a `data_quality` other
+than observed, synthetic, proxy and assumed. A rate that is a number but
+not a plausible fixing is an `ImplausibleInputError`, above.
 
 Under `--json` the CLI also raises it for a command line its parser
 rejects, exit code 1; without `--json` argparse prints its usage and exits
@@ -317,9 +341,6 @@ collide after the node date is appended to repeated labels; a zero in
 `hedge.require_full_coverage` that is not a JSON boolean. Over the CLI each
 message starts with the key at fault: `curve.futures[i].contract: …` or
 `hedge.contract_dv01 contradicts curve.futures[i]: …`.
-
-A `fixings` rate of 1 or more (a percent written for a decimal) or a date
-given twice is refused by its path.
 
 Also raised by `load_program` for a policy file this engine cannot read: an
 unknown key, a missing required one, a rebalance frequency that is not one
@@ -352,7 +373,10 @@ the TIIE 28 fixing lag (`tiie_28_fixing_lag`) and the difference between
 the BMV and Banxico calendars are all assumptions. They are stored as a
 data gap rather than a code one:
 `rates_engine.conventions.indices.UNRESOLVED_MXN` is a tuple, and
-resolving them shortens it and changes nothing else.
+resolving them shortens it and changes nothing else. Each curve carries the
+entries its benchmark rests on: a TIIE de Fondeo curve, which sets no rate
+in advance, does not carry `tiie_28_fixing_lag`, and its
+`strict_conventions` refusal does not name it.
 
 ### `MarketDataError`
 
@@ -498,9 +522,12 @@ message names the gap and what to pass instead: `swap_start=` or
 `swap_end=` for a shorter span, or `require_full_coverage=False`. A gap at
 either end made only of days the swap's roll calendar closes is not
 refused; the evidence lists it under `coverage_tolerated_gaps`. A gap
-between contracts always is. A missing contract is never extrapolated from
-its neighbours, because the hedge would then report as complete when it is
-not.
+between contracts always is. A `RealizedStubNode` covers `as_of` to its
+end, so a swap that has started, whose coverage is checked from `as_of`,
+is covered by the stub and the contracts after it; a day between the
+stub's end and the first contract is a gap. A missing contract is never
+extrapolated from its neighbours, because the hedge would then report as
+complete when it is not.
 
 Pass `require_full_coverage=False` when a partial hedge is what you want.
 From a CLI or MCP config, set `"require_full_coverage": false` in the
@@ -600,7 +627,7 @@ evidence chain:
 | `smile_forward_unverified` | The smile given to a hedge structure does not report the forward it was built on, so it could not be checked against the forward the legs are struck on, basis included. `assumed`. |
 | `nelson_siegel_tau_at_bound` | The fitted decay `tau` sits on a bound of `tau_bounds`: the range set it, not the data. Widen the bounds if the range was not a deliberate constraint. `assumed`. |
 | `term_rate_without_convexity` | A term rate read off a futures-fitted curve is the expected average overnight rate, with no convexity adjustment (`TERM_RATE_CAVEAT`). `assumed`. |
-| `unresolved_convention:<name>` | A convention this build assumes rather than knows: one per entry of `UNRESOLVED_MXN` on a peso curve, and one per unresolved convention of the instrument's index and of the collateral rate on a price (`mxn_collateral_rate` on any peso one). `assumed`; `bootstrap_mxn_curve(strict_conventions=True)` refuses with `UnresolvedConventionError` instead. |
+| `unresolved_convention:<name>` | A convention this build assumes rather than knows: one per entry of `UNRESOLVED_MXN` its benchmark rests on, on a peso curve (all but `tiie_28_fixing_lag` on TIIE de Fondeo), and one per unresolved convention of the instrument's index and of the collateral rate on a price (`mxn_collateral_rate` on any peso one). `assumed`; `bootstrap_mxn_curve(strict_conventions=True)` refuses with `UnresolvedConventionError` instead. |
 | `hedge_ratio_outside_band`, `instrument_not_permitted`, `instrument_not_stated` | A finding of `audit_hedge` above informational severity: the proposed ratio outside the programme's band, an instrument the policy does not permit, or no instrument stated. Carried as a degradation (`assumed`) when the audit reports; `strict=True` raises `PolicyBreachError` for a proposal that is not compliant. |
 
 Read them with `rates_engine.core.diagnostics.all_warnings(result.evidence)`, or

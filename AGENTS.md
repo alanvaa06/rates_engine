@@ -183,9 +183,11 @@ same reason.
 
 **Every MXN convention in this build is a guess, and says so.**
 `UNRESOLVED_MXN` names them; every peso result carries one `Degradation`
-per entry, so `worst_quality` reaches `ASSUMED` and anything priced on the
-curve inherits it. Pass `strict_conventions=True` to refuse instead. The
-gap is stored as data: resolving it shortens the tuple and changes no code.
+per entry it rests on (a TIIE de Fondeo curve does not carry
+`tiie_28_fixing_lag`), so `worst_quality` reaches `ASSUMED` and anything
+priced on the curve inherits it. Pass `strict_conventions=True` to refuse
+instead. The gap is stored as data: resolving it shortens the tuple and
+changes no code.
 
 **The engine compares hedges; it does not recommend one.** There is no
 function whose name contains `recommend`, and a test scans for it.
@@ -339,13 +341,18 @@ hedge) once you `project.register` it; a swap-like one also needs
 with `MissingFixingError`. Paid flows count for nothing. A fixing dated
 before `as_of` is required; one dated `as_of` is read if you pass it and
 forecast if you do not, as QuantLib does by default, without a
-degradation: a swap or FRA records it in `fixings_dated_as_of`. A
+degradation, and a swap or FRA records it in `fixings_dated_as_of`. A
 snapshot without the index's series is refused even for a term fixing
-dated `as_of`. A forward before
-the curve's `as_of` is refused too. The fixing lag lives on
-`RateIndex.fixing_lag_days`, so an IRS, a FRA and a caplet on one period
-fix on one day. The fixings used are in the evidence as
-`realised_fixings`.
+dated `as_of`. A forward before the curve's `as_of` is refused too, and so
+is a curve entry that needs history: a started futures contract goes in
+`curve.stub` (a `RealizedStubNode`), and a par swap must start on or after
+`as_of`. The `fixings` block prices the swap, never the curve. A started
+swap's hedge is checked from `as_of`, with the stub covering `as_of` to
+its end. The fixing lag lives on `RateIndex.fixing_lag_days`, so an IRS, a
+FRA and a caplet on one period fix on one day. The fixings used are in the
+evidence as `realised_fixings`, chained once into every risk measure. In a
+config, rates are decimals and dates SIFMA business days, and the latest
+fixing must sit near the curve's overnight rate.
 
 **Calibrate to a swap with `SwapQuoteNode`, not `ParSwapNode`, when you have
 the swap.** `SwapQuoteNode(swap, quote)` fits the pricer's own par rate, so

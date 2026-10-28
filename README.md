@@ -106,7 +106,10 @@ rateng hedge-structures --config fx.json --json  # eight structures, costed side
 from, and `rateng describe --json` lists every config key under `config`,
 with its units, its default and the commands that read it.
 `fixings.SOFR.values: [{"date": "2025-09-17", "rate": 0.043}, ...]` gives
-`price` and `hedge` the history a swap that has started needs. With
+`price` and `hedge` the history a swap that has started needs. Dates are
+SIFMA business days and rates are decimals. A row on a closed day, a rate
+beyond 20%, or a last fixing far off the curve's overnight rate is refused
+by its path. With
 `--json`, stdout is exactly one parseable document and all narration goes
 to stderr. Exit code 1 means the inputs are unusable, 2 means the
 calculation is impossible.
@@ -261,9 +264,11 @@ pricing or hedging code knowing what a proxy is.
   from the build environment, and QuantLib — the one substantive source that
   is — has no TIIE index at all. The TIIE day count, the 28-day coupon period,
   the TIIE 28 versus TIIE de Fondeo distinction, the TIIE 28 fixing lag and
-  the SIE series identifiers are assumptions, named in `UNRESOLVED_MXN`, carried as a degradation on
-  every peso result, and refusable with `strict_conventions=True`. Resolving
-  them shortens a tuple and changes nothing else.
+  the SIE series identifiers are assumptions, named in `UNRESOLVED_MXN`,
+  carried as a degradation on every peso result that rests on them (the
+  TIIE 28 lag not on TIIE de Fondeo), and refusable with
+  `strict_conventions=True`. Resolving them shortens a tuple and changes
+  nothing else.
 - **The Mexican calendar is the BMV's, not Banxico's.** Different lists, and
   the diff has not been made. See `tests/fixtures/bmv_holidays.csv`.
 - **There is no default FX delta convention, and no default ATM convention.**

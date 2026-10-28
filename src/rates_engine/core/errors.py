@@ -150,8 +150,9 @@ class ConfigurationError(RatesEngineError):
     The config is absent; a key anywhere in it is one the schema does not
     document; a block, a list or a list's values have the wrong shape; or a
     block the command reads lacks a required key, or holds a ``null`` where
-    the key's default is a value. Under ``--json``, a command line the parser
-    rejects is one too. The futures hedge raises it for inputs that
+    the key's default is a value; or a ``fixings`` row has a date or a rate
+    that cannot be read. Under ``--json``, a command line the parser rejects
+    is one too. The futures hedge raises it for inputs that
     contradict each other, and ``load_program`` for a policy file it cannot
     read. The message names the path or the input, and what to write
     instead.
