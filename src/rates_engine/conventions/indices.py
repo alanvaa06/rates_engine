@@ -27,6 +27,8 @@ lowest layer they share is this one.
 
 from __future__ import annotations
 
+import numbers
+import operator
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -169,7 +171,9 @@ class RateIndex:
             Term SOFR, the ARRC's convention. Zero for an overnight rate,
             compounded in arrears over its own period. The one place the lag
             is stated: the linear pricer and the caps both read it, so an
-            IRS, a FRA and a caplet on one period fix on one day.
+            IRS, a FRA and a caplet on one period fix on one day. A whole
+            number, an int or a numpy integer, stored as an int: the rule
+            a cap's own ``fixing_lag_days`` follows.
     """
 
     name: str
@@ -187,12 +191,20 @@ class RateIndex:
         # A whole number of days, checked by type: a bool is an int to Python
         # and 1.5 passes ``lag < 0``, and add_business_days' countdown never
         # reaches zero on either -- it walks back until the calendar runs out.
+        #
+        # The rule of CapFloor and Caplet (#16), so an index and a cap that
+        # overrides it accept the same numbers: Integral, not int, because a
+        # lag read from a DataFrame is a numpy int64, and numpy registers its
+        # integers as Integral but neither its bool nor its floats.
         lag = self.fixing_lag_days
-        if isinstance(lag, bool) or not isinstance(lag, int) or lag < 0:
+        if isinstance(lag, bool) or not isinstance(lag, numbers.Integral) or lag < 0:
             raise UnsupportedConventionError(
                 f"{self.name}: fixing_lag_days must be a whole number of business days, "
                 f"zero or more, got {lag!r}"
             )
+        # Stored as a plain int: a fixing date negates the lag, and a numpy
+        # unsigned integer negates by wrapping round, np.uint8(2) to 254.
+        object.__setattr__(self, "fixing_lag_days", operator.index(lag))
 
     @property
     def is_verified(self) -> bool:

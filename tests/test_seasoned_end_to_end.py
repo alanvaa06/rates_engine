@@ -180,6 +180,38 @@ class TestOneFixingLagOnTheIndex:
         assert cap.fixing_lag_days == 1
         assert record["observed_from"] == cap.caplets[0].fixing_date.isoformat() == "2026-01-15"
 
+    @staticmethod
+    def _one_day(lag) -> RateIndex:
+        return RateIndex(name="TEST_LAG", label="Test lag", slug="test_lag",
+                         currency=Currency.USD, tenor=IndexTenor.TERM_3M,
+                         day_count=DayCount.ACT_360, calendar=SIFMA_US,
+                         administrator="nobody", fixing_lag_days=lag)
+
+    @pytest.mark.parametrize("lag", ["int64", "int32", "uint8"])
+    def test_a_numpy_integer_lag_is_a_whole_number_stored_as_an_int(self, lag):
+        # #16's rule for a cap's lag, on the index too: RateIndex refused
+        # np.int64(2), which a cap built on it accepted.
+        import numpy as np
+
+        index = self._one_day(getattr(np, lag)(2))
+        assert type(index.fixing_lag_days) is int and index.fixing_lag_days == 2
+        # Two SIFMA business days before Tuesday 2026-01-20 is Thursday the
+        # 15th, across Martin Luther King Day; np.uint8(2) negated is 254.
+        cap = CapFloor(effective=date(2026, 1, 20), maturity=date(2027, 1, 20), strike=0.04,
+                       index=index)
+        assert cap.caplets[0].fixing_date == date(2026, 1, 15)
+
+    @pytest.mark.parametrize("lag", [True, 2.0, -1, "2"])
+    def test_anything_but_a_whole_number_of_days_is_refused(self, lag):
+        import numpy as np
+
+        from rates_engine.core.errors import UnsupportedConventionError
+
+        with pytest.raises(UnsupportedConventionError, match="whole number of business days"):
+            self._one_day(lag)
+        with pytest.raises(UnsupportedConventionError):
+            self._one_day(np.True_)
+
     def test_a_cap_takes_its_lag_from_the_index_unless_told_otherwise(self):
         cap = CapFloor(effective=date(2026, 4, 20), maturity=date(2027, 4, 20), strike=0.04)
         assert cap.fixing_lag_days == TERM_SOFR_3M.fixing_lag_days == 2
