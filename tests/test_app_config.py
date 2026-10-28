@@ -464,6 +464,35 @@ class TestAListIsAList:
             assert DOCUMENTED[path][0].get("type") in {"list of numbers", "list of strings"}, path
 
 
+class TestTheConvexityModelIsNamed:
+    """A convexity block names its model, or the sigma beside it prices nothing.
+
+    ``curve.convexity: {"sigma": 0.01}`` took the model ``none``, so ``rateng
+    price`` exited 0 with a PV of 114,866.89, the PV with no adjustment at
+    all; with ``model: ho_lee`` it is 92,199.33 (Alan's review of round 2,
+    point 2, reproduced on f913dfc). That is the PV the ``convexty`` typo
+    gave, reached with every key spelt right.
+    """
+
+    @pytest.mark.parametrize(
+        "block", [{"sigma": 0.01}, {"kappa": 0.03}, {"sigma": 0.01, "kappa": 0.03}],
+        ids=["sigma", "kappa", "both"],
+    )
+    @pytest.mark.parametrize("name", ["bootstrap", "price", "hedge"])
+    def test_a_block_without_a_model_is_refused(self, name, block, full):
+        full["curve"]["convexity"] = block
+        assert f"curve.convexity.model is missing, and {name} needs it" in _refusal(name, full)
+
+    def test_model_none_still_ignores_its_sigma(self, full):
+        # #15 lets "none" ignore the sigma it never uses, at Alan's request;
+        # naming the model is what this asks for, not dropping the sigma.
+        absent = copy.deepcopy(full)
+        del absent["curve"]["convexity"]
+        full["curve"]["convexity"] = {"model": "none", "sigma": 0.01}
+        none = commands.COMMANDS["price"](full)["measures"]["pv"]["value"]
+        assert none == commands.COMMANDS["price"](absent)["measures"]["pv"]["value"]
+
+
 class TestTheCheckedCopy:
     """What the handler reads is a clean copy, and the caller's mapping is untouched."""
 

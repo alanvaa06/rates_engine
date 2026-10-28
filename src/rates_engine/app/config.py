@@ -194,10 +194,17 @@ CONFIG_SCHEMA: dict[str, Any] = {
             "convexity": {
                 "description": (
                     "How futures rates are convexity-adjusted before they enter the "
-                    "curve. Absent means no adjustment."
+                    "curve. Absent means no adjustment; given, it names its model."
                 ),
                 "keys": {
-                    "model": {"default": "none", "description": "none, ho_lee or hull_white."},
+                    "model": {
+                        "required": True,
+                        "description": (
+                            "The model, none, ho_lee or hull_white; required whenever the "
+                            "block is given, since a sigma without it priced with no "
+                            "adjustment at all."
+                        ),
+                    },
                     "sigma": {
                         "default": 0.0,
                         "description": (
