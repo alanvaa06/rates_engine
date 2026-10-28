@@ -398,11 +398,12 @@ class TestTheForwardRunsFromTheSpotDate:
 
     Reference values from QuantLib 1.44, not from this package. Flat
     continuously compounded ACT/365F curves (`ql.FlatForward`), the spot date
-    two `ql.Mexico()` business days after `as_of` and rolled to a day
-    `ql.UnitedStates(ql.UnitedStates.FederalReserve)` is open too (QuantLib's
-    FX rule, see `tests/test_fx_spot_date.py`; on these trade dates it is
-    also what `ql.JointCalendar` of the two gives), deliveries from advancing
-    the spot date by the tenor (Following), and
+    two business days of `ql.JointCalendar(ql.UnitedStates(
+    ql.UnitedStates.FederalReserve), ql.Mexico())` after `as_of` (the peso
+    rule, see `tests/test_fx_spot_date.py`; no US holiday falls on T+1 of
+    these trade dates, so QuantLib's general FX rule gives the same spot
+    date), deliveries from advancing the spot date by the tenor (Following),
+    and
 
         F = S * [P_usd(T) / P_usd(spot)] / [P_mxn(T) / P_mxn(spot)]
 
@@ -474,6 +475,25 @@ class TestTheForwardRunsFromTheSpotDate:
         assert fields["year_fraction"] == pytest.approx(0.2493150684931507, rel=1e-12)
         assert result.payload_fields()["spot_date"] == "2026-09-17"
         assert result.spot_date == date(2026, 9, 17)
+
+    def test_a_us_holiday_on_t_plus_one_moves_the_forward(self):
+        """Alan Vazquez's correction on PR #13: for the peso, T+1 has to be a
+        US business day too. Struck on 25 November 2026 the spot date is
+        Monday the 30th, not Friday the 27th (Thanksgiving is the 26th), so
+        three days less carry: 81.6 pips on a 26 February delivery, 27.2 a
+        day at 9.5% and 4.2%. Both numbers are `ql.FlatForward` discount
+        factors run from the stated spot date, so neither comes from here."""
+        as_of, delivery = date(2026, 11, 25), date(2027, 2, 26)
+        result = forward_from_curves(
+            USDMXN, 18.50, delivery,
+            self._flat(as_of, 0.095, Currency.MXN), self._flat(as_of, 0.042, Currency.USD),
+        )
+        from_the_30th = 18.737911308516377  # QuantLib, spot date 2026-11-30
+        from_the_27th = 18.746075628829786  # QuantLib, spot date 2026-11-27 (round 2)
+        assert result.spot_date == date(2026, 11, 30)
+        assert result.outright == pytest.approx(from_the_30th, rel=1e-12)
+        assert USDMXN.pips(from_the_27th - from_the_30th) == pytest.approx(81.643, abs=1e-3)
+        assert result.year_fraction == pytest.approx(0.2410958904109589, rel=1e-12)
 
 
 class TestAForwardInheritsItsCurvesAssumptions:
