@@ -463,7 +463,9 @@ is a mapping with these fields:
     Every entry has one.
 ``required``
     ``True`` when a command that reads the block cannot run without the key.
-    Absent, or ``null``, it is refused by name.
+    Absent, or ``null``, it is refused by name. A required key of an
+    optional block is required only when the block is given: an optional
+    block that is empty, or holds nothing but comments, counts as left out.
 ``default``
     What an absent key means. A key whose default is a value is refused when
     given as ``null``; one whose default is ``None`` reads ``null`` as absent.
@@ -573,7 +575,9 @@ def require_config(config: Mapping[str, Any] | None, command: str) -> dict[str, 
     For the blocks ``command`` reads (``used_by``) it also checks that every
     ``required`` key is there, and that a key whose default is a value is not
     given as ``null``. A ``null`` for a key whose default is ``null`` is the
-    same as leaving it out.
+    same as leaving it out, and so is an optional block that is empty or
+    holds only comments: ``hedge_program: {}`` audits nothing, and a comment
+    switches nothing off in a block that holds anything else.
 
     Args:
         config: The configuration mapping, or ``None``.
@@ -581,8 +585,8 @@ def require_config(config: Mapping[str, Any] | None, command: str) -> dict[str, 
 
     Returns:
         A copy of the config as plain ``dict`` and ``list`` values, without
-        comment keys and without the ``null`` values that mean "absent". The
-        caller's mapping is not modified.
+        comment keys, the ``null`` values that mean "absent" and the empty
+        optional blocks. The caller's mapping is not modified.
 
     Raises:
         ConfigurationError: ``config`` is ``None`` or not a mapping, or it
@@ -780,6 +784,17 @@ def _check_block(
                 problems.missing.append((where, spec))
             elif problems.applies(uses) and spec.get("default") is not None:
                 problems.nulls.append((where, spec))
+            continue
+        if (
+            "keys" in spec
+            and not spec.get("required")
+            and isinstance(value, Mapping)
+            and all(_is_comment(name) for name in value)
+        ):
+            # An optional block with nothing in it, or nothing but comments,
+            # is a block left out: a file switches a block off by emptying
+            # it, without losing where it goes. A required block, or an entry
+            # of a list, is walked, and names the keys it lacks.
             continue
         checked[key] = _check_value(value, spec, where, uses, problems)
     for key, spec in level.items():

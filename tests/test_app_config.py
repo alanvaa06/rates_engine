@@ -493,6 +493,64 @@ class TestTheConvexityModelIsNamed:
         assert none == commands.COMMANDS["price"](absent)["measures"]["pv"]["value"]
 
 
+class TestAnEmptyBlockIsLeftOut:
+    """An optional block with nothing in it, or nothing but comments, is no block.
+
+    Round 2 of #17 refused ``hedge_program: {}`` and ``curve.stub: {}`` for
+    the keys they lacked, and so a block holding only ``_disabled: true``;
+    round 1 had skipped them (Alan's review of round 2, point 3). Leaving a
+    block in place and empty is how a file switches it off without losing
+    where it goes.
+    """
+
+    @pytest.mark.parametrize("empty", [{}, {"_disabled": True}], ids=["empty", "comments"])
+    @pytest.mark.parametrize(
+        ("name", "path"),
+        [
+            ("hedge-structures", ("hedge_program",)),
+            ("bootstrap", ("curve", "stub")),
+            ("bootstrap", ("curve", "convexity")),
+            ("price", ("risk",)),
+            ("hedge", ("hedge",)),
+        ],
+        ids=["hedge_program", "curve.stub", "curve.convexity", "risk", "hedge"],
+    )
+    def test_it_is_checked_as_if_left_out(self, name, path, empty, full):
+        absent = copy.deepcopy(full)
+        *parents, last = path
+        given, left_out = full, absent
+        for part in parents:
+            given, left_out = given[part], left_out[part]
+        given[last] = empty
+        del left_out[last]
+        assert require_config(full, name) == require_config(absent, name)
+
+    @pytest.mark.parametrize("empty", [{}, {"_disabled": True}], ids=["empty", "comments"])
+    def test_an_empty_programme_audits_nothing(self, empty, full):
+        full["hedge_program"] = empty
+        assert "program_audit" not in commands.COMMANDS["hedge-structures"](full)
+
+    def test_a_comment_switches_nothing_off_in_a_block_with_keys(self, full):
+        # `_disabled` is a comment like any other: beside real keys, the
+        # block is read.
+        full["hedge_program"]["_disabled"] = True
+        assert "program_audit" in commands.COMMANDS["hedge-structures"](full)
+
+    def test_an_empty_required_block_still_names_its_keys(self, full):
+        full["swap"] = {"_note": "to be agreed"}
+        message = _refusal("price", full)
+        for key in ("effective", "maturity", "fixed_rate"):
+            assert f"swap.{key} is missing, and price needs it" in message
+
+    def test_an_empty_list_entry_is_still_refused(self, full):
+        # An entry is not a block: an empty one in a list is a quote left
+        # half-written, not a quote switched off.
+        full["curve"]["futures"][0] = {}
+        assert "curve.futures[0].start is missing, and bootstrap needs it" in _refusal(
+            "bootstrap", full
+        )
+
+
 class TestTheCheckedCopy:
     """What the handler reads is a clean copy, and the caller's mapping is untouched."""
 
