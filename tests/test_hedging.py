@@ -724,6 +724,129 @@ class TestCoverageWithOverlappingContracts:
             strip_hedge(swap, (long, short, late), as_of=as_of)
 
 
+#: With this date, a flat 4% strip and a USD 100m payer at 4%, the review's
+#: figure: 200.99 contracts on main and on #10's first round, refused once
+#: #10 adjusted the span, and 200.99 again with the tolerance below.
+JUNETEENTH_AS_OF = date(2029, 12, 10)
+
+
+def _juneteenth_strip() -> tuple:
+    """Two SR3 quarters, December 2029 IMM date to June 2030.
+
+    The June 2030 IMM date, the third Wednesday, is 19 June: Juneteenth, a
+    US federal holiday since 2021 and a full SIFMA close. A swap ending on
+    it rolls its maturity to Thursday the 20th; the contract's reference
+    quarter still ends on the 19th.
+    """
+    rate = 0.04
+    first, second, third = date(2029, 12, 19), date(2030, 3, 20), date(2030, 6, 19)
+    assert (imm_date(2029, 12), imm_date(2030, 3), imm_date(2030, 6)) == (first, second, third)
+    return (
+        RealizedStubNode(
+            end=first, accrual_factor=1 + rate * (first - JUNETEENTH_AS_OF).days / 360
+        ),
+        FuturesNode(first, second, rate, label="SR3-Z9"),
+        FuturesNode(second, third, rate, label="SR3-H0"),
+    )
+
+
+def _juneteenth_swap() -> OISSwap:
+    return OISSwap(
+        effective=date(2029, 12, 19), maturity=date(2030, 6, 19), fixed_rate=0.04,
+        notional=100_000_000.0,
+    )
+
+
+class TestAGapMadeOnlyOfClosedDays:
+    """A gap at either end that the swap's calendar closes is a roll, not a hole.
+
+    Review of #10, point 1: once a swap's span ends on its adjusted maturity,
+    a swap from the December 2029 IMM date to the June 2030 one ends on 20
+    June, the strip on the 19th, and the textbook IMM-to-IMM hedge was
+    refused over one day the market is shut. On this branch alone ``span``
+    is not adjusted, so ``swap_end=date(2030, 6, 20)`` stands in for what
+    #10's span returns.
+    """
+
+    def test_a_holiday_imm_date_at_the_end_is_not_a_gap(self):
+        hedge = strip_hedge(
+            _juneteenth_swap(), _juneteenth_strip(), as_of=JUNETEENTH_AS_OF,
+            swap_end=date(2030, 6, 20),
+        )
+        assert hedge.evidence.fields["coverage_checked"] is True
+        assert hedge.evidence.fields["coverage_tolerated_gaps"] == [
+            {"from": "2030-06-19", "to": "2030-06-20", "calendar": "SIFMA_US"}
+        ]
+        # The review's count for this hedge before the span change refused it.
+        assert hedge.total_contracts == pytest.approx(200.99, abs=0.005)
+
+    def test_tolerating_the_gap_changes_no_number(self):
+        tolerated = strip_hedge(
+            _juneteenth_swap(), _juneteenth_strip(), as_of=JUNETEENTH_AS_OF,
+            swap_end=date(2030, 6, 20),
+        )
+        waived = strip_hedge(
+            _juneteenth_swap(), _juneteenth_strip(), as_of=JUNETEENTH_AS_OF,
+            require_full_coverage=False,
+        )
+        assert tolerated.contracts == waived.contracts
+        assert waived.evidence.fields["coverage_tolerated_gaps"] is None
+
+    def test_a_strip_that_covers_the_span_tolerates_nothing(self, par_swap, strip, as_of):
+        hedge = strip_hedge(par_swap, strip, as_of=as_of)
+        assert hedge.evidence.fields["coverage_tolerated_gaps"] == []
+
+    def test_a_business_day_past_the_strip_is_still_a_gap(self):
+        # Thursday 20 June is open, so a span to the 21st leaves a day uncovered.
+        with pytest.raises(IncompleteStripError, match="runs to 2030-06-21") as caught:
+            strip_hedge(
+                _juneteenth_swap(), _juneteenth_strip(), as_of=JUNETEENTH_AS_OF,
+                swap_end=date(2030, 6, 21),
+            )
+        assert "swap_end=" in str(caught.value)
+        assert "require_full_coverage" in str(caught.value)
+
+    def test_a_weekend_before_the_strip_is_not_a_gap(self):
+        # February 2026 starts on a Sunday; a span from Saturday the 31st
+        # adds a day the market is shut.
+        hedge = self._from_february(swap_start=date(2026, 1, 31))
+        assert hedge.evidence.fields["coverage_tolerated_gaps"] == [
+            {"from": "2026-01-31", "to": "2026-02-01", "calendar": "SIFMA_US"}
+        ]
+
+    def test_a_business_day_before_the_strip_is_still_a_gap(self):
+        with pytest.raises(IncompleteStripError, match="starts at 2026-01-30") as caught:
+            self._from_february(swap_start=date(2026, 1, 30))
+        assert "swap_start=" in str(caught.value)
+        assert "require_full_coverage" in str(caught.value)
+
+    def test_an_interior_gap_is_still_a_gap_whatever_the_calendar(self):
+        # Only the ends are rolls of the swap's own dates. Between two
+        # contracts, a day nobody holds is a day nobody holds.
+        rate = 0.04
+        instruments = (
+            RealizedStubNode(end=date(2026, 2, 1), accrual_factor=1 + rate * 17 / 360),
+            FuturesNode(date(2026, 2, 1), date(2026, 2, 28), rate, label="A"),
+            FuturesNode(date(2026, 3, 1), date(2026, 4, 1), rate, label="B"),
+        )
+        swap = OISSwap(effective=date(2026, 2, 1), maturity=date(2026, 4, 1), fixed_rate=rate)
+        with pytest.raises(IncompleteStripError, match="2026-02-28 to 2026-03-01"):
+            strip_hedge(swap, instruments, as_of=MIX_AS_OF)
+
+    @staticmethod
+    def _from_february(**span):
+        rate = 0.04
+        instruments = (
+            RealizedStubNode(end=date(2026, 2, 1), accrual_factor=1 + rate * 17 / 360),
+            FuturesNode(date(2026, 2, 1), date(2026, 3, 1), rate, label="SR1-G6"),
+            FuturesNode(date(2026, 3, 1), date(2026, 4, 1), rate, label="SR1-H6"),
+        )
+        swap = OISSwap(
+            effective=date(2026, 2, 2), maturity=date(2026, 3, 31), fixed_rate=rate,
+            notional=100_000_000.0,
+        )
+        return strip_hedge(swap, instruments, as_of=MIX_AS_OF, **span)
+
 
 class TestShockTable:
     """PRD-001 AC-8.3: every column the table promises, and the residual behaving."""

@@ -34,6 +34,7 @@ from typing import Any
 
 import pandas as pd
 
+from rates_engine.conventions.calendar import HolidayCalendar
 from rates_engine.conventions.schedule import next_imm_on_or_after
 from rates_engine.core.errors import ConfigurationError, IncompleteStripError
 from rates_engine.core.evidence import DataQuality, Degradation, Evidence
@@ -278,7 +279,11 @@ def strip_hedge(
     Raises:
         IncompleteStripError: The strip has no contract covering part of the
             swap's span, and ``require_full_coverage`` is set. A missing
-            contract is never interpolated from its neighbours.
+            contract is never interpolated from its neighbours. A gap at
+            either end made only of days the swap's calendar closes is not
+            refused: it is the swap's date rolled off a holiday, as when
+            Juneteenth falls on the June IMM Wednesday, and the evidence
+            lists it under ``coverage_tolerated_gaps``.
         ConfigurationError: Two instruments' keys cannot be told apart even
             with the node date appended; a node declares a contract its
             period contradicts (an SR1 on an IMM quarter, an SR3 on a
@@ -296,8 +301,11 @@ def strip_hedge(
     default_start, default_end = swap.span
     start = swap_start or default_start
     end = swap_end or default_end
-    if require_full_coverage:
-        _check_coverage(futures, start, end)
+    tolerated_gaps = (
+        _check_coverage(futures, start, end, _roll_calendar(swap))
+        if require_full_coverage
+        else None
+    )
 
     # The bootstrap first: it refuses two instruments pinning one node, which
     # is what a contract passed twice is, under its own name.
@@ -362,6 +370,7 @@ def strip_hedge(
             "contract_sizing": sizing,
             "futures_count": len(futures),
             "coverage_checked": require_full_coverage,
+            "coverage_tolerated_gaps": tolerated_gaps,
             "swap_span": [start.isoformat(), end.isoformat()],
             "quote_parallel_dv01": quote_parallel_dv01,
             "bucket_sum": sum(deltas.values()),
@@ -716,21 +725,74 @@ def _rolled_period_hints(by_key: dict[str, FuturesNode], assumed: list[str], tic
     return "".join(hints)
 
 
-def _check_coverage(futures: tuple[FuturesNode, ...], start: date, end: date) -> None:
-    """Refuse when the strip leaves a hole anywhere inside the swap's span."""
+def _roll_calendar(swap: Priceable) -> HolidayCalendar | None:
+    """The calendar the swap's dates roll on, or ``None`` if it does not say.
+
+    Read rather than assumed: a peso swap rolls on BMV, and a gap is a roll
+    only on the calendar that rolled it. An instrument with no
+    ``roll_calendar`` gets no tolerance at all, which is the strict reading.
+    """
+    calendar = getattr(swap, "roll_calendar", None)
+    return calendar if isinstance(calendar, HolidayCalendar) else None
+
+
+def _check_coverage(
+    futures: tuple[FuturesNode, ...], start: date, end: date, calendar: HolidayCalendar | None
+) -> list[dict[str, str]]:
+    """Refuse when the strip leaves a hole anywhere inside the swap's span.
+
+    A gap at either end made only of days ``calendar`` closes is not a hole
+    but the swap's own date rolled off a holiday or a weekend. The June 2030
+    IMM date is Juneteenth: a swap from the December 2029 IMM date to that
+    one ends on Thursday 20 June once its maturity is rolled, the SR3
+    quarter on the 19th, and refusing over a day the market is shut blocked
+    the textbook IMM-to-IMM hedge. Strictly the day is uncovered, so each
+    one tolerated is returned for the evidence. A gap *between* contracts is
+    never tolerated: it is not a roll of the swap's dates, and the one day
+    nobody holds there is a day nobody holds.
+
+    Args:
+        futures: The strip.
+        start: First day of the span that must be covered.
+        end: End of that span, exclusive.
+        calendar: The swap's roll calendar, or ``None`` to tolerate nothing.
+
+    Returns:
+        The tolerated gaps, each as ``from``, ``to`` (exclusive) and the
+        ``calendar`` that closes every day in it; empty when there are none.
+
+    Raises:
+        IncompleteStripError: Some business day of the span is in no
+            contract's period, and the message says what to pass instead.
+    """
     ordered = sorted(futures, key=lambda f: f.start)
     covered_from = min(f.start for f in ordered)
     covered_to = max(f.end for f in ordered)
+    tolerated: list[dict[str, str]] = []
+    # What the caller can pass, said in the refusal: the span is a default,
+    # and so is the check itself. The CLI exposes the second as a key.
+    waive = (
+        "or pass require_full_coverage=False (hedge.require_full_coverage: false on the "
+        "CLI) to size the partial hedge anyway"
+    )
     if start < covered_from:
-        raise IncompleteStripError(
-            f"the strip starts at {covered_from} but the swap starts at {start}; "
-            "no contract covers the opening period and none is extrapolated"
-        )
+        opening = _roll_gap(calendar, start, covered_from)
+        if opening is None:
+            raise IncompleteStripError(
+                f"the strip starts at {covered_from} but the swap starts at {start}; "
+                "no contract covers the opening period and none is extrapolated. Pass "
+                f"swap_start= if the hedge is meant to start later, {waive}"
+            )
+        tolerated.append(opening)
     if end > covered_to:
-        raise IncompleteStripError(
-            f"the strip ends at {covered_to} but the swap runs to {end}; "
-            "no contract covers the closing period and none is extrapolated"
-        )
+        closing = _roll_gap(calendar, covered_to, end)
+        if closing is None:
+            raise IncompleteStripError(
+                f"the strip ends at {covered_to} but the swap runs to {end}; "
+                "no contract covers the closing period and none is extrapolated. Pass "
+                f"swap_end= if the hedge is meant to stop earlier, {waive}"
+            )
+        tolerated.append(closing)
     # Walk the contracts in start order, carrying the furthest end reached so
     # far. Comparing each contract only with the one starting next refused
     # valid strips: SR1 months traded under an SR3 quarter overlap it, and
@@ -741,9 +803,22 @@ def _check_coverage(futures: tuple[FuturesNode, ...], start: date, end: date) ->
         if contract.start > reach and reach < end and contract.start > start:
             raise IncompleteStripError(
                 f"the strip has no contract covering {reach} to {contract.start}, "
-                f"which lies inside the swap span {start} to {end}"
+                f"which lies inside the swap span {start} to {end}; add the missing "
+                f"contract, {waive}"
             )
         reach = max(reach, contract.end)
+    return tolerated
+
+
+def _roll_gap(calendar: HolidayCalendar | None, first: date, last: date) -> dict[str, str] | None:
+    """``[first, last)`` as the evidence records a tolerated gap, or ``None`` if it is a hole.
+
+    A gap is tolerated when ``calendar`` closes every day in it, and never
+    without a calendar to say so.
+    """
+    if calendar is None or calendar.business_days(first, last):
+        return None
+    return {"from": first.isoformat(), "to": last.isoformat(), "calendar": calendar.name}
 
 
 def _with_quote_shift(
