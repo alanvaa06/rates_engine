@@ -149,7 +149,29 @@ def tiie_par_swap_node(
     )
 
 
-def _degradations() -> tuple[Degradation, ...]:
+_TIIE_28_ONLY = frozenset({"tiie_28_fixing_lag"})
+"""Unresolved conventions only a TIIE 28 curve rests on.
+
+TIIE 28's fixing lag is a term rate's: when, before its period, the rate is
+set. A TIIE de Fondeo curve compounds an overnight rate in arrears and sets
+nothing in advance, so stamping the lag on it, as every peso curve was when
+the convention was added, marked a Fondeo price with an assumption it does
+not make. Every other entry of
+:data:`~rates_engine.conventions.indices.UNRESOLVED_MXN` concerns both.
+"""
+
+
+def _unresolved(benchmark: TIIEBenchmark | None = None) -> tuple[str, ...]:
+    """The unresolved conventions a curve on ``benchmark`` rests on; ``None`` for both."""
+    return tuple(
+        name
+        for name, _ in UNRESOLVED_MXN
+        if benchmark is not TIIEBenchmark.TIIE_FONDEO or name not in _TIIE_28_ONLY
+    )
+
+
+def _degradations(benchmark: TIIEBenchmark | None = None) -> tuple[Degradation, ...]:
+    names = set(_unresolved(benchmark))
     return tuple(
         Degradation(
             code=f"unresolved_convention:{name}",
@@ -157,6 +179,7 @@ def _degradations() -> tuple[Degradation, ...]:
             data_quality=DataQuality.ASSUMED,
         )
         for name, why in UNRESOLVED_MXN
+        if name in names
     )
 
 
@@ -170,7 +193,9 @@ class MXNCurveResult(EngineResult):
         residuals_bp: Repricing residual per instrument label.
         max_residual_bp: The worst of them.
         unresolved_conventions: The names from :data:`~rates_engine.conventions.indices.UNRESOLVED_MXN` that
-            this result rests on. Empty only when they have been verified.
+            this result rests on: all of them on TIIE 28, all but
+            ``tiie_28_fixing_lag`` on TIIE de Fondeo. Empty only when they
+            have been verified.
     """
 
     curve: DiscountCurve
@@ -220,28 +245,37 @@ def bootstrap_mxn_curve(
         interpolation: Curve interpolation.
         strict: Refuse when an instrument misses ``tolerance_bp``.
         tolerance_bp: Residual tolerance in basis points, per instrument.
-        strict_conventions: Refuse outright while any MXN convention is
-            unverified. AC-1.4. Off by default so the machinery is usable
-            and visibly marked; on for anything that must not rest on an
-            assumption.
+        strict_conventions: Refuse outright while any MXN convention the
+            benchmark rests on is unverified. AC-1.4. Off by default so the
+            machinery is usable and visibly marked; on for anything that
+            must not rest on an assumption.
 
     Returns:
         The :class:`MXNCurveResult`.
 
     Raises:
-        UnresolvedConventionError: ``strict_conventions`` is set and
-            :data:`~rates_engine.conventions.indices.UNRESOLVED_MXN` is not empty.
+        UnresolvedConventionError: ``strict_conventions`` is set and the
+            benchmark rests on an entry of
+            :data:`~rates_engine.conventions.indices.UNRESOLVED_MXN`.
         CurveArbitrageError: The instruments imply a non-monotone curve.
         BootstrapResidualError: Under ``strict``, an instrument missed.
     """
-    unresolved = tuple(name for name, _ in UNRESOLVED_MXN)
+    unresolved = _unresolved(benchmark)
     if strict_conventions and unresolved:
+        lag = (
+            ", and so is TIIE 28's fixing lag: this build reads the rate on the first "
+            "day of the period it sets, where the market may fix it a Mexican banking "
+            "day earlier"
+            if "tiie_28_fixing_lag" in unresolved
+            else ""
+        )
         raise UnresolvedConventionError(
-            f"strict_conventions is set and {len(unresolved)} MXN conventions are "
-            f"assumed rather than verified: {', '.join(unresolved)}. "
+            f"strict_conventions is set and {len(unresolved)} MXN conventions a "
+            f"{benchmark.value} curve rests on are assumed rather than verified: "
+            f"{', '.join(unresolved)}. "
             "PRD-003's research gate could not reach Banxico from this environment "
             "(403 at the egress proxy), so the day count, the coupon period and the "
-            "benchmark distinction are all guesses carried in the evidence. Run "
+            f"benchmark distinction are all guesses carried in the evidence{lag}. Run "
             "without strict_conventions to get a curve that says so, or resolve them "
             "and shorten UNRESOLVED_MXN."
         )
@@ -259,7 +293,7 @@ def bootstrap_mxn_curve(
     # `CurveSet(result.curve)` — which is what every caller writes — so
     # "anything priced on this curve inherits ASSUMED" was a sentence with
     # no mechanism behind it.
-    curve = replace(result.curve, provenance=_degradations())
+    curve = replace(result.curve, provenance=_degradations(benchmark))
     evidence = Evidence(
         produced_by="curves.bootstrap_mxn_curve",
         fields={
@@ -282,7 +316,7 @@ def bootstrap_mxn_curve(
             ),
         },
         sources=(result.evidence,),
-        warnings=_degradations(),
+        warnings=_degradations(benchmark),
     )
     return MXNCurveResult(
         evidence=evidence,

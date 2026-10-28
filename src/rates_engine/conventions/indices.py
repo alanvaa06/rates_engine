@@ -112,9 +112,12 @@ UNRESOLVED_MXN: tuple[tuple[str, str], ...] = (
 """Every MXN convention this build assumes rather than knows.
 
 A tuple of ``(name, why)``. Each one becomes a
-:class:`~rates_engine.core.evidence.Degradation` on every MXN curve, and
-``strict_conventions=True`` turns the set into a refusal. When Banxico
-becomes reachable this tuple shrinks and nothing else changes.
+:class:`~rates_engine.core.evidence.Degradation` on every MXN curve it
+concerns, and ``strict_conventions=True`` turns the set into a refusal.
+``tiie_28_fixing_lag`` concerns TIIE 28 alone: it is stamped on a TIIE 28
+curve and on whatever floats on TIIE 28, through :attr:`RateIndex.unresolved`,
+and not on a TIIE de Fondeo curve, which sets no rate in advance. When
+Banxico becomes reachable this tuple shrinks and nothing else changes.
 """
 
 

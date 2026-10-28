@@ -260,9 +260,14 @@ class TestTheUnresolvedConventions:
     """PRD-003 AC-1.4, which is the whole reason this phase is honest."""
 
     def test_every_result_names_them(self):
-        result = _curve()
+        # All of them on TIIE 28; a Fondeo curve sets no term rate in
+        # advance, so it does not rest on TIIE 28's fixing lag (#21).
+        result = _curve(benchmark=TIIEBenchmark.TIIE_28)
         assert result.unresolved_conventions == tuple(n for n, _ in UNRESOLVED_MXN)
         assert result.unresolved_conventions
+        assert _curve().unresolved_conventions == tuple(
+            n for n, _ in UNRESOLVED_MXN if n != "tiie_28_fixing_lag"
+        )
 
     def test_they_are_in_the_payload(self):
         payload = _curve().payload_fields()
@@ -270,7 +275,7 @@ class TestTheUnresolvedConventions:
         assert "banxico_series_ids" in payload["unresolved_conventions"]
 
     def test_each_one_becomes_a_degradation(self):
-        codes = {w.code for w in _curve().evidence.warnings}
+        codes = {w.code for w in _curve(benchmark=TIIEBenchmark.TIIE_28).evidence.warnings}
         for name, _ in UNRESOLVED_MXN:
             assert f"unresolved_convention:{name}" in codes
 
@@ -325,7 +330,7 @@ class TestStrictConventionsRefuses:
 
     def test_the_refusal_names_every_one(self):
         with pytest.raises(UnresolvedConventionError) as excinfo:
-            _curve(strict_conventions=True)
+            _curve(benchmark=TIIEBenchmark.TIIE_28, strict_conventions=True)
         message = str(excinfo.value)
         for name, _ in UNRESOLVED_MXN:
             assert name in message

@@ -120,6 +120,37 @@ class TestOneFixingLagOnTheIndex:
             DataQuality.ASSUMED
         )
 
+    @pytest.mark.parametrize(
+        ("benchmark", "stamped"), [("TIIE_FONDEO", False), ("TIIE_28", True)]
+    )
+    def test_only_a_tiie_28_curve_carries_the_lag(self, benchmark, stamped):
+        # Review 3, point 8: adding the convention to UNRESOLVED_MXN stamped
+        # it on every peso curve, TIIE de Fondeo ones included, which set no
+        # term rate in advance.
+        from rates_engine.curves.bootstrap import RealizedStubNode
+        from rates_engine.curves.mxn import TIIEBenchmark, bootstrap_mxn_curve
+
+        stub = RealizedStubNode(end=date(2026, 2, 12), accrual_factor=1.0 + 0.07 * 28 / 360)
+        result = bootstrap_mxn_curve(AS_OF, (stub,), TIIEBenchmark[benchmark])
+        code = "unresolved_convention:tiie_28_fixing_lag"
+        assert (code in {w.code for w in result.evidence.warnings}) is stamped
+        assert (code in {w.code for w in result.curve.provenance}) is stamped
+        assert ("tiie_28_fixing_lag" in result.unresolved_conventions) is stamped
+        # A Fondeo curve still carries every other peso assumption.
+        assert result.evidence.worst_quality is DataQuality.ASSUMED
+
+    def test_strict_conventions_describes_the_lag_on_tiie_28_only(self):
+        from rates_engine.core.errors import UnresolvedConventionError
+        from rates_engine.curves.mxn import TIIEBenchmark, bootstrap_mxn_curve
+
+        with pytest.raises(UnresolvedConventionError) as caught:
+            bootstrap_mxn_curve(AS_OF, (), TIIEBenchmark.TIIE_28, strict_conventions=True)
+        assert "TIIE 28's fixing lag" in str(caught.value)
+        with pytest.raises(UnresolvedConventionError) as caught:
+            bootstrap_mxn_curve(AS_OF, (), TIIEBenchmark.TIIE_FONDEO, strict_conventions=True)
+        assert "tiie_28_fixing_lag" not in str(caught.value)
+        assert "fixing lag" not in str(caught.value)
+
     def test_an_irs_a_fra_and_a_caplet_on_one_period_fix_on_one_day(self):
         # The period from Tuesday 2026-01-20, the day after Martin Luther King
         # Day: two SIFMA business days back is Thursday the 15th, as_of.
