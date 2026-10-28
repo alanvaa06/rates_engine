@@ -362,8 +362,10 @@ class TestContractSize:
         for label, delta in hedge.bucketed_delta_by_instrument.items():
             assert hedge.contracts[label] == pytest.approx(-delta / 30.0, rel=1e-12)
         assert "given by the caller" in hedge.evidence.fields["contract_dv01_derivation"]["caller"]
-        # The caller named the tick, so nothing is assumed about the contract.
-        assert "futures_contract_assumed" not in {w.code for w in hedge.evidence.warnings}
+        # Sized at the caller's tick, but still flagged: nothing here can say
+        # what a contract on such a period is worth, so the count rests on
+        # the caller's word (round-2 review, point 1).
+        assert "futures_contract_assumed" in {w.code for w in hedge.evidence.warnings}
 
     def test_a_caller_contract_dv01_that_contradicts_a_declared_contract_refuses(self):
         with pytest.raises(ConfigurationError, match="SR1-G6"):
@@ -447,6 +449,106 @@ class TestContractSize:
         node = next(i for i in strip if isinstance(i, FuturesNode))
         assert "contract" not in node.describe()
         assert replace(node, contract="SR3").describe()["contract"] == "SR3"
+
+
+def _rolled_sr1(**declared) -> tuple:
+    """The round-2 review's two SR1 months, with their dates rolled to business days.
+
+    1 February and 1 March 2026 are Sundays, so a schedule that rolls them
+    gives 2 February to 2 March and 2 March to 1 April: neither period is a
+    calendar month, and neither runs from one IMM date to the next.
+    """
+    rate = 0.04
+    return (
+        RealizedStubNode(end=date(2026, 2, 2), accrual_factor=1 + rate * 18 / 360),
+        FuturesNode(date(2026, 2, 2), date(2026, 3, 2), rate, label="SR1-2", **declared),
+        FuturesNode(date(2026, 3, 2), date(2026, 4, 1), rate, label="SR1-3", **declared),
+    )
+
+
+def _rolled_sr1_hedge(*, contract_dv01=None, **declared):
+    """The review's repro: a USD 100m payer from 2 February to 1 April 2026 on those months."""
+    swap = OISSwap(
+        effective=date(2026, 2, 2), maturity=date(2026, 4, 1), fixed_rate=0.04,
+        notional=100_000_000.0,
+    )
+    return strip_hedge(
+        swap, _rolled_sr1(**declared), as_of=MIX_AS_OF, contract_dv01=contract_dv01,
+        require_full_coverage=False,
+    )
+
+
+class TestAPeriodThatNamesNoContract:
+    """A caller's tick on a period that names no contract is the caller's word, and says so.
+
+    Round-2 review, points 1, 2 and 5. The two rolled SR1 months above are
+    neither a calendar month nor an IMM quarter, so a ``contract_dv01``
+    passed for them was taken unchecked, and the degradation the default
+    path attaches was dropped: 25.00, the old documented default, bought
+    them 1.67 times over -- 30.94 and 33.14 contracts where an SR1 hedge
+    needs 18.56 and 19.88 -- and the result read ``observed``.
+    """
+
+    def test_a_caller_tick_keeps_the_assumed_contract_degradation(self):
+        hedge = _rolled_sr1_hedge(contract_dv01=SR3_TICK)
+        assert hedge.contracts["SR1-2"] == pytest.approx(30.94, abs=0.005)
+        assert hedge.contracts["SR1-3"] == pytest.approx(33.14, abs=0.005)
+        assert "futures_contract_assumed" in {w.code for w in hedge.evidence.warnings}
+        assert hedge.evidence.worst_quality is DataQuality.ASSUMED
+
+    def test_the_degradation_says_which_declaration_fixes_it(self):
+        hedge = _rolled_sr1_hedge(contract_dv01=SR3_TICK)
+        message = next(
+            w.message for w in hedge.evidence.warnings if w.code == "futures_contract_assumed"
+        )
+        assert "SR1-2, SR1-3" in message
+        assert "contract='SR1'" in message
+        # 41.67 / 25.00: what the caller's tick does to an SR1 month.
+        assert "1.67 times" in message
+
+    def test_the_caller_tick_still_sizes_the_contracts(self):
+        # Flagged, not refused: the caller may know a contract this build
+        # does not. 25.00 is the tick the default path assumes, so the two
+        # agree to the bit.
+        assert (
+            _rolled_sr1_hedge(contract_dv01=SR3_TICK).contracts == _rolled_sr1_hedge().contracts
+        )
+
+    @pytest.mark.parametrize("tick", [41.67, SR1_TICK])
+    def test_an_sr1_tick_from_the_caller_carries_the_sr1_notional_flag(self, tick):
+        # Keyed on the tick used, not on what the period was read as: 41.67
+        # on these months sizes them as SR1s, on the same assumed notional.
+        hedge = _rolled_sr1_hedge(contract_dv01=tick)
+        assert hedge.contracts["SR1-2"] == pytest.approx(18.56, abs=0.005)
+        codes = {w.code for w in hedge.evidence.warnings}
+        assert {"sr1_notional_assumed", "futures_contract_assumed"} <= codes
+
+    def test_a_tick_that_is_not_the_sr1_one_carries_no_sr1_flag(self):
+        codes = {w.code for w in _rolled_sr1_hedge(contract_dv01=30.0).evidence.warnings}
+        assert "sr1_notional_assumed" not in codes
+
+    def test_declaring_the_contract_clears_the_contract_degradation(self):
+        hedge = _rolled_sr1_hedge(contract="SR1")
+        for label, delta in hedge.bucketed_delta_by_instrument.items():
+            assert hedge.contracts[label] == pytest.approx(-delta / SR1_TICK, rel=1e-12)
+        assert {w.code for w in hedge.evidence.warnings} == {"sr1_notional_assumed"}
+        assert hedge.evidence.fields["contract_sizing"]["SR1-2"]["basis"] == "declared"
+
+    def test_the_caller_derivation_names_the_contracts_it_could_not_check(self):
+        derivation = _rolled_sr1_hedge(contract_dv01=SR3_TICK).evidence.fields[
+            "contract_dv01_derivation"
+        ]["caller"]
+        assert "not derived from a contract spec" not in derivation
+        assert "unchecked for SR1-2, SR1-3" in derivation
+
+    def test_the_caller_derivation_says_when_every_contract_was_checked(
+        self, par_swap, strip, as_of
+    ):
+        derivation = strip_hedge(par_swap, strip, as_of=as_of, contract_dv01=25.0).evidence.fields[
+            "contract_dv01_derivation"
+        ]["caller"]
+        assert "checked against the tick of every contract" in derivation
+        assert "unchecked" not in derivation
 
 
 class TestADeclaredContractOnAPeriodNotItsOwn:
@@ -620,6 +722,7 @@ class TestCoverageWithOverlappingContracts:
         )
         with pytest.raises(IncompleteStripError, match="2026-09-16 to 2026-10-21"):
             strip_hedge(swap, (long, short, late), as_of=as_of)
+
 
 
 class TestShockTable:
