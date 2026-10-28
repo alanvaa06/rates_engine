@@ -98,6 +98,28 @@ _CONTRACT_DV01_DERIVATION: dict[FuturesContract, str] = {
 _SHORT_PERIOD_DAYS = 35
 """A period no longer than this reads as a month, for the hint in the assumed-contract degradation."""
 
+_REFERENCE_DAYS: dict[FuturesContract, tuple[int, ...]] = {
+    FuturesContract.SR1: (28, 29, 30, 31),
+    FuturesContract.SR3: (84, 91, 98),
+}
+"""How long each contract's reference period runs, in calendar days.
+
+SR1 references a calendar month. SR3 runs from one IMM date to the next,
+and as the third Wednesday falls between the 15th and the 21st of its month
+that is 12, 13 or 14 weeks.
+"""
+
+_ROLL_DAYS = 3
+"""The furthest a business-day roll moves a date on the SIFMA calendar.
+
+A Saturday before a Monday holiday rolls to the Tuesday, and a Friday
+holiday to the Monday. A period rolled by one convention moves both its
+ends the same way, so its length moves by no more than this, and a period
+within this many days of a contract's reference length is that contract's
+period with its ends rolled: SR1 25 to 34 days, SR3 81 to 101. The two
+ranges are fifty days apart, so no rolled period is ambiguous.
+"""
+
 DEFAULT_SHOCKS_BP: tuple[float, ...] = (-100.0, -50.0, -25.0, -10.0, 10.0, 25.0, 50.0, 100.0)
 """Shock grid for :func:`shock_table`, symmetric so convexity shows as asymmetry."""
 
@@ -254,8 +276,11 @@ def strip_hedge(
         ConfigurationError: Two instruments' keys cannot be told apart even
             with the node date appended; a node declares a contract its
             period contradicts (an SR1 on an IMM quarter, an SR3 on a
-            calendar month); or ``contract_dv01`` contradicts a contract that
-            is declared or that the period names.
+            calendar month, or either on a period that is not its own and
+            runs more than three days, the longest business-day roll, from
+            its reference length: SR1 25 to 34 days, SR3 81 to 101); or
+            ``contract_dv01`` contradicts a contract that is declared or
+            that the period names.
         ValueError: There are no futures among ``instruments``.
     """
     futures = tuple(i for i in instruments if isinstance(i, FuturesNode))
@@ -437,6 +462,23 @@ def _period_contract(contract: FuturesNode) -> FuturesContract | None:
     return None
 
 
+def _length_contract(contract: FuturesNode) -> FuturesContract | None:
+    """The future whose reference period is this node's length, give or take a roll.
+
+    The weaker reading of a period, for one :func:`_period_contract` does not
+    recognise: a length within :data:`_ROLL_DAYS` of a contract's reference
+    lengths. It cannot say a period *is* that contract's, only that it could
+    be -- SR1 months rolled to business days, or an SR3 quarter whose IMM
+    date fell on a holiday -- so it checks a declaration and never sizes a
+    contract by itself.
+    """
+    days = (contract.end - contract.start).days
+    for name, lengths in _REFERENCE_DAYS.items():
+        if min(lengths) - _ROLL_DAYS <= days <= max(lengths) + _ROLL_DAYS:
+            return name
+    return None
+
+
 _PERIOD_BASIS = {FuturesContract.SR1: "calendar_month", FuturesContract.SR3: "imm_quarter"}
 _PERIOD_SHAPE = {FuturesContract.SR1: "a calendar month", FuturesContract.SR3: "an IMM quarter"}
 
@@ -461,7 +503,8 @@ def _contract_sizes(
         ``caller``'s.
 
     Raises:
-        ConfigurationError: A declared contract contradicts its period, or
+        ConfigurationError: A declared contract contradicts its period or,
+            on a period that is not its own, the period's length; or
             ``contract_dv01`` contradicts a contract that is declared or that
             the period names.
     """
@@ -477,6 +520,20 @@ def _contract_sizes(
                     f"{key} is declared {declared}, but its period {contract.start} to "
                     f"{contract.end} is {_PERIOD_SHAPE[from_period]}, which is "
                     f"{from_period}'s; fix the contract or the dates"
+                )
+            # A period that is not exactly the declared contract's is taken on
+            # the declaration only if it could be that contract's period rolled
+            # to business days. SR1 from 2 February to 4 May 2026 is ninety-one
+            # days, an IMM quarter's length: two statements that cannot both be
+            # true, and the declaration alone sized it at 59.93 SR1 contracts.
+            if from_period is None and _length_contract(contract) is not declared:
+                lengths = _REFERENCE_DAYS[declared]
+                raise ConfigurationError(
+                    f"{key} is declared {declared}, but its period {contract.start} to "
+                    f"{contract.end} runs {(contract.end - contract.start).days} days. "
+                    f"{declared}'s reference period is {_PERIOD_SHAPE[declared]}, "
+                    f"{min(lengths)} to {max(lengths)} days, and rolling its ends to business "
+                    f"days moves that by at most {_ROLL_DAYS} days; fix the contract or the dates"
                 )
             name, basis = declared, "declared"
         elif from_period is not None:

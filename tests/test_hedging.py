@@ -449,6 +449,70 @@ class TestContractSize:
         assert replace(node, contract="SR3").describe()["contract"] == "SR3"
 
 
+class TestADeclaredContractOnAPeriodNotItsOwn:
+    """A declared contract on a period that is not exactly its own is held to its length.
+
+    Round-2 review, point 3: ``FuturesNode(2026-02-02, 2026-05-04,
+    contract="SR1")``, ninety-one days, was sized as an SR1 -- 59.93
+    contracts at 41.67 -- with basis ``declared`` and nothing to say the
+    declaration and the dates disagree.
+
+    The reference lengths come from the contracts' definitions, not from the
+    code: an SR1 references a calendar month, 28 to 31 days; an SR3 runs
+    from one IMM date to the next, and as the third Wednesday falls between
+    the 15th and the 21st that is 12, 13 or 14 weeks, 84, 91 or 98 days. A
+    business-day roll moves a date by at most three days on SIFMA's calendar
+    (a Saturday before a Monday holiday rolls to the Tuesday), and one
+    convention moves both ends the same way, so a rolled period is within
+    three days of its reference length.
+    """
+
+    @staticmethod
+    def _hedge(start: date, end: date, contract: str):
+        rate = 0.04
+        instruments = (
+            RealizedStubNode(end=start, accrual_factor=1 + rate * (start - MIX_AS_OF).days / 360),
+            FuturesNode(start, end, rate, label="X", contract=contract),
+        )
+        swap = OISSwap(effective=start, maturity=end, fixed_rate=rate, notional=100_000_000.0)
+        return strip_hedge(swap, instruments, as_of=MIX_AS_OF)
+
+    def test_an_sr1_declared_on_a_quarter_long_period_is_refused(self):
+        with pytest.raises(ConfigurationError, match="runs 91 days") as caught:
+            self._hedge(date(2026, 2, 2), date(2026, 5, 4), "SR1")
+        assert "X is declared SR1" in str(caught.value)
+
+    @pytest.mark.parametrize(
+        ("contract", "days", "accepted"),
+        [
+            ("SR1", 24, False),
+            ("SR1", 25, True),
+            ("SR1", 34, True),
+            ("SR1", 35, False),
+            ("SR1", 91, False),
+            ("SR3", 30, False),
+            ("SR3", 80, False),
+            ("SR3", 81, True),
+            ("SR3", 101, True),
+            ("SR3", 102, False),
+        ],
+    )
+    def test_the_tolerance_is_three_days_either_side(self, contract, days, accepted):
+        # 2 February is neither the first of a month nor an IMM date, so no
+        # period starting there is recognised exactly and only the length
+        # is left to check.
+        start = date(2026, 2, 2)
+        end = start + timedelta(days=days)
+        if not accepted:
+            with pytest.raises(ConfigurationError, match=f"runs {days} days"):
+                self._hedge(start, end, contract)
+            return
+        hedge = self._hedge(start, end, contract)
+        tick = SR1_TICK if contract == "SR1" else SR3_TICK
+        assert hedge.contract_dv01 == pytest.approx(tick, rel=1e-12)
+        assert "futures_contract_assumed" not in {w.code for w in hedge.evidence.warnings}
+
+
 class TestTheNotesSayWhatIsMeasured:
     """The evidence used to say the bucketed deltas and the key rates "sum to
     the same parallel DV01". They do not: each sums to its own parallel, and
