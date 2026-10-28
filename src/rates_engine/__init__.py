@@ -143,7 +143,7 @@ from rates_engine.hedging.program import (
     load_program,
 )
 from rates_engine.instruments.capfloor import CapFloor, Caplet
-from rates_engine.instruments.cashflow import Cashflow
+from rates_engine.instruments.cashflow import Cashflow, RealisedFixing
 from rates_engine.instruments.fra import FRA
 from rates_engine.instruments.futures import SOFRFuture1M, SOFRFuture3M
 from rates_engine.instruments.swaps import IRSwap, OISSwap
@@ -324,6 +324,7 @@ __all__ = [
     "pv",
     "pvbp",
     "RatesEngineError",
+    "RealisedFixing",
     "realized_sofr_sigma",
     "RealizedStubNode",
     "RebalanceFrequency",
