@@ -331,6 +331,18 @@ class TestRefusedKeys:
             assert sentence in str(direct.value)
             assert sentence in str(checked.value)
 
+    def test_the_builder_reads_the_schema_rather_than_a_list_of_its_own(self, as_of):
+        # It kept two tuples of par-swap keys beside CONFIG_SCHEMA, so it
+        # missed what they left out (Alan's review of round 2, cleanup): a
+        # misspelt key, or a null where a value is due.
+        entry = {"effective": "2026-01-15", "maturity": "2029-01-15", "rate": 0.041,
+                 "payment_lag_day": 0, "frequency_months": None}
+        with pytest.raises(ConfigurationError) as direct:
+            builders.calibration_nodes({"curve": {"par_swaps": [entry]}}, as_of)
+        message = str(direct.value)
+        assert "curve.par_swaps[0].payment_lag_day (did you mean payment_lag_days?)" in message
+        assert "curve.par_swaps[0].frequency_months is null" in message
+
 
 class TestNoFalsePositives:
     """A key another command reads, or one that does not apply here, is not a typo."""

@@ -42,7 +42,7 @@ __all__ = [
     "as_date",
     "require_config",
     "CONFIG_SCHEMA",
-    "key_refusal",
+    "require_block",
 ]
 
 _CURVE_COMMANDS = ["bootstrap", "price", "hedge"]
@@ -628,29 +628,31 @@ def require_config(config: Mapping[str, Any] | None, command: str) -> dict[str, 
     return checked
 
 
-def key_refusal(
-    where: str, *, refused: tuple[str, ...] = (), missing: tuple[str, ...] = ()
-) -> str:
-    """The words :func:`require_config` uses for refused or missing keys of one block.
+def require_block(block: Any, where: str) -> dict[str, Any]:
+    """One block checked against its entry in :data:`CONFIG_SCHEMA`, as :func:`require_config` would.
 
-    For a builder that checks a block itself, so that a caller who went round
-    :func:`require_config` reads the same refusal as one who did not.
+    For a builder that a caller can reach without :func:`require_config`, so
+    that the builder keeps no list of keys of its own, and a caller who went
+    round the whole-file check reads the same refusal as one who did not.
+    Every check of :func:`require_config` applies, for every command.
 
     Args:
-        where: The block's path, with list indices (``"curve.par_swaps[0]"``).
-        refused: Keys present in the block that the schema refuses.
-        missing: Required keys absent from it.
+        block: The block as the caller holds it.
+        where: Its path in a config, with list indices
+            (``"curve.par_swaps[0]"``).
 
     Returns:
-        The refusal text.
+        The checked copy, as :func:`require_config` makes one.
+
+    Raises:
+        ConfigurationError: The block is not a mapping, or fails a check of
+            :func:`require_config`; one refusal lists every problem.
     """
-    level = _level_at(where)
     problems = _Problems(None)
-    for key in refused:
-        problems.refused.append((where, key, str((level.get(key) or {}).get("refused", ""))))
-    for key in missing:
-        problems.missing.append((_join(where, key), level.get(key) or {}))
-    return problems.message()
+    checked = _check_value(block, {"keys": _level_at(where)}, where, None, problems)
+    if problems:
+        raise ConfigurationError(problems.message())
+    return dict(checked)
 
 
 def _is_comment(key: Any) -> bool:
