@@ -378,7 +378,8 @@ CONFIG_SCHEMA: dict[str, Any] = {
                 "description": (
                     "When true, a strip that leaves part of the swap's span uncovered is "
                     "refused (IncompleteStripError); false sizes the partial hedge. A JSON "
-                    "boolean, not a string."
+                    "boolean, not a string. The span of a swap that has started runs from "
+                    "as_of, and curve.stub covers as_of to its end."
                 ),
             },
             "shocks_bp": {

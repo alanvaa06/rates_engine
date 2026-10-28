@@ -665,9 +665,14 @@ class TestIncompleteStrip:
             strip_hedge(par_swap, short, as_of=as_of)
 
     def test_a_strip_that_starts_late_refuses(self, par_swap, strip, as_of):
+        # The realised stub covers as_of to 2026-03-18 (#21), so without
+        # SR3-1 the hole is the quarter between the stub and SR3-2.
         late = tuple(i for i in strip if not isinstance(i, FuturesNode) or i.label != "SR3-1")
-        with pytest.raises(IncompleteStripError, match="starts at"):
+        with pytest.raises(IncompleteStripError, match="covering 2026-03-18 to 2026-06-17"):
             strip_hedge(par_swap, late, as_of=as_of)
+        no_stub = tuple(i for i in late if isinstance(i, FuturesNode))
+        with pytest.raises(IncompleteStripError, match="starts at 2026-06-17"):
+            strip_hedge(par_swap, no_stub, as_of=as_of)
 
     def test_the_refusal_names_the_period(self, par_swap, strip, as_of):
         short = tuple(i for i in strip if not isinstance(i, FuturesNode) or i.label != "SR3-9")
@@ -835,9 +840,10 @@ class TestAGapMadeOnlyOfClosedDays:
 
     @staticmethod
     def _from_february(**span):
+        # No stub: a realised stub covers as_of to its end (#21), which would
+        # cover the opening days these tests are about.
         rate = 0.04
         instruments = (
-            RealizedStubNode(end=date(2026, 2, 1), accrual_factor=1 + rate * 17 / 360),
             FuturesNode(date(2026, 2, 1), date(2026, 3, 1), rate, label="SR1-G6"),
             FuturesNode(date(2026, 3, 1), date(2026, 4, 1), rate, label="SR1-H6"),
         )

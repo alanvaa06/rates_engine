@@ -44,6 +44,7 @@ from rates_engine.curves.bootstrap import (
     CalibrationInstrument,
     FuturesContract,
     FuturesNode,
+    RealizedStubNode,
     _residual_keys,
     bootstrap_discount_curve,
 )
@@ -274,7 +275,12 @@ def strip_hedge(
         long_end_source: Passed through to the bootstrap.
         require_full_coverage: When true, a gap between the swap's span and the
             strip's coverage raises rather than producing a partial hedge that
-            reports as complete.
+            reports as complete. A
+            :class:`~rates_engine.curves.bootstrap.RealizedStubNode` among
+            ``instruments`` covers ``as_of`` to its end: the curve there is
+            the stub's growth, which no quote moves, so a swap that has
+            started is covered from ``as_of`` by the stub and the contracts
+            after it.
         swap_start: Start of the span that must be covered. Defaults to the
             start of the swap's ``span``, its first accrual date as the
             schedule adjusts it, or ``as_of`` for a swap that has started:
@@ -314,8 +320,17 @@ def strip_hedge(
     default_start, default_end = swap.span
     start = swap_start or max(default_start, as_of)
     end = swap_end or default_end
+    # The realised stub covers as_of to its end. Without it a swap that has
+    # started could only be hedged under the default when as_of happened to
+    # be a futures start date: started contracts are refused, and the stub is
+    # what replaces the one running.
+    stubs = [
+        (as_of, node.end)
+        for node in instruments
+        if isinstance(node, RealizedStubNode) and node.end > as_of
+    ]
     tolerated_gaps = (
-        _check_coverage(futures, start, end, _roll_calendar(swap))
+        _check_coverage(futures, start, end, _roll_calendar(swap), realised=stubs)
         if require_full_coverage
         else None
     )
@@ -392,6 +407,11 @@ def strip_hedge(
             "futures_count": len(futures),
             "coverage_checked": require_full_coverage,
             "coverage_tolerated_gaps": tolerated_gaps,
+            "coverage_realised_stub": (
+                [{"from": first.isoformat(), "to": last.isoformat()} for first, last in stubs]
+                if require_full_coverage
+                else None
+            ),
             "swap_span": [start.isoformat(), end.isoformat()],
             "quote_parallel_dv01": quote_parallel_dv01,
             "bucket_sum": sum(deltas.values()),
@@ -760,9 +780,19 @@ def _roll_calendar(swap: Priceable) -> HolidayCalendar | None:
 
 
 def _check_coverage(
-    futures: tuple[FuturesNode, ...], start: date, end: date, calendar: HolidayCalendar | None
+    futures: tuple[FuturesNode, ...],
+    start: date,
+    end: date,
+    calendar: HolidayCalendar | None,
+    *,
+    realised: Iterable[tuple[date, date]] = (),
 ) -> list[dict[str, str]]:
     """Refuse when the strip leaves a hole anywhere inside the swap's span.
+
+    ``realised`` periods count as covered: the realised stub's, from
+    ``as_of`` to its end, where the curve is the stub's growth and no quote
+    moves it. Leaving it out refused every swap that had started unless
+    ``as_of`` fell on a futures start date.
 
     A gap at either end made only of days ``calendar`` closes is not a hole
     but the swap's own date rolled off a holiday or a weekend. The June 2030
@@ -779,6 +809,7 @@ def _check_coverage(
         start: First day of the span that must be covered.
         end: End of that span, exclusive.
         calendar: The swap's roll calendar, or ``None`` to tolerate nothing.
+        realised: Periods ``[from, to)`` covered by a realised stub.
 
     Returns:
         The tolerated gaps, each as ``from``, ``to`` (exclusive) and the
@@ -788,9 +819,9 @@ def _check_coverage(
         IncompleteStripError: Some business day of the span is in no
             contract's period, and the message says what to pass instead.
     """
-    ordered = sorted(futures, key=lambda f: f.start)
-    covered_from = min(f.start for f in ordered)
-    covered_to = max(f.end for f in ordered)
+    ordered = sorted([*((f.start, f.end) for f in futures), *realised])
+    covered_from = ordered[0][0]
+    covered_to = max(last for _, last in ordered)
     tolerated: list[dict[str, str]] = []
     # What the caller can pass, said in the refusal: the span is a default,
     # and so is the check itself. The CLI exposes the second as a key.
@@ -821,15 +852,15 @@ def _check_coverage(
     # valid strips: SR1 months traded under an SR3 quarter overlap it, and
     # the April SR1 ending on 1 May reported a hole to 17 June that the
     # March SR3 quarter, which started earlier, covers to the day.
-    reach = ordered[0].end
-    for contract in ordered[1:]:
-        if contract.start > reach and reach < end and contract.start > start:
+    reach = ordered[0][1]
+    for first, last in ordered[1:]:
+        if first > reach and reach < end and first > start:
             raise IncompleteStripError(
-                f"the strip has no contract covering {reach} to {contract.start}, "
+                f"the strip has no contract covering {reach} to {first}, "
                 f"which lies inside the swap span {start} to {end}; add the missing "
                 f"contract, {waive}"
             )
-        reach = max(reach, contract.end)
+        reach = max(reach, last)
     return tolerated
 
 

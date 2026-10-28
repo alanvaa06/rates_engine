@@ -456,8 +456,7 @@ class TestTheHistoryCostsNoProjectionOfItsOwn:
         swap = OISSwap(effective=date(2025, 7, 15), maturity=end, fixed_rate=0.04,
                        notional=NOTIONAL)
         calls = self._counting(monkeypatch)
-        hedge = strip_hedge(swap, nodes, as_of=AS_OF, require_full_coverage=False,
-                            fixings=_fixings(_sofr_history()))
+        hedge = strip_hedge(swap, nodes, as_of=AS_OF, fixings=_fixings(_sofr_history()))
         futures = len(nodes) - 1
         # Two for the DV01, two per contract for its quote bumps, two for the
         # quote parallel: nothing for the record.
@@ -496,9 +495,8 @@ class TestTheStripHedgeTakesTheFixings:
                        notional=NOTIONAL)
         snapshot = _fixings(_sofr_history())
         with pytest.raises(MissingFixingError):
-            strip_hedge(swap, nodes, as_of=AS_OF, require_full_coverage=False)
-        hedge = strip_hedge(swap, nodes, as_of=AS_OF, require_full_coverage=False,
-                            fixings=snapshot)
+            strip_hedge(swap, nodes, as_of=AS_OF)
+        hedge = strip_hedge(swap, nodes, as_of=AS_OF, fixings=snapshot)
         assert hedge.swap_dv01 == dv01(swap, hedge.curve_set, fixings=snapshot).value
         assert hedge.fixings is snapshot
         table = shock_table(hedge, (-25.0, 25.0))
@@ -506,8 +504,9 @@ class TestTheStripHedgeTakesTheFixings:
         assert "SOFR" in {p.series_id for p in _inputs(table.evidence)}
 
     def test_the_coverage_a_seasoned_swap_needs_starts_at_as_of(self):
-        # Nothing before as_of has rate risk left. The refusal names as_of,
-        # not the trade date of a swap struck six months ago.
+        # Nothing before as_of has rate risk left. Without the stub the
+        # refusal names as_of, not the trade date of a swap struck six
+        # months ago.
         from rates_engine.core.errors import IncompleteStripError
         from rates_engine.hedging.futures_strip import strip_hedge
         from rates_engine.instruments.swaps import OISSwap
@@ -516,8 +515,45 @@ class TestTheStripHedgeTakesTheFixings:
         swap = OISSwap(effective=date(2025, 7, 15), maturity=end, fixed_rate=0.04,
                        notional=NOTIONAL)
         with pytest.raises(IncompleteStripError, match="2026-01-15") as caught:
-            strip_hedge(swap, nodes, as_of=AS_OF, fixings=_fixings(_sofr_history()))
+            strip_hedge(swap, nodes[1:], as_of=AS_OF, fixings=_fixings(_sofr_history()))
         assert "2025-07-15" not in str(caught.value)
+
+    def test_the_realised_stub_covers_as_of_to_its_end(self):
+        # The review's repro: effective 2025-09-17, as of 2026-01-15, a stub
+        # to the March IMM date, then SR3s. Under the default it raised
+        # "the strip starts at 2026-03-18 but the swap starts at 2026-01-15",
+        # and no config closed the gap: a contract that has started is
+        # refused, and the stub is what stands in for it.
+        from rates_engine.hedging.futures_strip import strip_hedge
+        from rates_engine.instruments.swaps import OISSwap
+
+        nodes, start, end = self._strip()
+        swap = OISSwap(effective=date(2025, 9, 17), maturity=end, fixed_rate=0.04,
+                       notional=NOTIONAL)
+        hedge = strip_hedge(swap, nodes, as_of=AS_OF, fixings=_fixings(_sofr_history()))
+        fields = hedge.evidence.fields
+        assert fields["coverage_checked"] is True
+        assert fields["coverage_realised_stub"] == [
+            {"from": "2026-01-15", "to": start.isoformat()}
+        ]
+        assert fields["swap_span"][0] == "2026-01-15"
+        assert fields["coverage_tolerated_gaps"] == []
+
+    def test_a_stub_short_of_the_first_contract_leaves_a_hole(self):
+        # The stub counts to its end and no further: a day between it and the
+        # first contract is a day nobody holds.
+        from rates_engine.core.errors import IncompleteStripError
+        from rates_engine.curves.bootstrap import RealizedStubNode
+        from rates_engine.hedging.futures_strip import strip_hedge
+        from rates_engine.instruments.swaps import OISSwap
+
+        nodes, start, end = self._strip()
+        short = RealizedStubNode(end=start - timedelta(days=7), accrual_factor=1.006)
+        swap = OISSwap(effective=date(2025, 9, 17), maturity=end, fixed_rate=0.04,
+                       notional=NOTIONAL)
+        with pytest.raises(IncompleteStripError, match=f"covering {start - timedelta(days=7)}"):
+            strip_hedge(swap, (short, *nodes[1:]), as_of=AS_OF,
+                        fixings=_fixings(_sofr_history()))
 
 
 # ---------------------------------------------------------------------------
@@ -551,7 +587,7 @@ def _seasoned_config(*, fixings: bool = True, **sofr: object) -> dict:
         },
         "swap": {"effective": "2025-09-17", "maturity": period.isoformat(), "fixed_rate": 0.04,
                  "notional": NOTIONAL, "side": "payer"},
-        "hedge": {"require_full_coverage": False, "shocks_bp": [-25, 25]},
+        "hedge": {"shocks_bp": [-25, 25]},
     }
     if fixings:
         days = [d for d in _sofr_history().dates if d >= date(2025, 9, 17)]

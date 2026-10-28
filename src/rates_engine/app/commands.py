@@ -386,7 +386,8 @@ def hedge(config: dict[str, Any] | None) -> dict[str, Any]:
             ``require_full_coverage`` (``true`` by default; ``false`` sizes a
             strip that leaves part of the swap uncovered). A swap that
             has started needs its SOFR history in the ``fixings`` block, and
-            its coverage is checked from ``as_of``.
+            its coverage is checked from ``as_of``, with ``curve.stub``
+            covering ``as_of`` to its end.
 
     Returns:
         The ``HedgeResult`` payload with a ``shock_table`` block.
