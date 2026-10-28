@@ -787,6 +787,116 @@ class TestFOMCStepFitPinsEverySegment:
             )
 
 
+SIFMA_DEC25_MAR27_HOLIDAYS = frozenset(
+    {
+        date(2025, 12, 25), date(2026, 1, 1), date(2026, 1, 19), date(2026, 2, 16),
+        date(2026, 4, 3), date(2026, 5, 25), date(2026, 6, 19), date(2026, 7, 3),
+        date(2026, 9, 7), date(2026, 10, 12), date(2026, 11, 11), date(2026, 11, 26),
+        date(2026, 12, 25), date(2027, 1, 1), date(2027, 1, 18), date(2027, 2, 15),
+        date(2027, 3, 26),
+    }
+)
+"""SIFMA's full closes from December 2025 to March 2027, written out by hand
+(Christmas, New Year, King, Presidents, Good Friday, Memorial, Juneteenth,
+Independence observed, Labor, Columbus, Veterans, Thanksgiving), so the prices
+below do not lean on the calendar the fit uses."""
+
+
+def _cme_price(symbol: str, start: date, end: date, rate_for) -> float:
+    """SR1's or SR3's settlement price over ``[start, end)`` by CME's rule.
+
+    ``rate_for`` gives the rate published for a business day. SR1 averages
+    ``r_i d_i``; SR3 compounds ``1 + r_i d_i / 360``. Written independently
+    of the package, on the hand-written calendar above.
+    """
+    weights = _business_day_weights(start, end, SIFMA_DEC25_MAR27_HOLIDAYS)
+    days = (end - start).days
+    if symbol == "SR1":
+        rate = sum(rate_for(day) * count for day, count in weights) / days
+    else:
+        factor = 1.0
+        for day, count in weights:
+            factor *= 1.0 + rate_for(day) * count / 360.0
+        rate = (factor - 1.0) * 360.0 / days
+    return 100.0 * (1.0 - rate)
+
+
+def _sofr_snapshot(as_of: date, first: date, last: date, rate_for) -> MarketSnapshot:
+    """SOFR fixings for every business day from ``first`` to ``last``, inclusive."""
+    days, day = [], first
+    while day <= last:
+        if _is_business(day, SIFMA_DEC25_MAR27_HOLIDAYS):
+            days.append(day)
+        day += timedelta(days=1)
+    series = Series(
+        "SOFR",
+        tuple(days),
+        tuple(rate_for(day) for day in days),
+        Provenance(source="file", series_id="SOFR", instrument_kind="sofr_fixing"),
+    )
+    return MarketSnapshot(as_of=as_of, series={"SOFR": series})
+
+
+class TestFOMCStepFitAsksForSofrOnlyWhenADayNeedsIt:
+    """Alan Vazquez's PR #15 round-3 review, point 3: a snapshot is not a demand for SOFR.
+
+    Any snapshot used to be asked for its ``"SOFR"`` series, so one holding
+    only ``DGS2`` was refused where ``fixings=None`` fitted. The series is
+    now required only when a contract prices a business day on or before
+    ``as_of``. In the review's own case, ``as_of`` Friday 2026-01-30, one is:
+    SR1 February opens on Sunday the 1st, which takes the SOFR dated Friday
+    the 30th. That refusal stands -- the rule the set adopted for a snapshot
+    without the index's series -- and now says which contract and which day.
+    """
+
+    MEETING = (date(2026, 3, 19),)
+    MONTHS = (
+        ("SR1-Feb26", date(2026, 2, 1), date(2026, 3, 1)),
+        ("SR1-Mar26", date(2026, 3, 1), date(2026, 4, 1)),
+    )
+
+    @staticmethod
+    def _rate(day: date) -> float:
+        return 0.0365 if day < date(2026, 3, 19) else 0.0340
+
+    def _strip(self):
+        return tuple(
+            (label, start, end, "SR1", _cme_price("SR1", start, end, self._rate))
+            for label, start, end in self.MONTHS
+        )
+
+    @staticmethod
+    def _treasuries(as_of: date) -> MarketSnapshot:
+        series = Series("DGS2", (date(2026, 1, 28),), (0.035,), Provenance(source="file"))
+        return MarketSnapshot(as_of=as_of, series={"DGS2": series})
+
+    def test_a_snapshot_without_sofr_is_not_asked_for_when_no_day_needs_it(self):
+        as_of = date(2026, 1, 29)
+        fit = fit_fomc_step_curve(
+            as_of, self.MEETING, self._strip(), fixings=self._treasuries(as_of)
+        )
+        bare = fit_fomc_step_curve(as_of, self.MEETING, self._strip())
+        assert fit.curve.segment_rates == bare.curve.segment_rates
+        assert fit.curve.segment_rates == pytest.approx((0.0365, 0.0340), abs=1e-10)
+        assert fit.evidence.inputs == ()
+
+    def test_it_is_refused_when_the_as_of_fixing_is_needed(self):
+        as_of = date(2026, 1, 30)
+        with pytest.raises(MissingFixingError) as excinfo:
+            fit_fomc_step_curve(as_of, self.MEETING, self._strip(), fixings=self._treasuries(as_of))
+        message = str(excinfo.value)
+        assert "'SOFR'" in message
+        assert "'SR1-Feb26'" in message
+        assert "2026-01-30" in message
+        assert "DGS2" in message
+
+    def test_without_a_snapshot_that_fixing_is_forecast_without_a_degradation(self):
+        fit = fit_fomc_step_curve(date(2026, 1, 30), self.MEETING, self._strip())
+        assert fit.evidence.fields["forecast_days_on_as_of"] == {"SR1-Feb26": 1, "SR1-Mar26": 0}
+        assert {w.code for w in fit.evidence.warnings} == {"term_rate_without_convexity"}
+        assert fit.curve.segment_rates == pytest.approx((0.0365, 0.0340), abs=1e-10)
+
+
 class TestPricingOnAParametricCurve:
     """PRD-002 AC-4.3: the payload says which curve it used and what that cost."""
 

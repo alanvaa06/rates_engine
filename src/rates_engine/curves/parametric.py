@@ -594,6 +594,11 @@ class FOMCStepFit(EngineResult):
         }
 
 
+def _anchor(day: date, calendar: HolidayCalendar) -> date:
+    """The business day whose published rate a calendar day takes: itself or the one before."""
+    return day if calendar.is_business_day(day) else calendar.previous_business_day(day)
+
+
 def _rate_days(start: date, end: date, calendar: HolidayCalendar) -> list[tuple[date, int]]:
     """``(business day i, d_i)`` over ``[start, end)``: CME's terms, in order.
 
@@ -603,7 +608,7 @@ def _rate_days(start: date, end: date, calendar: HolidayCalendar) -> list[tuple[
     covers inside the period -- three for an ordinary Friday, and cut short
     by ``end``.
     """
-    anchor = start if calendar.is_business_day(start) else calendar.previous_business_day(start)
+    anchor = _anchor(start, calendar)
     out: list[tuple[date, int]] = []
     covered, day = 0, start
     while day < end:
@@ -766,9 +771,10 @@ def fit_fomc_step_curve(
         strict: Refuse when any contract misses the tolerance.
         fixings: A snapshot holding the published SOFR fixings as the
             series ``"SOFR"``, decimals by business day -- the same
-            ``MarketSnapshot`` swaps and caps take. Required for every
-            business day before ``as_of`` that a contract's period covers;
-            read for ``as_of`` itself if it is there; ignored otherwise.
+            ``MarketSnapshot`` swaps and caps take. The series is required
+            only when a contract prices a business day on or before
+            ``as_of``, and then every such day before ``as_of`` must be in
+            it; ``as_of`` itself is read if it is there and forecast if not.
         calendar: The business days the overnight rate is published on.
 
     Returns:
@@ -783,8 +789,9 @@ def fit_fomc_step_curve(
         UnsupportedConventionError: A contract is neither SR1 nor SR3.
         ImplausibleInputError: A price or a fixing is NaN or infinite.
         MissingFixingError: A contract covers a business day before ``as_of``
-            and there is no fixing for it, no ``fixings`` at all, or no
-            ``"SOFR"`` series in them.
+            and there is no fixing for it or no ``fixings`` at all; or a
+            contract covers a business day on or before ``as_of`` and the
+            snapshot has no ``"SOFR"`` series.
         CalibrationError: Under ``strict``, a contract missed the tolerance.
     """
     segments = len(meeting_dates) + 1
@@ -814,7 +821,7 @@ def fit_fomc_step_curve(
                 f"contract {label!r} has settlement price {price!r}, which is not a number "
                 "to fit; drop the contract or supply its price"
             )
-    series = None if fixings is None else fixings.require(SOFR.name)
+    series = _sofr_series(as_of, contracts, fixings, calendar)
     priced = [
         _PricedContract.build(contract, as_of, series, calendar) for contract in contracts
     ]
@@ -913,6 +920,45 @@ def fit_fomc_step_curve(
         max_residual_bp=worst,
         implied_moves_bp=moves,
     )
+
+
+def _sofr_series(
+    as_of: date,
+    contracts: Sequence[tuple[str, date, date, str, float]],
+    fixings: MarketSnapshot | None,
+    calendar: HolidayCalendar,
+) -> Series | None:
+    """The snapshot's SOFR series, demanded only when a contract prices a day it holds.
+
+    A contract needs published fixings when its first business day -- the one
+    whose rate its first calendar day takes -- is on or before ``as_of``. A
+    snapshot passed for anything else (Treasury yields, say) is not a demand
+    for SOFR: asking every snapshot for the series refused strips that
+    ``fixings=None`` fits. When a contract does need it and the series is
+    missing or misnamed, the refusal stands: a snapshot is a statement that
+    the fixings are in it, and forecasting a fixing it was meant to carry
+    would hide the mistake.
+    """
+    if fixings is None:
+        return None
+    series = fixings.series.get(SOFR.name)
+    if series is not None:
+        return series
+    needing = [
+        (label, _anchor(begin, calendar))
+        for label, begin, _end, _symbol, _price in contracts
+        if _anchor(begin, calendar) <= as_of
+    ]
+    if needing:
+        raise MissingFixingError(
+            f"the snapshot has no {SOFR.name!r} series (it has {sorted(fixings.series)}), "
+            "and these contracts settle partly on fixings published by as_of "
+            f"{as_of.isoformat()}: "
+            + ", ".join(f"{label!r} (from {day.isoformat()})" for label, day in needing)
+            + f". Add the fixings as series {SOFR.name!r}. A fixing dated as_of is forecast "
+            "only without a snapshot, or when the series is there and lacks that day."
+        )
+    return None
 
 
 def _require_every_segment_priced(
