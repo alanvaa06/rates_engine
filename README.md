@@ -141,8 +141,9 @@ raise rather than being approximated by effective duration under their own
 names. A swap, FRA, cap, floor or swaption that has started is never valued
 as if it had not: paid periods drop out, fixed ones need their published
 fixing, and an expired swaption is refused. A config key the schema does
-not document is never ignored: a typo anywhere in the file is refused by
-path, with the key it probably meant.
+not document is never ignored, and a value of the wrong shape is never read
+as something else: a typo, or a string where a list belongs, is refused by
+path anywhere in the file, with the key it probably meant.
 
 A currency never mixes with another: discounting a peso cashflow on a dollar
 curve raises rather than returning a number, and there is no implicit
@@ -241,8 +242,9 @@ pricing or hedging code knowing what a proxy is.
   than a market fit, and every such result declares
   `inputs_origin="synthetic"`.
 - **The SR1 contract notional is assumed**, not read from the contract spec.
-  The evidence says `notional_source="assumed"`, and a hedge with an SR1
-  contract in it carries an `sr1_notional_assumed` degradation.
+  The evidence says `notional_source="assumed"`, and every hedge contract
+  sized at the SR1 tick, whoever gave it, carries an `sr1_notional_assumed`
+  degradation.
 - **Hagan's SABR expansion and Hagan-West's interpolation are transcribed**
   from secondary sources. What stands in for reading them: the limits each
   formula must satisfy, a Monte Carlo of the SABR process the expansion

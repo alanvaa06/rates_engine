@@ -78,9 +78,11 @@ sizes each contract at its own: `FuturesNode(contract="SR1")` or `"SR3"`,
 or `None` to read it off the period (a calendar month is SR1, an IMM
 quarter SR3). `contract_dv01` applies to every contract and is refused if
 it contradicts one the node declares or its period names; a period that is
-neither is sized as SR3 with a `futures_contract_assumed` degradation. On a
-strip that mixes SR1 and SR3, `total_contracts` and `contract_dv01` are
-`None`: read `total_contracts_by_contract`.
+neither is sized as SR3, or at the caller's `contract_dv01`, and carries a
+`futures_contract_assumed` degradation until its contract is declared; a
+declared contract on a rolled period must run within three days of its own
+length. On a strip that mixes SR1 and SR3, `total_contracts` and
+`contract_dv01` are `None`: read `total_contracts_by_contract`.
 
 **DV01 is per basis point, not per percent.** Every risk result carries a
 `unit` field for this reason. `money_duration` is the same quantity per unit
@@ -144,9 +146,11 @@ nothing. `expansion_is_valid` asks the question without raising.
 **A caplet expires at its fixing, and a seasoned cap needs its fixings.**
 Term SOFR fixes two business days before its period; pass
 `fixings=MarketSnapshot(...)` (series `TERM_SOFR_3M`) to value periods
-already fixed; a snapshot without that series is refused. A period fixing
-on `as_of` uses that day's fixing if you pass it and the curve's forward if
-you do not, marked `curve_forward_for_todays_fixing:<series>`. An event
+already fixed. A period fixing on `as_of` uses that day's fixing if you
+pass it and the curve's forward if you do not; the period's
+`fixing_source` says which, and the forecast is not a degradation. A
+snapshot without that series is refused once a period has fixed or fixes
+on `as_of`; a strip that fixes later never reads it. An event
 dated `as_of` has happened, as in QuantLib by default: a payment that day
 is not valued, and a swaption expiring that day is refused like an earlier
 expiry. `sabr.lognormal_vol` with a shift needs `shifted_black=True`.
@@ -215,9 +219,11 @@ piece it would plug into exists: `CurveSet` already projects on one curve
 and discounts on another of the same currency.
 
 **An FX forward runs from the spot date, not from `as_of`.** USD/MXN
-counts two peso business days and rolls to a day the Federal Reserve is
-open too (`USDMXN.spot_date(as_of)`); dollars settle on `FEDERAL_RESERVE`,
-not `SIFMA_US`. Parity is
+counts two business days on which both the Federal Reserve and BMV are
+open (`USDMXN.spot_date(as_of)`): for the peso a US holiday on T+1 delays
+the spot (`JOINT_LAG_CURRENCIES`), so 2026-11-25 settles on 11-30. Dollars
+settle on `FEDERAL_RESERVE`, not `SIFMA_US`, and
+`CurrencyPair(calendars=...)` is keyed by `Currency`. Parity is
 `S [P_f(T)/P_f(spot)] / [P_d(T)/P_d(spot)]`; measuring from `as_of` was 76
 to 78 pips too high. A delivery on or before the spot date raises. The
 CLI's `r_domestic`/`r_foreign` are continuously compounded ACT/365F
@@ -232,14 +238,15 @@ Year's Day is not moved to 31 December; SOFR is published that day), but
 an observance rule can push one across, so use `is_business_day`, which
 checks the neighbouring years; do not test membership of
 `holidays(day.year)` yourself. That exact shortcut was a bug in 0.1.0 and
-0.2.0. It lists only weekdays the market closes; a Saturday New Year's Day
-or Veterans Day is not in it.
+0.2.0. It lists only weekdays the market closes, on every calendar: a
+Saturday New Year's Day or Veterans Day on `SIFMA_US`, or a fixed-date
+Mexican holiday on a weekend on `BMV`, is not in it.
 
 **The Mexican calendar is `BMV`, and that is not Banxico.** It is the stock
 exchange calendar, which is the one a reachable source documents. Banxico's
 banking calendar is a different list and the comparison has not been made.
 It also has no weekend-observance rule: a fixed-date Mexican holiday on a
-Saturday is simply not observed.
+Saturday is simply not observed, and is not in `holidays(year)`.
 
 **An extra that is installed at the wrong version says so.** The MCP server
 is written against `mcp>=2.0,<3`, where the server class is `MCPServer`; it
@@ -261,13 +268,15 @@ once and wrap it in a `MarketSnapshot` per backtest date; `snapshot.series`
 keeps what was loaded. The fixing dated `as_of` is served, a one-day
 look-ahead for SOFR.
 
-**Units are an argument.** `load_series_csv` reads named columns (and
-`date,value`) as decimals unless `percent=True`; a FRED download saved as
-is (`observation_date,<ID>`) is read in FRED's units, as
+**Units are an argument, unless the layout says them.** `percent=` wins
+whenever it is given. Without it, `load_series_csv` reads FRED's download
+(`observation_date,<ID>`, columns named or not) in FRED's units, as
 `fred.fetch_series` reads it: the overnight rates, SOFR averages and
 `DGS*` are divided by 100, `SOFRINDEX` is not, anything else needs
-`percent=`. A rate file evidently in percent, read without `percent=`, is
-refused.
+`percent=`. This package's `date,value` is decimals. FRED's older
+`DATE,<ID>` header and any other named columns holding a rate raise
+`UnsupportedConventionError`: SOFR at 0.05% read as a decimal is a
+believable 5%, so nothing in the values can say which it was.
 
 **`Evidence` is nested, not flat.** `evidence.sources` holds the evidence of
 the inputs, so `hedge.evidence.sources[0].sources[0]` is the bootstrap. Read
@@ -284,11 +293,17 @@ Call `curve.require_monotone()` when you mean to assert it.
 extra. They are not quite interchangeable in one respect the code handles for
 you: YAML parses `2026-01-15` into a `date`, JSON leaves it a string.
 
-**Every key in a config file must be documented.** `rateng describe
---json` lists them under `config`; a key it does not list is refused by
-path with the closest match, whichever command reads the file, and `_`
-keys are comments. Adding a key is one entry in `app/config.py`'s
-`CONFIG_SCHEMA`.
+**Every key in a config file must be documented, and the whole file is
+checked.** `rateng describe --json` lists every key under `config`, with
+its units, its default and the commands that read it. A key it does not
+list is refused by path with the closest match, whichever command reads
+the file. `_` keys are comments, and switch nothing off in a block that
+holds anything else. A list of numbers is a JSON list,
+`"shocks_bp": [25]`, never `"25"`. `null` means absent only where the
+default is `null`, an empty optional block is no block, and
+`curve.convexity` names its `model`. Adding a key is one entry in
+`app/config.py`'s `CONFIG_SCHEMA`, and `tests/test_app_config.py` fails
+until some command reads it.
 
 **The discounting evidence comes from the curve's currency.** Every price
 records `discounting: collateral_rate_ois_<index>`, where the index is
@@ -323,8 +338,10 @@ hedge) once you `project.register` it; a swap-like one also needs
 `fixings` block of the config. Without them a seasoned trade is refused
 with `MissingFixingError`. Paid flows count for nothing. A fixing dated
 before `as_of` is required; one dated `as_of` is read if you pass it and
-forecast if you do not, which the price marks with the
-`curve_forward_for_todays_fixing:<series>` degradation. A forward before
+forecast if you do not, as QuantLib does by default, without a
+degradation: a swap or FRA records it in `fixings_dated_as_of`. A
+snapshot without the index's series is refused even for a term fixing
+dated `as_of`. A forward before
 the curve's `as_of` is refused too. The fixing lag lives on
 `RateIndex.fixing_lag_days`, so an IRS, a FRA and a caplet on one period
 fix on one day. The fixings used are in the evidence as
@@ -355,7 +372,9 @@ period, as QuantLib's `Schedule` does. v0.3 left period ends unadjusted,
 so interest accrued to a Saturday was paid on the Monday. `span` reports
 those adjusted dates -- an `OISSwap` written from Saturday 30 May 2026
 spans from Friday the 29th -- so a hedge's coverage check and a swaption's
-exercise date are tested against the day the swap starts accruing. A
+exercise date are tested against the day the swap starts accruing. A gap
+at either end of the hedge made only of days the swap's calendar closes is
+tolerated and listed in the evidence (`coverage_tolerated_gaps`). A
 rolled start can come before the stated effective date; valued in between,
 the swap has begun and `pv` asks for its fixings. A schedule the convention
 collapses to no period raises `ConventionError` when the instrument is
@@ -420,4 +439,5 @@ rateng-mcp
 
 With `--json`, stdout is exactly one document and all narration goes to
 stderr. Exit code 1 means the inputs are unusable, 2 means the calculation is
-impossible.
+impossible. `--help --json` is a `Usage` document, and a command line the
+parser rejects is a `ConfigurationError` document with exit code 1.

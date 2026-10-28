@@ -71,7 +71,8 @@ interpolates across expiry or tenor. An asymptotic expansion never returns a
 negative volatility. A swap, FRA, cap, floor or swaption that has started is
 never valued as if it had not: paid periods drop out, fixed ones need their
 published fixing, and an expired swaption is refused. A config key is never
-silently ignored. Thirty-three named exceptions, each with an exit code and
+silently ignored, and a value of the wrong shape is never read as something
+else. Thirty-three named exceptions, each with an exit code and
 an entry in `docs/ERRORS.md` saying whether it is recoverable and what to do.
 
 ## What it is not
@@ -101,8 +102,9 @@ yields as a proxy for OIS par, which carries a swap spread that is negative,
 variable and not quantified here — it is opt-in, it marks every node it
 touches, and it is barred from any test that validates a published number. The
 SR1 contract notional is assumed rather than read from the contract spec, and
-the evidence says `notional_source="assumed"`; a hedge with an SR1 contract
-in it carries an `sr1_notional_assumed` degradation.
+the evidence says `notional_source="assumed"`; every hedge contract sized at
+the SR1 tick, whoever gave it, carries an `sr1_notional_assumed`
+degradation.
 
 In v3: the peso conventions -- the TIIE day count and period, the calendar,
 the rate peso collateral earns -- are assumptions this build could not check
