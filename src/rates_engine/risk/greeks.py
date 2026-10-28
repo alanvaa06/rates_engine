@@ -263,8 +263,9 @@ def option_greeks(
         vol_bump_bp: Volatility bump in basis points of normal volatility.
         as_of: Valuation date. Defaults to the curve's.
         fixings: Published fixings for a cap or floor with periods that have
-            already fixed, as :func:`~rates_engine.pricing.options.cap_floor_pv`
-            takes them. Ignored for a swaption.
+            already fixed or fix on the valuation date, as
+            :func:`~rates_engine.pricing.options.cap_floor_pv` takes them.
+            Ignored for a swaption.
         source_evidence: Evidence of the curves and the surface.
 
     Returns:
@@ -274,8 +275,11 @@ def option_greeks(
         ValueError: Either bump is not positive, ``option`` is neither a
             swaption nor a cap, a swaption expires on or before the valuation date,
             or every period of a cap has been paid.
-        MissingFixingError: A period of a cap fixed before the valuation date
-            and ``fixings`` does not hold its fixing.
+        MissingFixingError: As :func:`~rates_engine.pricing.options.cap_floor_pv`
+            raises it: a period of a cap fixed before the valuation date and
+            ``fixings`` does not hold its fixing, or a period fixes on the
+            valuation date and ``fixings`` has no series named after the
+            index.
     """
 
     if rate_bump_bp <= 0.0 or vol_bump_bp <= 0.0:
@@ -357,8 +361,8 @@ def option_greeks(
                 "base_value": base,
             },
             sources=source_evidence,
-            # The price's own degradations -- a forecast standing in for a
-            # fixing, say -- belong to every greek computed from it.
+            # The price's own degradations belong to every greek computed
+            # from it.
             warnings=merge_warnings(
                 valuation_warnings(option, curve_set), base_result.evidence.warnings
             ),
