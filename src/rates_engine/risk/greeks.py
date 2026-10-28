@@ -357,8 +357,8 @@ def option_greeks(
                 "base_value": base,
             },
             sources=source_evidence,
-            # The price's own degradations -- a forecast standing in for a
-            # fixing, say -- belong to every greek computed from it.
+            # The price's own degradations belong to every greek computed
+            # from it.
             warnings=merge_warnings(
                 valuation_warnings(option, curve_set), base_result.evidence.warnings
             ),

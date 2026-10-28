@@ -483,11 +483,13 @@ class TestASeasonedCapOrFloor:
         assert today["fixing"] is None
         assert today["expiry_years"] == 0.0
         assert today["forward"] == pytest.approx(QL_TODAYS_FORECAST, rel=1e-13, abs=0.0)
-        # Not only a field: the substitution is a degradation of the result.
-        # The same code and quality as a swap whose term fixing is forecast.
-        codes = [w.code for w in result.evidence.warnings]
-        assert codes.count("curve_forward_for_todays_fixing:TERM_SOFR_3M") == 1
-        assert result.evidence.worst_quality is DataQuality.PROXY
+        # A field, not a degradation: the rate is being published that day,
+        # and the curve's forward is the market's estimate of it. The series
+        # is there and holds the fixing before it, which is required.
+        assert not any(
+            w.code.startswith("curve_forward_for_todays_fixing") for w in result.evidence.warnings
+        )
+        assert result.evidence.worst_quality is DataQuality.OBSERVED
 
     def test_a_fixing_on_the_valuation_date_is_used_when_supplied(self, option_curve_set):
         result = cap_floor_pv(
@@ -782,28 +784,30 @@ class TestACapWhoseFirstFixingIsToday:
         with pytest.raises(MissingFixingError, match="'TERM_SOFR_3M'"):
             cap_floor_pv(self._cap(), option_curve_set, VOL, fixings=misnamed)
 
-    @pytest.mark.parametrize("fixings", [None, "empty_series"])
-    def test_the_curve_standing_in_for_the_fixing_is_a_degradation(
+    @pytest.mark.parametrize("fixings", [None, "series_without_today"])
+    def test_the_curve_standing_in_for_the_fixing_is_recorded_not_degraded(
         self, option_curve_set, fixings
     ):
         # Without fixings, or with the right series but not that day in it,
         # the curve's forward stands in -- QuantLib's default -- and the
-        # result says so as a degradation, which its greeks inherit.
+        # period's fixing_source says so. It used to be a proxy degradation
+        # as well, which made every spot-starting cap's morning quote proxy:
+        # its first fixing is dated as_of, and the print is not out yet. The
+        # greeks report what the price does.
         snapshot = None
-        if fixings == "empty_series":
+        if fixings == "series_without_today":
             snapshot = _fixings(date(2026, 1, 14))
         result = cap_floor_pv(self._cap(), option_curve_set, VOL, fixings=snapshot)
-        warning = next(
-            w for w in result.evidence.warnings
-            if w.code == "curve_forward_for_todays_fixing:TERM_SOFR_3M"
-        )
-        assert "2026-01-15" in warning.message
-        assert warning.data_quality is DataQuality.PROXY
-        assert result.evidence.worst_quality is DataQuality.PROXY
+        first = result.evidence.fields["per_period"][0]
+        assert first["fixing_date"] == "2026-01-15"
+        assert first["status"] == "fixes_today"
+        assert first["fixing_source"] == "curve_forward_on_fixing_day"
         greeks = option_greeks(self._cap(), option_curve_set, VOL, fixings=snapshot)
-        assert "curve_forward_for_todays_fixing:TERM_SOFR_3M" in {
-            w.code for w in greeks.evidence.warnings
-        }
+        for evidence in (result.evidence, greeks.evidence):
+            assert not any(
+                w.code.startswith("curve_forward_for_todays_fixing") for w in evidence.warnings
+            )
+            assert evidence.worst_quality is DataQuality.OBSERVED
 
     def test_a_supplied_fixing_carries_no_such_degradation(self, option_curve_set):
         result = cap_floor_pv(
