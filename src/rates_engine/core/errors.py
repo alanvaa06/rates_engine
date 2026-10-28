@@ -73,7 +73,16 @@ class RatesEngineError(Exception):
 
 
 class ConventionError(RatesEngineError):
-    """A day count, calendar, roll or tenor this package does not implement."""
+    """The terms of a trade cannot be read under the conventions they name.
+
+    The parent of :class:`UnsupportedConventionError` (a day count, calendar,
+    roll or tenor this package does not implement) and
+    :class:`UnresolvedConventionError`. Raised itself when an instrument is
+    built whose roll convention leaves its schedule no accrual period: the
+    maturity adjusts onto or before the adjusted effective date (Friday
+    2026-05-29 to Sunday 2026-05-31 under Modified Following). Change the
+    maturity or the roll.
+    """
 
     exit_code = 1
 
@@ -136,13 +145,17 @@ class IncompatibleDependencyError(MissingDependencyError):
 
 
 class ConfigurationError(RatesEngineError):
-    """The command was asked to run without the configuration it needs.
+    """The configuration, or inputs that contradict each other, cannot be used as given.
 
-    ``describe`` and ``list-instruments`` answer from the build itself; every
-    other command reads a config. Over the CLI argparse enforces that, but the
-    MCP server's tools take the config as an optional argument, so the refusal
-    has to be a named one rather than whatever the first missing key happens
-    to raise.
+    The config is absent; a key anywhere in it is one the schema does not
+    document; a block, a list or a list's values have the wrong shape; or a
+    block the command reads lacks a required key, or holds a ``null`` where
+    the key's default is a value; or a ``fixings`` row has a date or a rate
+    that cannot be read. Under ``--json``, a command line the parser rejects
+    is one too. The futures hedge raises it for inputs that
+    contradict each other, and ``load_program`` for a policy file it cannot
+    read. The message names the path or the input, and what to write
+    instead.
     """
 
     exit_code = 1
