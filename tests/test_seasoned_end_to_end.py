@@ -626,6 +626,57 @@ class TestTheConfigCarriesTheFixings:
             assert "MarketSnapshot" not in message, name
             assert "2025-09-17" in message, name
 
+    @pytest.mark.parametrize("name", ["bootstrap", "price", "hedge"])
+    def test_a_started_futures_entry_is_named_and_not_sent_to_the_fixings_block(self, name):
+        # Review 3, point 2: a curve.futures entry from 2025-12-17 to
+        # 2026-03-18 as of 2026-01-15 used to come back as the swap's refusal
+        # rewritten to "fixings.SOFR.values", which no curve node reads.
+        from rates_engine.app import commands
+        from rates_engine.core.errors import MissingFixingError
+
+        config = _seasoned_config()
+        del config["curve"]["stub"]
+        config["curve"]["futures"].insert(
+            0, {"label": "SR3-Z5", "start": "2025-12-17", "end": "2026-03-18", "price": 96.0}
+        )
+        with pytest.raises(MissingFixingError) as caught:
+            commands.COMMANDS[name](config)
+        message = str(caught.value)
+        assert message.startswith("curve.futures[0] (SR3-Z5) runs from 2025-12-17")
+        assert "curve.stub" in message and '"end": "2026-03-18"' in message
+        assert "fixings.SOFR.values" not in message
+
+    def test_a_par_swap_rolled_before_a_saturday_names_the_way_out_that_works(self):
+        # As of Saturday 2026-01-31 a par swap effective that day rolls back
+        # to Friday the 30th (Modified Following, month end). Adding Friday's
+        # fixing, as the old message said, still failed: a SwapQuoteNode
+        # takes no fixings. The message now says what does work, and doing
+        # it prices.
+        from rates_engine.app import commands
+        from rates_engine.core.errors import MissingFixingError
+
+        config = {
+            "as_of": "2026-01-31",
+            "curve": {"par_swaps": [
+                {"label": "1Y", "effective": "2026-01-31", "maturity": "2027-02-01",
+                 "rate": 0.04},
+                {"label": "2Y", "effective": "2026-01-31", "maturity": "2028-01-31",
+                 "rate": 0.04},
+            ]},
+            "swap": {"effective": "2026-02-03", "maturity": "2027-02-03", "fixed_rate": 0.04,
+                     "notional": NOTIONAL},
+            "fixings": {"SOFR": {"values": [{"date": "2026-01-30", "rate": 0.04}]}},
+        }
+        with pytest.raises(MissingFixingError) as caught:
+            commands.COMMANDS["price"](config)
+        message = str(caught.value)
+        assert message.startswith("curve.par_swaps[0] (1Y) starts on 2026-01-30")
+        assert "takes none" in message and "fixings.SOFR.values" not in message
+        assert "2026-02-02" in message and "as of 2026-01-30" in message
+        for entry in config["curve"]["par_swaps"]:
+            entry["effective"] = "2026-02-02"
+        assert math.isfinite(commands.COMMANDS["price"](config)["value"])
+
     def test_price_values_the_swap_on_the_history_the_file_holds(self):
         from rates_engine.app import commands
 

@@ -57,6 +57,7 @@ from rates_engine.hedging.fx_structures import (
 )
 from rates_engine.hedging.program import audit_hedge, load_program
 from rates_engine.models.fx_delta import DeltaBasis, PremiumAdjustment
+from rates_engine.pricing.calibration import SwapQuoteNode
 from rates_engine.pricing.fx_forward import forward_from_curves
 from rates_engine.pricing.linear import annuity, par_rate, pv
 from rates_engine.reporting.payloads import result_payload
@@ -74,7 +75,12 @@ from rates_engine.volatility.fx_smile import ATMConvention
 from rates_engine.volatility.units import VolUnits
 
 if TYPE_CHECKING:
+    from datetime import date
+
     from rates_engine.app.builders import FXInputs
+    from rates_engine.core.evidence import Evidence
+    from rates_engine.instruments.swaps import OISSwap
+    from rates_engine.market.snapshot import MarketSnapshot
     from rates_engine.pricing.fx_forward import FXForwardResult
 
 __all__ = [
@@ -254,10 +260,16 @@ def bootstrap(config: dict[str, Any] | None) -> dict[str, Any]:
 
     Returns:
         The ``BootstrapResult`` payload with a ``views`` block holding the four views.
+
+    Raises:
+        MissingFixingError: A ``curve.futures`` entry has started, or a
+            ``curve.par_swaps`` entry starts before ``as_of`` once rolled;
+            the message names the entry and what to give instead.
     """
     config = require_config(config, "bootstrap")
     as_of = as_date(config["as_of"])
     instruments = calibration_nodes(config, as_of)
+    _refuse_history_in_curve(instruments, as_of)
     result = bootstrap_discount_curve(
         as_of,
         instruments,
@@ -278,14 +290,78 @@ _CONFIG_REMEDY = (
 
 
 def _config_remedy(error: MissingFixingError) -> MissingFixingError:
-    """The refusal with the remedy a config can use in place of the Python one.
+    """The swap's refusal with the remedy a config can use in place of the Python one.
 
     The pricer's message ends by telling a Python caller to pass
     ``fixings=MarketSnapshot(...)``, which a file cannot do. What is missing
-    is kept, and the key that supplies it replaces the keyword.
+    is kept, and the key that supplies it replaces the keyword. Only a
+    refusal of the configured swap's own valuation is rewritten so: the
+    ``fixings`` block reaches the swap and nothing else, and a curve entry
+    that needs history is refused before, by :func:`_refuse_history_in_curve`.
     """
     reason = _PYTHON_REMEDY.sub("", str(error)).rstrip(" .")
     return MissingFixingError(f"{reason}. {_CONFIG_REMEDY}")
+
+
+def _refuse_history_in_curve(instruments: tuple[Any, ...], as_of: date) -> None:
+    """Refuse a curve entry that would need fixings, naming it and what to give instead.
+
+    A curve node takes no fixings: the ``fixings`` block prices the swap. A
+    futures contract that has started, or a par swap whose schedule rolls
+    its start before ``as_of``, used to reach the bootstrap and come back
+    as the swap's refusal, rewritten to "the history goes under
+    fixings.SOFR.values": a key that cannot fix either, so a user who
+    followed it looped. Checked before anything is built, so every
+    ``MissingFixingError`` after it is the swap's own.
+
+    Raises:
+        MissingFixingError: An entry needs history. The message names
+            ``curve.futures[i]`` or ``curve.par_swaps[i]`` and the way out:
+            the rest of a started contract's period goes in ``curve.stub``;
+            a par quote is a swap that starts on or after ``as_of``.
+    """
+    futures = [node for node in instruments if isinstance(node, FuturesNode)]
+    for number, node in enumerate(futures):
+        if node.start < as_of:
+            raise MissingFixingError(
+                f"curve.futures[{number}] ({node.label}) runs from {node.start} to {node.end} "
+                f"and as_of is {as_of}: the contract has started, and the part of its period "
+                "before as_of is history, which a curve node cannot be calibrated on. The "
+                "fixings block prices the swap, not the curve. Drop the entry and give the "
+                f'rest of its period as curve.stub: {{"end": "{node.end}", "accrual_factor": '
+                "the growth from as_of to that end}, the contract's 1 + F x tau over its "
+                f"whole period divided by the SOFR compounded from {node.start} up to as_of."
+            )
+    quotes = [node for node in instruments if isinstance(node, SwapQuoteNode)]
+    for number, quote in enumerate(quotes):
+        swap = quote.swap
+        first = swap.span[0]
+        if first >= as_of:
+            continue
+        calendar = swap.roll_calendar
+        rolled = (
+            f"starts on {first} once its schedule rolls {swap.effective}"
+            if first != swap.effective
+            else f"starts on {first}"
+        )
+        open_today = calendar.is_business_day(as_of)
+        opening = as_of if open_today else calendar.next_business_day(as_of)
+        weekend = (
+            ""
+            if open_today
+            else (
+                f" Or value the curve as of {calendar.previous_business_day(as_of)}, the "
+                "business day its quotes are from."
+            )
+        )
+        name = f"curve.par_swaps[{number}]" + (f" ({quote.label})" if quote.label else "")
+        raise MissingFixingError(
+            f"{name} {rolled}, before as_of {as_of}, so its rate would rest on SOFR "
+            "fixings, and a curve quote takes none: the fixings block prices the swap, not "
+            "the curve, and adding the fixing changes nothing. A par quote is the rate of a "
+            "swap that starts on or after as_of; give its effective date as a business day "
+            f"on or after as_of, {opening} or its spot date.{weekend}"
+        )
 
 
 def price(config: dict[str, Any] | None) -> dict[str, Any]:
@@ -302,18 +378,14 @@ def price(config: dict[str, Any] | None) -> dict[str, Any]:
 
     Raises:
         MissingFixingError: The swap has started and the ``fixings`` block
-            does not hold the history it needs; the message names the key.
+            does not hold the history it needs, and the message names that
+            key; or a curve entry needs history, and the message names the
+            entry (as for ``bootstrap``).
     """
     config = require_config(config, "price")
-    try:
-        return _price(config)
-    except MissingFixingError as error:
-        raise _config_remedy(error) from error
-
-
-def _price(config: dict[str, Any]) -> dict[str, Any]:
     as_of = as_date(config["as_of"])
     instruments = calibration_nodes(config, as_of)
+    _refuse_history_in_curve(instruments, as_of)
     swap = ois_swap(config)
     if swap.currency is not Currency.USD:
         # The curve block quotes a SOFR stub, SR3 futures and SOFR OIS par:
@@ -331,7 +403,20 @@ def _price(config: dict[str, Any]) -> dict[str, Any]:
     curve_set = CurveSet(boot.curve)
     sources = (boot.evidence,)
     fixings = fixings_snapshot(config, as_of)
+    try:
+        return _price_measures(config, swap, curve_set, sources, fixings)
+    except MissingFixingError as error:
+        raise _config_remedy(error) from error
 
+
+def _price_measures(
+    config: dict[str, Any],
+    swap: OISSwap,
+    curve_set: CurveSet,
+    sources: tuple[Evidence, ...],
+    fixings: MarketSnapshot | None,
+) -> dict[str, Any]:
+    """The ``price`` payload: the swap's value and every risk measure defined on it."""
     value = pv(swap, curve_set, source_evidence=sources, fixings=fixings)
     measures: dict[str, Any] = {
         "pv": value.to_dict(),
@@ -399,18 +484,14 @@ def hedge(config: dict[str, Any] | None) -> dict[str, Any]:
             ``hedge.contract_dv01`` contradicts an entry's contract. Each
             message starts with the key at fault.
         MissingFixingError: The swap has started and the ``fixings`` block
-            does not hold the history it needs; the message names the key.
+            does not hold the history it needs, and the message names that
+            key; or a curve entry needs history, and the message names the
+            entry (as for ``bootstrap``).
     """
     config = require_config(config, "hedge")
-    try:
-        return _hedge(config)
-    except MissingFixingError as error:
-        raise _config_remedy(error) from error
-
-
-def _hedge(config: dict[str, Any]) -> dict[str, Any]:
     as_of = as_date(config["as_of"])
     instruments = calibration_nodes(config, as_of)
+    _refuse_history_in_curve(instruments, as_of)
     swap = ois_swap(config)
     settings = config.get("hedge") or {}
     # No default tick here. Passing SR3's 25.00 whenever the block left it
@@ -453,16 +534,20 @@ def _hedge(config: dict[str, Any]) -> dict[str, Any]:
         except ConfigurationError as error:
             entry = f"curve.futures[{number}]" + (".contract" if node.contract else "")
             raise ConfigurationError(f"hedge.contract_dv01 contradicts {entry}: {error}") from error
-    result = strip_hedge(
-        swap,
-        instruments,
-        as_of=as_of,
-        long_end_source=(config.get("curve") or {}).get("long_end_source"),
-        contract_dv01=float(contract_dv01) if contract_dv01 is not None else None,
-        require_full_coverage=require_full_coverage,
-        fixings=fixings_snapshot(config, as_of),
-    )
-    table = shock_table(result, shocks)
+    fixings = fixings_snapshot(config, as_of)
+    try:
+        result = strip_hedge(
+            swap,
+            instruments,
+            as_of=as_of,
+            long_end_source=(config.get("curve") or {}).get("long_end_source"),
+            contract_dv01=float(contract_dv01) if contract_dv01 is not None else None,
+            require_full_coverage=require_full_coverage,
+            fixings=fixings,
+        )
+        table = shock_table(result, shocks)
+    except MissingFixingError as error:
+        raise _config_remedy(error) from error
     return result_payload(result, shock_table=table.to_dict(), command="hedge")
 
 
