@@ -30,10 +30,13 @@ it started has these kinds of period, by QuantLib's rule with its default
   evidence says which, and the forecast is not a ``Degradation``: a
   spot-starting cap fixes its first period on the valuation date, so a
   proxy flag there would mark every morning quote and tell nobody
-  anything. A snapshot without the index's series at all is refused,
-  whatever the period: that is a wrong snapshot, not a fixing not yet
+  anything. A snapshot without the index's series at all, or with it
+  under another name, is refused once a period has fixed or fixes on the
+  valuation date: that is a wrong snapshot, not a fixing not yet
   published;
-- the rest are options, to their fixing dates.
+- the rest are options, to their fixing dates, and never read ``fixings``:
+  a strip whose periods all fix after the valuation date prices the same
+  with any snapshot or none.
 
 v0.3 had no notion of any of it: the curve's discount factor is one on and
 before its date, so a floor from 2025-01-15 valued on 2026-01-15 counted

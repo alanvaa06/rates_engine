@@ -88,7 +88,12 @@ class FederalReserveCalendar(HolidayCalendar):
     name = "FEDERAL_RESERVE"
 
     def holidays(self, year: int) -> frozenset[date]:
-        """Every holiday observed in ``year``.
+        """The weekdays the Federal Reserve closes for ``year``'s holidays.
+
+        Closures, as every calendar here lists them (the contract of
+        :meth:`HolidayCalendar.holidays
+        <rates_engine.conventions.calendar.HolidayCalendar.holidays>`): a
+        holiday that closes no weekday is not in the set.
 
         Args:
             year: Calendar year.
