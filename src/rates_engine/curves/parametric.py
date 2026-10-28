@@ -594,6 +594,11 @@ class FOMCStepFit(EngineResult):
         }
 
 
+def _anchor(day: date, calendar: HolidayCalendar) -> date:
+    """The business day whose published rate a calendar day takes: itself or the one before."""
+    return day if calendar.is_business_day(day) else calendar.previous_business_day(day)
+
+
 def _rate_days(start: date, end: date, calendar: HolidayCalendar) -> list[tuple[date, int]]:
     """``(business day i, d_i)`` over ``[start, end)``: CME's terms, in order.
 
@@ -603,7 +608,7 @@ def _rate_days(start: date, end: date, calendar: HolidayCalendar) -> list[tuple[
     covers inside the period -- three for an ordinary Friday, and cut short
     by ``end``.
     """
-    anchor = start if calendar.is_business_day(start) else calendar.previous_business_day(start)
+    anchor = _anchor(start, calendar)
     out: list[tuple[date, int]] = []
     covered, day = 0, start
     while day < end:
@@ -656,7 +661,8 @@ class _PricedContract:
             is in the snapshot.
         realised_days: Calendar days priced from ``fixed``.
         forecast_days: Calendar days on the ``as_of`` fixing that the path
-            priced because the snapshot did not hold it.
+            priced because there was no snapshot, or it did not hold that
+            day yet.
         missing_from: The first business day before ``as_of`` with no fixing,
             or ``None`` when every one has one.
     """
@@ -743,17 +749,34 @@ def fit_fomc_step_curve(
     before -- prices a month that straddled a meeting already held as if the
     meeting had not happened, and bends the first segment to absorb it. The
     fixing dated ``as_of`` itself is read when the snapshot has it and
-    forecast by the path when it does not, with a
-    ``curve_forward_for_todays_fixing:SOFR`` warning (quality ``proxy``, the
-    code pricing uses for the same substitution) naming the contracts that
-    rest on it.
+    forecast by the path when it does not, QuantLib's default. Not yet
+    published is the ordinary state of that fixing during the day, so the
+    forecast lowers no quality: ``forecast_days_on_as_of`` in the evidence
+    counts, per contract, the calendar days that rest on it.
 
-    **Every segment must price a day still to come.** A meeting on or before
-    ``as_of`` is refused: the rate it set is in the fixings, and the segment
-    before it covers only days already fixed, so nothing pins it --
+    **Every segment must be pinned, and pinned on its own.** A meeting on or
+    before ``as_of`` is refused: the rate it set is in the fixings, and the
+    segment before it covers only days already fixed, so nothing pins it --
     ``least_squares`` returned it at its starting point and reported a move
     for a meeting already held. The same holds for a segment the strip never
-    reaches, after a meeting beyond the last contract.
+    reaches, after a meeting beyond the last contract. Touching every
+    segment is not enough either: the strip has to determine each rate, not
+    only some combinations of them. Two quarters that both sit in the last
+    segment pin one thing, not two, and five contracts can then leave the
+    first three segments free to trade off against each other with every
+    price unchanged; the fit found a point on that line and passed
+    ``strict`` with a move of +1172 bp. The strip's contract-by-segment
+    weights, from its days still to come, must have full column rank.
+
+    **A first segment that is all fixing is pinned to it.** On a decision
+    day, with the meeting effective tomorrow, the first segment is
+    ``as_of`` alone; on a weekend before a Monday meeting it is days that
+    take Friday's rate. Either way it holds no business day after
+    ``as_of``, so its rate is a published fixing, not something the strip
+    says. When the snapshot holds that fixing the segment is set to it
+    (``leading_segment_fixing`` in the evidence) and the strip fits the
+    rest. Before, passing it turned a fit into a refusal: the segment then
+    held no day for the path to price.
 
     Args:
         as_of: Valuation date, where the first segment starts.
@@ -765,24 +788,31 @@ def fit_fomc_step_curve(
         strict: Refuse when any contract misses the tolerance.
         fixings: A snapshot holding the published SOFR fixings as the
             series ``"SOFR"``, decimals by business day -- the same
-            ``MarketSnapshot`` swaps and caps take. Required for every
-            business day before ``as_of`` that a contract's period covers;
-            read for ``as_of`` itself if it is there; ignored otherwise.
+            ``MarketSnapshot`` swaps and caps take. The series is required
+            only when a contract prices a business day on or before
+            ``as_of``, and then every such day before ``as_of`` must be in
+            it; ``as_of`` itself is read if it is there and forecast if not.
+            A snapshot no contract needs it for is only read, to pin a first
+            segment that is all fixing.
         calendar: The business days the overnight rate is published on.
 
     Returns:
         The :class:`FOMCStepFit`. Its evidence records how many calendar days
-        of each contract were priced from fixings.
+        of each contract were priced from fixings, how many rest on a
+        forecast of the ``as_of`` fixing, and the fixing a first segment was
+        pinned to, if one was.
 
     Raises:
-        UnderdeterminedCurveError: Fewer contracts than segments, a meeting
-            on or before ``as_of``, or a segment no contract prices a day of,
-            so some segment is pinned by nothing.
+        UnderdeterminedCurveError: Fewer contracts than segments to fit, a
+            meeting on or before ``as_of``, a segment no contract prices a
+            day of, or segments the strip prices only in combinations it
+            cannot separate -- named in the message.
         UnsupportedConventionError: A contract is neither SR1 nor SR3.
         ImplausibleInputError: A price or a fixing is NaN or infinite.
         MissingFixingError: A contract covers a business day before ``as_of``
-            and there is no fixing for it, no ``fixings`` at all, or no
-            ``"SOFR"`` series in them.
+            and there is no fixing for it or no ``fixings`` at all; or a
+            contract covers a business day on or before ``as_of`` and the
+            snapshot has no ``"SOFR"`` series.
         CalibrationError: Under ``strict``, a contract missed the tolerance.
     """
     segments = len(meeting_dates) + 1
@@ -793,12 +823,6 @@ def fit_fomc_step_curve(
             f"{as_of.isoformat()}: the rate each one set is already in the fixings, and the "
             "segment before it prices no day still to come, so nothing pins it. Drop them "
             "from meeting_dates; the path's first segment starts at as_of."
-        )
-    if len(contracts) < segments:
-        raise UnderdeterminedCurveError(
-            f"{len(contracts)} contracts cannot pin {segments} segments "
-            f"({len(meeting_dates)} meetings plus the stub before the first). "
-            "Extend the strip or drop the meetings it does not reach."
         )
     for label, _begin, _end, symbol, price in contracts:
         if symbol.upper() not in _FUTURES_SYMBOLS:
@@ -812,13 +836,16 @@ def fit_fomc_step_curve(
                 f"contract {label!r} has settlement price {price!r}, which is not a number "
                 "to fit; drop the contract or supply its price"
             )
-    series = None if fixings is None else fixings.require(SOFR.name)
+    series = _sofr_series(as_of, contracts, fixings, calendar)
     priced = [
         _PricedContract.build(contract, as_of, series, calendar) for contract in contracts
     ]
-    bad = sorted(
-        {day for p in priced for day, value in p.fixed.items() if not math.isfinite(value)}
-    )
+    leading = _leading_anchor(as_of, meeting_dates, calendar)
+    pinned = None if leading is None or series is None else series.get(leading)
+    read = {day: value for p in priced for day, value in p.fixed.items()}
+    if leading is not None and pinned is not None:
+        read[leading] = pinned
+    bad = sorted(day for day, value in read.items() if not math.isfinite(value))
     if bad:
         raise ImplausibleInputError(
             f"{SOFR.name} fixings on {[d.isoformat() for d in bad]} are not finite numbers; "
@@ -838,23 +865,38 @@ def fit_fomc_step_curve(
             f"{{{SOFR.name!r}: Series(...)}}); the path starts at as_of and does not know "
             "what the overnight rate did before it."
         )
-    _require_every_segment_priced(as_of, meeting_dates, priced)
+    # A first segment that is all fixing is not fitted: it is the fixing.
+    head = () if pinned is None else (float(pinned),)
+    free = segments - len(head)
+    if len(contracts) < free:
+        raise UnderdeterminedCurveError(
+            f"{len(contracts)} contracts cannot pin {free} segments "
+            f"({len(meeting_dates)} meetings plus the stub before the first"
+            + (", less the stub, which is its fixing" if head else "")
+            + "). Extend the strip or drop the meetings it does not reach."
+        )
+    _require_every_segment_identified(
+        as_of, meeting_dates, priced, first_free=len(head), leading=leading
+    )
 
     targets = np.array([(100.0 - price) / 100.0 for *_, price in contracts])
     start = float(targets[0])
 
+    def path(rates: np.ndarray) -> FOMCStepCurve:
+        return FOMCStepCurve(as_of, meeting_dates, (*head, *(float(r) for r in rates)))
+
     def model_rates(rates: np.ndarray) -> np.ndarray:
-        candidate = FOMCStepCurve(as_of, meeting_dates, tuple(float(r) for r in rates))
+        candidate = path(rates)
         return np.array([contract.rate(candidate) for contract in priced])
 
     solution = least_squares(
         lambda r: model_rates(r) - targets,
-        np.full(segments, start),
+        np.full(free, start),
         xtol=1e-15,
         ftol=1e-15,
         gtol=1e-15,
     )
-    curve = FOMCStepCurve(as_of, meeting_dates, tuple(float(r) for r in solution.x))
+    curve = path(solution.x)
     modelled = model_rates(solution.x)
     residuals = {
         contract[0]: float((modelled[i] - targets[i]) * 1e4)
@@ -892,17 +934,19 @@ def fit_fomc_step_curve(
             "calendar": calendar.name,
             "realised_days": {p.label: p.realised_days for p in priced},
             "forecast_days_on_as_of": {p.label: p.forecast_days for p in priced},
+            "leading_segment_fixing": (
+                {"date": leading.isoformat(), "rate": head[0]}
+                if head and leading is not None
+                else None
+            ),
         },
-        inputs=(
-            (series.provenance,) if series is not None and any(p.fixed for p in priced) else ()
-        ),
+        inputs=((series.provenance,) if series is not None and read else ()),
         warnings=(
             Degradation(
                 code="term_rate_without_convexity",
                 message=TERM_RATE_CAVEAT,
                 data_quality=DataQuality.ASSUMED,
             ),
-            *_forecast_warning(as_of, priced),
         ),
     )
     return FOMCStepFit(
@@ -914,54 +958,153 @@ def fit_fomc_step_curve(
     )
 
 
-def _require_every_segment_priced(
-    as_of: date, meeting_dates: tuple[date, ...], priced: Sequence[_PricedContract]
+def _sofr_series(
+    as_of: date,
+    contracts: Sequence[tuple[str, date, date, str, float]],
+    fixings: MarketSnapshot | None,
+    calendar: HolidayCalendar,
+) -> Series | None:
+    """The snapshot's SOFR series, demanded only when a contract prices a day it holds.
+
+    A contract needs published fixings when its first business day -- the one
+    whose rate its first calendar day takes -- is on or before ``as_of``. A
+    snapshot passed for anything else (Treasury yields, say) is not a demand
+    for SOFR: asking every snapshot for the series refused strips that
+    ``fixings=None`` fits. When a contract does need it and the series is
+    missing or misnamed, the refusal stands: a snapshot is a statement that
+    the fixings are in it, and forecasting a fixing it was meant to carry
+    would hide the mistake.
+    """
+    if fixings is None:
+        return None
+    series = fixings.series.get(SOFR.name)
+    if series is not None:
+        return series
+    needing = [
+        (label, _anchor(begin, calendar))
+        for label, begin, _end, _symbol, _price in contracts
+        if _anchor(begin, calendar) <= as_of
+    ]
+    if needing:
+        raise MissingFixingError(
+            f"the snapshot has no {SOFR.name!r} series (it has {sorted(fixings.series)}), "
+            "and these contracts settle partly on fixings published by as_of "
+            f"{as_of.isoformat()}: "
+            + ", ".join(f"{label!r} (from {day.isoformat()})" for label, day in needing)
+            + f". Add the fixings as series {SOFR.name!r}. A fixing dated as_of is forecast "
+            "only without a snapshot, or when the series is there and lacks that day."
+        )
+    return None
+
+
+def _leading_anchor(
+    as_of: date, meeting_dates: tuple[date, ...], calendar: HolidayCalendar
+) -> date | None:
+    """The business day whose fixing the whole first segment is, if it is one.
+
+    The first segment runs from ``as_of`` to the first meeting. When it
+    holds no business day after ``as_of`` -- the decision day itself, or a
+    weekend or holiday before the meeting -- every day in it takes the rate
+    published for ``as_of`` or for the business day before it, which is
+    history or today's print, not something the strip can say.
+    """
+    if not meeting_dates:
+        return None
+    terms = _rate_days(as_of, meeting_dates[0], calendar)
+    return terms[0][0] if len(terms) == 1 else None
+
+
+_NULL_SHARE = 1e-9
+"""How much a direction the strip cannot see must move a segment to name it.
+
+Directions of unit length; rounding leaves components around 1e-16 on the
+segments a direction does not involve, and a real share is a ratio of day
+counts. A segment moved less than this by every such direction is pinned
+for any purpose a price quoted to a hundredth of a basis point can serve.
+"""
+
+
+def _require_every_segment_identified(
+    as_of: date,
+    meeting_dates: tuple[date, ...],
+    priced: Sequence[_PricedContract],
+    *,
+    first_free: int,
+    leading: date | None,
 ) -> None:
-    """Refuse a path with a segment that no contract prices a day of.
+    """Refuse a path whose free segments the strip does not determine one by one.
 
     Counting contracts is not enough: one whose period is wholly fixed pins
     nothing, and a meeting beyond the strip's last day leaves the segment
     after it untouched. ``least_squares`` returns such a segment at its
-    starting value, with nothing in the fit to say so.
+    starting value, with nothing in the fit to say so. Touching every
+    segment is not enough either. The strip pins each rate only if its
+    contract-by-segment weights -- the calendar days each contract prices
+    from each segment, its fixed days left out -- have full column rank;
+    otherwise some move of several rates together leaves every price where
+    it was, and the solver returns an arbitrary point on that line.
+
+    The weights are SR1's exactly and SR3's to first order: compounding
+    scales each day's weight by a factor within a few parts in ten thousand
+    of one, which moves no rank but a coincidence's. They are whole numbers
+    of days, so a dependence among the columns is exact and leaves a singular
+    value at rounding level. ``numpy.linalg.matrix_rank``'s default threshold
+    is the largest singular value times the larger dimension times machine
+    epsilon -- 1e-15 to 2e-15 of the largest for these strips -- and it sits
+    far from both sides. The review's dependent strip has its smallest
+    singular value at 1e-20 of the largest. The least well separated strip
+    in the tests, where one day of one quarter tells a segment apart, keeps
+    3.4e-3, and a full year of SR1 and SR3 against eight meetings keeps 0.21.
     """
     live = [p for p in priced if p.priced_by_path]
     segments = len(meeting_dates) + 1
-    if len(live) < segments:
+    free = segments - first_free
+    if len(live) < free:
         raise UnderdeterminedCurveError(
-            f"{len(live)} contracts price a day from the path, and the path has {segments} "
-            "segments; the others are wholly fixed and pin nothing. Extend the strip or "
-            "drop the meetings it does not reach."
+            f"{len(live)} contracts price a day from the path, and the path has {free} "
+            "segments to fit; the others are wholly fixed and pin nothing. Extend the strip "
+            "or drop the meetings it does not reach."
         )
-    touched = {bisect_right(meeting_dates, day) for p in live for day in p.priced_by_path}
     bounds = (as_of, *meeting_dates)
-    idle = [
+    names = [
         f"{bounds[i].isoformat()} onwards"
         if i == segments - 1
         else f"{bounds[i].isoformat()} to {bounds[i + 1].isoformat()}"
         for i in range(segments)
-        if i not in touched
     ]
+    weights = np.zeros((len(live), segments))
+    for row, contract in enumerate(live):
+        for day, count in contract.terms:
+            if day not in contract.fixed:
+                weights[row, bisect_right(meeting_dates, day)] += count
+    weights = weights[:, first_free:]
+    idle = [names[first_free + j] for j in range(free) if not weights[:, j].any()]
     if idle:
+        hint = ""
+        if leading is not None and names[0] in idle:
+            hint = (
+                f" The first segment holds no business day after as_of: its rate is the {SOFR.name} "
+                f"fixing dated {leading.isoformat()}, and passing it in fixings= pins it."
+            )
         raise UnderdeterminedCurveError(
             f"no contract prices a day in the segments {idle}, so nothing pins their rate. "
             "Drop the meetings the strip does not reach, or add a contract that covers them."
+            + hint
         )
-
-
-def _forecast_warning(as_of: date, priced: Sequence[_PricedContract]) -> tuple[Degradation, ...]:
-    """The degradation for contracts that rest on an ``as_of`` fixing the path forecast."""
-    resting = [p.label for p in priced if p.forecast_days]
-    if not resting:
-        return ()
-    return (
-        Degradation(
-            code=f"curve_forward_for_todays_fixing:{SOFR.name}",
-            message=(
-                f"The {SOFR.name} fixing dated {as_of.isoformat()} is not in the snapshot, so "
-                f"the fitted path stands in for it in {resting}. A fixing dated as_of is read "
-                "when it is there and forecast when it is not; pass it in fixings= to fit on "
-                "the print."
-            ),
-            data_quality=DataQuality.PROXY,
-        ),
-    )
+    rank = int(np.linalg.matrix_rank(weights))
+    if rank < free:
+        _, _, directions = np.linalg.svd(weights)
+        unseen = directions[rank:]
+        tangled = [
+            names[first_free + j]
+            for j in range(free)
+            if float(np.abs(unseen[:, j]).max()) > _NULL_SHARE
+        ]
+        raise UnderdeterminedCurveError(
+            f"the strip pins {rank} independent combinations of {free} segment rates, not "
+            f"each one: the segments {tangled} cannot be told apart, since some move of their "
+            "rates together leaves every contract's price where it is. Contracts that price "
+            "the same segments in the same proportions count once. Add a contract that "
+            "prices one of them on its own -- an SR1 for a month between two meetings -- or "
+            "drop a meeting."
+        )
