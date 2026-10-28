@@ -29,10 +29,15 @@ from rates_engine.core.errors import ConfigurationError, UndefinedDurationError
 from rates_engine.core.errors import __all__ as EXCEPTION_NAMES
 from rates_engine.core.money import Currency
 from rates_engine.core.results import SCHEMA_VERSION
-from rates_engine.curves.bootstrap import bootstrap_discount_curve
+from rates_engine.curves.bootstrap import FuturesNode, bootstrap_discount_curve
 from rates_engine.curves.discount import CurveSet
 from rates_engine.curves.views import all_views
-from rates_engine.hedging.futures_strip import DEFAULT_SHOCKS_BP, shock_table, strip_hedge
+from rates_engine.hedging.futures_strip import (
+    DEFAULT_SHOCKS_BP,
+    _contract_sizing,
+    shock_table,
+    strip_hedge,
+)
 from rates_engine.hedging.fx_structures import (
     Exposure,
     ExposureDirection,
@@ -315,8 +320,11 @@ def hedge(config: dict[str, Any] | None) -> dict[str, Any]:
         The ``HedgeResult`` payload with a ``shock_table`` block.
 
     Raises:
-        ConfigurationError: ``hedge.require_full_coverage`` is not a boolean,
-            or ``hedge.shocks_bp`` contains a zero shock.
+        ConfigurationError: ``hedge.require_full_coverage`` is not a boolean;
+            ``hedge.shocks_bp`` contains a zero shock; a
+            ``curve.futures[i].contract`` contradicts that entry's dates; or
+            ``hedge.contract_dv01`` contradicts an entry's contract. Each
+            message starts with the key at fault.
     """
     config = require_config(config, "hedge")
     as_of = as_date(config["as_of"])
@@ -344,6 +352,25 @@ def hedge(config: dict[str, Any] | None) -> dict[str, Any]:
             f"hedge.shocks_bp[{zeros[0]}] is 0. A zero shock moves nothing and its implied "
             "money convexity, 2 x net / shock^2, is undefined; drop it from the grid"
         )
+    # The contract checks strip_hedge makes, made here first and by the same
+    # function, entry by entry, for the same reason: the library knows a
+    # contract by its label, and the refusal should name the key in the file.
+    # The first pass leaves the tick out, so a contract that contradicts its
+    # own dates is told apart from a contract_dv01 that contradicts it.
+    tick = float(contract_dv01) if contract_dv01 is not None else None
+    futures = [node for node in instruments if isinstance(node, FuturesNode)]
+    for number, node in enumerate(futures):
+        try:
+            _contract_sizing(node, node.label, None)
+        except ConfigurationError as error:
+            raise ConfigurationError(f"curve.futures[{number}].contract: {error}") from error
+        if tick is None:
+            continue
+        try:
+            _contract_sizing(node, node.label, tick)
+        except ConfigurationError as error:
+            entry = f"curve.futures[{number}]" + (".contract" if node.contract else "")
+            raise ConfigurationError(f"hedge.contract_dv01 contradicts {entry}: {error}") from error
     result = strip_hedge(
         swap,
         instruments,
