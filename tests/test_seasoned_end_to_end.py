@@ -372,19 +372,35 @@ class TestRiskTakesTheFixings:
             dv01(swap, CurveSet(strip_curve))
         assert "fixings=" in str(caught.value) and "risk measures" in str(caught.value)
 
-    def test_a_forecast_standing_in_for_the_fixing_of_as_of_degrades_the_dv01(
-        self, strip_curve
-    ):
+    def test_a_forecast_of_the_fixing_of_as_of_is_recorded_not_degraded(self, strip_curve):
+        # Decision A of the round-3 reviews: a fixing dated as_of that is not
+        # out yet is forecast, as QuantLib does by default, and recorded in
+        # fixings_dated_as_of, not degraded. A spot IRS priced before the
+        # print reads the same in its price, its par rate and its DV01 --
+        # #12's point 3, which only the whole stack can check.
         from rates_engine.instruments.swaps import IRSwap
+        from rates_engine.pricing.linear import par_rate
         from rates_engine.risk.sensitivities import dv01
 
         irs = IRSwap(effective=_SPOT, maturity=date(2028, 1, 20), fixed_rate=0.039,
                      notional=NOTIONAL)
-        forecast = dv01(irs, CurveSet(strip_curve))
-        assert forecast.evidence.worst_quality is DataQuality.PROXY
+        curve_set = CurveSet(strip_curve)
+        results = (pv(irs, curve_set), par_rate(irs, curve_set), dv01(irs, curve_set))
+        for result in results:
+            assert result.evidence.worst_quality is DataQuality.OBSERVED
+            assert result.evidence.warnings == results[0].evidence.warnings
+        history = [s for s in results[2].evidence.sources if s.produced_by == "pricing.history"]
+        assert [entry["source"] for entry in history[0].fields["fixings_dated_as_of"]] == [
+            "curve"
+        ]
+
         snapshot = _fixings(_published("TERM_SOFR_3M", {AS_OF: 0.0405}))
-        read = dv01(irs, CurveSet(strip_curve), fixings=snapshot)
+        read = dv01(irs, curve_set, fixings=snapshot)
         assert read.evidence.worst_quality is DataQuality.OBSERVED
+        chained = [s for s in read.evidence.sources if s.produced_by == "pricing.history"]
+        assert chained[0].fields["fixings_dated_as_of"][0]["source"] == "fixings"
+        assert chained[0].fields["realised_fixings"][0]["rate"] == 0.0405
+        assert "TERM_SOFR_3M" in {p.series_id for p in _inputs(read.evidence)}
 
 
 class TestTheStripHedgeTakesTheFixings:

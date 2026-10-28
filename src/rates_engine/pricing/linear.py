@@ -319,10 +319,10 @@ def history_evidence(
     dated ``as_of`` -- would be missing from its evidence. This is that part
     of a price's evidence on its own, for the measure to chain in as a
     source: ``realised_fixings`` and ``fixings_dated_as_of`` in the fields,
-    the fixings' provenance among the inputs, and the forecast's
-    degradation among the warnings, so ``worst_quality`` sees both. A
-    history does not move with the curve, so it is recorded once, at the
-    base curve.
+    and the fixings' provenance among the inputs, so ``worst_quality`` sees
+    their data quality. The forecast is recorded, not degraded, exactly as
+    in a price. A history does not move with the curve, so it is recorded
+    once, at the base curve.
 
     Args:
         instrument: Anything :func:`~rates_engine.pricing.projection.project` handles.
@@ -344,14 +344,13 @@ def history_evidence(
     ):
         return None
     flows = _priced_flows(instrument, curve_set, fixings)
-    history, inputs, forecast = _history_used(flows, instrument, curve_set.as_of)
+    history, inputs = _history_used(flows, instrument, curve_set.as_of)
     if not history:
         return None
     return Evidence(
         produced_by="pricing.history",
         inputs=inputs,
         fields={"instrument": instrument.describe(), **history},
-        warnings=forecast,
     )
 
 
