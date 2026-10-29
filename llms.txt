@@ -19,7 +19,8 @@ that a core install can run every command.
 Three ways in. As a library, importing `rates_engine`. As a CLI, `rateng`,
 where `bootstrap`, `price`, `hedge`, `describe`, `list-instruments`,
 `fx-forward` and `hedge-structures` take `--json` and put one parseable
-document on stdout with all narration on stderr. As an MCP server,
+document on stdout with all narration on stderr, and `viz` draws those
+payloads on one self-contained HTML page. As an MCP server,
 `rateng-mcp` (the `mcp` extra), whose seven tools are those same seven
 handlers and whose answers are byte-identical to the
 CLI's — the server is transport and nothing else: it writes no file, opens no

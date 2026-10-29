@@ -14,6 +14,21 @@ instruments carry their rate index, and curves calibrate to real swaps. Every
 dollar number is bit-identical to v0.3.0; the breaking changes are to how an
 instrument is valued, not to what it is worth.
 
+### Added
+
+- **`rateng viz`.** One self-contained HTML page from the payloads:
+  `--config` runs `bootstrap`, `price` and `hedge`; `--fx-config` adds
+  `fx-forward` and `hedge-structures`; `--out` names the file. The page
+  draws the four curve views, the instantaneous-forward gap between the two
+  interpolations, key-rate DV01, the futures strip with its shock table, the
+  FX forward beside its basis, and the eight hedge-structure payoffs, and it
+  accepts `--json` files dropped onto it. Every number is a field of a
+  payload the CLI already prints. No pip extra: the template is package data
+  and the page makes no network request. The command prints a `VizResult`
+  receipt naming each panel's state (`ok`, `absent`, or
+  `reported: <ExceptionType>` for the interpolation gap) and is not in
+  `COMMANDS`, so `rateng-mcp` does not serve it.
+
 ### Changed (breaking)
 
 - **The CLI's `par_swaps` entries are swaps.** Each entry gives

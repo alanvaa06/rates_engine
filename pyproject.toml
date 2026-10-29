@@ -95,7 +95,7 @@ rateng-mcp = "rates_engine.mcp_server:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-rates_engine = ["py.typed"]
+rates_engine = ["py.typed", "reporting/*.html"]
 
 [tool.ruff]
 line-length = 100

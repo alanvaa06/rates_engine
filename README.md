@@ -102,12 +102,21 @@ rateng hedge --config config.json --json       # contracts per period plus the s
 rateng list-instruments --json              # what this build prices, and what each needs
 rateng fx-forward --config fx.json --json      # CIP forward, with the basis kept separate
 rateng hedge-structures --config fx.json --json  # eight structures, costed side by side
+rateng viz --config c.json --fx-config fx.json --out desk.html  # every payload above on one page
 ```
 
 `python scripts/write_example_config.py config.json` writes a config to start
 from. With `--json`, stdout is exactly one parseable document and all
 narration goes to stderr. Exit code 1 means the inputs are unusable, 2 means
 the calculation is impossible.
+
+`rateng viz` draws every payload on one self-contained HTML page: the four
+curve views and the gap between the two interpolations, key-rate DV01, the
+futures strip with its shock table, the FX forward beside its basis, and the
+eight hedge-structure payoffs with one brought forward at a time. No extra
+and no network; the page also accepts `--json` files dropped onto it, so
+payloads from `rateng-mcp` or another machine fit. It compares and draws; it
+does not rank.
 
 ## The MCP server
 

@@ -406,6 +406,16 @@ evidence chain:
 Read them with `rates_engine.core.diagnostics.all_warnings(result.evidence)`, or
 check `result.evidence.worst_quality`.
 
+`rateng viz` reports one more failure instead of raising it. Its
+interpolation-gap panel bootstraps the config's nodes a second time under
+monotone convex, and that fit can raise `CurveArbitrageError` or
+`BootstrapResidualError` where log-linear did not. The page is still worth
+writing without that one panel, so the command writes it, puts
+`{"error": {"type": ..., "message": ...}}` in the panel's payload, and says
+`"interp": "reported: CurveArbitrageError"` in its receipt. The exit code
+stays 0. Every other refusal inside `viz` raises as it would from the
+command it came from, with that command's exit code, and no file is written.
+
 ---
 
 ## Volatility and options
