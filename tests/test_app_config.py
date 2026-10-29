@@ -727,6 +727,7 @@ def _lookups(name: str, config: dict, monkeypatch) -> tuple[set[str], set[str]]:
     asked: set[str] = set()
     read: set[str] = set()
     monkeypatch.setattr(commands, "require_config", lambda config, command: config)
+    monkeypatch.setattr(builders, "require_block", lambda block, where, command=None: block)
     commands.COMMANDS[name](_recorded(copy.deepcopy(config), "", asked, read))
     monkeypatch.undo()
     return asked, read
