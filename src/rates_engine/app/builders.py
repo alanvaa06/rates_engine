@@ -12,7 +12,7 @@ import math
 from datetime import date, timedelta
 from typing import Any
 
-from rates_engine.app.config import as_date
+from rates_engine.app.config import as_date, require_block
 from rates_engine.conventions.daycount import CURVE_TIME_BASIS, year_fraction
 from rates_engine.conventions.indices import SOFR, index_named
 from rates_engine.conventions.side import Side
@@ -47,8 +47,8 @@ def calibration_nodes(config: dict[str, Any], as_of: date) -> tuple[Any, ...]:
         OIS it describes.
 
     Raises:
-        ConfigurationError: A ``par_swaps`` entry uses the v0.3 shape or is
-            missing a required key.
+        ConfigurationError: A ``par_swaps`` entry fails its schema check:
+            the v0.3 shape, a required key missing, a key misspelt.
     """
     curve = config.get("curve") or {}
     instruments: list[Any] = []
@@ -95,6 +95,9 @@ def calibration_nodes(config: dict[str, Any], as_of: date) -> tuple[Any, ...]:
 
 _LEGACY_PAR_SWAP_KEYS = ("start", "payment_dates", "year_fractions")
 _PAR_SWAP_REQUIRED = ("effective", "maturity", "rate")
+# Read by nothing: _par_swap_quote checks an entry against CONFIG_SCHEMA. The
+# two lines are deleted on top of the whole set (#21), because deleting them
+# here collides with the helper fix/futures-strip-hedge adds just above them.
 
 
 def _par_swap_quote(entry: dict[str, Any], number: int) -> SwapQuoteNode:
@@ -106,19 +109,15 @@ def _par_swap_quote(entry: dict[str, Any], number: int) -> SwapQuoteNode:
     assumed each period is paid the day it ends, which misprices a SOFR OIS
     (paid two business days later) by several basis points at the front; it
     is refused with the migration spelled out rather than accepted.
+
+    Through a command the entry has already passed
+    :func:`~rates_engine.app.config.require_config`, which refuses both
+    problems first. A caller of :func:`calibration_nodes` that went round it
+    gets the same check of the entry against
+    :data:`~rates_engine.app.config.CONFIG_SCHEMA`, in the same words, rather
+    than a second list of the keys kept here.
     """
-    legacy = [key for key in _LEGACY_PAR_SWAP_KEYS if key in entry]
-    if legacy:
-        raise ConfigurationError(
-            f"curve.par_swaps[{number}] uses the v0.3 keys {legacy}. A par quote is now "
-            "given as the swap it quotes: effective, maturity and rate, with optional "
-            "frequency_months (12), payment_lag_days (2) and label. The dates and year "
-            "fractions are generated from those terms, payment lag included; the old "
-            "shape ignored the lag and mispriced a SOFR OIS by several basis points."
-        )
-    missing = [key for key in _PAR_SWAP_REQUIRED if key not in entry]
-    if missing:
-        raise ConfigurationError(f"curve.par_swaps[{number}] is missing {missing}")
+    entry = require_block(entry, f"curve.par_swaps[{number}]")
     rate = float(entry["rate"])
     swap = OISSwap(
         effective=as_date(entry["effective"]),
