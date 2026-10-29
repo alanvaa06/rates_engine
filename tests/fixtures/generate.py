@@ -87,10 +87,14 @@ def write_sofr() -> None:
         units="decimal rate, e.g. 0.0431 for 4.31%",
         rows=len(days),
         note=(
-            "Constructed, NOT the published SOFR series. This environment's egress "
-            "policy blocks fred.stlouisfed.org, so no observed fixings could be "
-            "frozen. Every test that reads this file asserts a property of the "
-            "engine's arithmetic, never a published number."
+            "Constructed, NOT the published SOFR series: one value per SIFMA_US "
+            "business day from START to END. The build environment that wrote it "
+            "could not reach fred.stlouisfed.org, so no observed fixings were frozen. "
+            "Every test that reads this file asserts a property of the engine's "
+            "arithmetic, never a published number. Its dates are only as right as "
+            "SIFMA_US, which is checked against the published record in "
+            "tests/test_sifma_publication_record.py; the v0.3 file had a fixing on "
+            "Memorial Day 2022 and 2023 and none on 2023-11-10."
         ),
     )
 
@@ -119,24 +123,88 @@ def write_treasuries() -> None:
     )
 
 
+HOLIDAY_YEARS = range(2022, 2031)
+"""The years the holiday dump covers."""
+
+_QUALITY_ORDER = ("observed", "synthetic", "proxy", "assumed")
+"""DataQuality's values, best first, so the worst of a file's ranges can be read off."""
+
+
+def quality_by_range(
+    first: date, last: date, verified_from: date, verified_through: date
+) -> tuple[str, list[dict[str, str]]]:
+    """Split ``[first, last]`` into the stretch checked against the record and the rest.
+
+    Only non-empty ranges are returned, in date order: an 'assumed' stretch
+    before ``verified_from``, the 'observed' one inside the record, an
+    'assumed' one after ``verified_through``. With the record covering the
+    whole file there is one range, and the file is 'observed'.
+
+    Args:
+        first: First date of the file.
+        last: Last date of the file.
+        verified_from: First date the calendar was checked against the record.
+        verified_through: Last date it was checked.
+
+    Returns:
+        The file's overall quality, the worst of its ranges, and the ranges.
+    """
+    bounds = (
+        (first, min(last, verified_from - timedelta(days=1)), "assumed"),
+        (max(first, verified_from), min(last, verified_through), "observed"),
+        (max(first, verified_through + timedelta(days=1)), last, "assumed"),
+    )
+    ranges = [
+        {"from": start.isoformat(), "to": end.isoformat(), "data_quality": quality}
+        for start, end, quality in bounds
+        if start <= end
+    ]
+    worst = max((r["data_quality"] for r in ranges), key=_QUALITY_ORDER.index)
+    return worst, ranges
+
+
 def write_holidays() -> None:
     """The SIFMA calendar this package implements, dumped for review."""
     path = HERE / "sifma_holidays.csv"
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         writer.writerow(["date", "year"])
-        for year in range(2022, 2031):
+        # Closures only: holidays(year) leaves out a Saturday New Year's Day
+        # or Veterans Day, which closes nothing.
+        for year in HOLIDAY_YEARS:
             for day in sorted(SIFMA_US.holidays(year)):
                 writer.writerow([day.isoformat(), year])
+    # The file's quality is the worst of its ranges, as an evidence chain's
+    # worst_quality is everywhere else in the package.
+    worst, ranges = quality_by_range(
+        date(HOLIDAY_YEARS[0], 1, 1),
+        date(HOLIDAY_YEARS[-1], 12, 31),
+        SIFMA_US.VERIFIED_FROM,
+        SIFMA_US.VERIFIED_THROUGH,
+    )
     _provenance(
         path,
-        data_quality="assumed",
+        data_quality=worst,
+        data_quality_by_range=ranges,
+        criterion=(
+            "A range is 'observed' when SIFMA_US agrees, on every weekday in it, with "
+            "the New York Fed's SOFR publication record: a business day exactly where "
+            "SOFR was published. The record is FRED series SOFR, downloaded on "
+            "2026-10-15 for 2018-04-03 to 2026-10-14, and is pasted as a list of "
+            "dates in tests/test_sifma_publication_record.py, which holds the calendar "
+            "to it and ties SIFMA_US.VERIFIED_FROM and VERIFIED_THROUGH to its ends. "
+            "Anything after the record is the rules extrapolated, so 'assumed'."
+        ),
         note=(
-            "Generated FROM rates_engine.conventions.calendar, so it cannot catch a "
-            "wrong rule — it exists to be diffed against SIFMA's published calendar "
-            "by a human. PRD-001 AC-1.2 marks that check [manual-check]; it has NOT "
-            "been done, because this environment cannot reach sifma.org. The "
-            "Saturday-observed-on-Friday rule is the specific line to confirm."
+            "Generated FROM rates_engine.conventions.calendar, so on its own it cannot "
+            "catch a wrong rule; the independent check is the publication record named "
+            "in 'criterion'. That check is PRD-001 AC-1.2's [manual-check], done "
+            "against the record rather than against sifma.org, which this environment "
+            "cannot reach. It found three wrong rules in v0.3, all fixed in v0.4: "
+            "Memorial Day a week early when the last Monday of May is the 29th to "
+            "31st; New Year's Day and Veterans Day on a Saturday moved to the Friday, "
+            "which SIFMA does not do; and no closure on 2018-12-05. Rules the record "
+            "has not yet exercised: Juneteenth on a Saturday (first 2027-06-19)."
         ),
     )
 
@@ -340,6 +408,8 @@ def write_bmv_holidays() -> None:
     """The BMV calendar this package implements, dumped for human review."""
     path = HERE / "bmv_holidays.csv"
     rows = []
+    # Closures only: holidays(year) leaves out a fixed-date holiday on a
+    # weekend, which this calendar does not roll and which closes nothing.
     for year in range(2022, 2032):
         for day in sorted(BMV.holidays(year)):
             rows.append((year, day.isoformat(), WEEKDAY_NAMES[day.weekday()]))
@@ -362,7 +432,10 @@ def write_bmv_holidays() -> None:
             "because this environment cannot reach banxico.org.mx (403 at the "
             "egress proxy). Two lines to confirm first: whether Banxico observes "
             "Holy Thursday, and whether it applies any weekend-observance roll, "
-            "which this calendar does not."
+            "which this calendar does not. Only weekday closures are listed: a "
+            "fixed-date holiday on a Saturday or Sunday is not observed here and "
+            "closes nothing, so it is absent by design, not missing (until v0.4 "
+            "the file listed those dates too)."
         ),
     )
 

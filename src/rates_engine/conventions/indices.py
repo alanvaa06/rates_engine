@@ -183,7 +183,25 @@ SOFR = RateIndex(
     calendar=SIFMA_US,
     administrator="Federal Reserve Bank of New York",
 )
-"""The Secured Overnight Financing Rate, compounded in arrears on ACT/360."""
+"""The Secured Overnight Financing Rate, compounded in arrears on ACT/360.
+
+``unresolved`` is empty, so :attr:`RateIndex.is_verified` is true, and since
+v0.4 that rests on a check rather than on an omission. Until then the index
+claimed to be verified while the calendar it fixes on recorded its Saturday
+rule as an unchecked assumption -- and the rule was wrong for two of its
+five holidays, as was Memorial Day in ten years of twenty-three. The
+calendar, ``SIFMA_US``, now agrees with the New York Fed's publication
+record on every weekday from ``SIFMAUSCalendar.VERIFIED_FROM`` to
+``SIFMAUSCalendar.VERIFIED_THROUGH``, and
+``tests/test_sifma_publication_record.py`` holds the two to it.
+
+Beyond that stretch the calendar is its rules, each of them exercised by the
+record except Juneteenth on a Saturday, which first happens on 19 June 2027
+and is observed on the Friday like Independence Day and Christmas. That is
+not an unresolved convention in this field's sense. What no rule can supply
+is an unscheduled closure, such as the national day of mourning of 5
+December 2018, and no calendar knows those in advance.
+"""
 
 TIIE_FONDEO = RateIndex(
     name="TIIE_FONDEO",
