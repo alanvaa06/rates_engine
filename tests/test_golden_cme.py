@@ -175,6 +175,22 @@ class TestWhitepaperGoldens:
         )
         table = shock_table(strip_hedge(swap, instruments, as_of=as_of), (-100.0,)).table
         row = table.iloc[0]
+        # OPEN QUESTION, to settle against the whitepaper PDF before the
+        # fixture is supplied: the sign of +22,292. In this engine a payer
+        # hedged with a futures strip always nets *negative*, at -100 bp and
+        # at +100 bp alike, whatever the curve's shape: a payer swap is
+        # short convexity (money convexity about -5.7e8 USD on the suite's
+        # two-year strip) and the strip is linear, so the residual is
+        # 0.5 x C x dy^2 < 0. A receiver gives the exact mirror, positive.
+        # So a positive net is what a hedged receiver earns, which suggests
+        # the whitepaper's position is the opposite of Side.PAYER -- receive
+        # fixed and short the strip -- or that it prints P&L from the
+        # futures side. If so, the side here, and possibly the sign of the
+        # 779 contracts in test_contract_count (this engine reports a
+        # receiver's hedge as negative, short, contracts), have to follow
+        # the paper. What must NOT happen is changing the engine until this
+        # assertion passes: the residual's sign follows from the swap's
+        # convexity, which is checked independently in test_hedging.py.
         assert row.net_pnl == pytest.approx(
             WHITEPAPER_NET_PNL, rel=WHITEPAPER_RELATIVE_TOLERANCE
         )

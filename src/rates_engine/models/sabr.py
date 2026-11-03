@@ -44,7 +44,12 @@ import numpy as np
 from scipy.optimize import least_squares
 
 from rates_engine.conventions.option_kind import OptionKind
-from rates_engine.core.errors import CalibrationError, ExpansionBreakdownError, ShiftRequiredError
+from rates_engine.core.errors import (
+    CalibrationError,
+    ExpansionBreakdownError,
+    ShiftRequiredError,
+    VolUnitsError,
+)
 from rates_engine.core.evidence import Evidence
 from rates_engine.core.results import EngineResult
 
@@ -92,7 +97,9 @@ class SABRParameters:
         nu: Volatility of volatility, non-negative.
         shift: Added to both forward and strike before the formulas are
             applied, so that a negative forward becomes a positive shifted
-            one. Zero means unshifted.
+            one. Zero means unshifted. A shift changes what
+            :func:`lognormal_vol` returns -- a shifted-Black volatility --
+            and leaves :func:`normal_vol` meaning what it always means.
     """
 
     alpha: float
@@ -102,6 +109,15 @@ class SABRParameters:
     shift: float = 0.0
 
     def __post_init__(self) -> None:
+        # Finiteness first. Every comparison with NaN is false, so ``alpha <=
+        # 0`` and ``nu < 0`` both let a NaN through, the expansion returned
+        # NaN, and expansion_is_valid called the point valid because NaN is
+        # not ``<= 0``. An infinite alpha or nu is no better: the expansion
+        # divides by alpha and multiplies by nu.
+        for name in ("alpha", "beta", "rho", "nu", "shift"):
+            value = getattr(self, name)
+            if not math.isfinite(value):
+                raise ValueError(f"{name} must be a finite number, got {value!r}")
         if self.alpha <= 0.0:
             raise ValueError(f"alpha must be positive, got {self.alpha!r}")
         if not 0.0 <= self.beta <= 1.0:
@@ -126,6 +142,12 @@ class SABRParameters:
 
 def _shifted(parameters: SABRParameters, forward: float, strike: float) -> tuple[float, float]:
     """Apply the shift and refuse when the result is still not positive."""
+    if not (math.isfinite(forward) and math.isfinite(strike)):
+        # A NaN is not ``<= 0``, so without this it reached the logarithm
+        # and came back as a NaN volatility.
+        raise ValueError(
+            f"SABR needs a finite forward and strike, got {forward!r} and {strike!r}"
+        )
     f, k = forward + parameters.shift, strike + parameters.shift
     if f <= 0.0 or k <= 0.0:
         raise ShiftRequiredError(
@@ -148,11 +170,29 @@ def _z_over_x(z: float, rho: float) -> float:
     small to move a price and large enough to make the two branches
     disagree, which is what ``test_the_series_branch_joins_the_ratio_branch``
     is there to catch.
+
+    **The far wing has the opposite problem.** When ``z`` is large and
+    negative -- a strike far above the forward, or an alpha so small that
+    ``nu / alpha`` is huge -- the root is ``|z - rho|`` to within ``1 - rho^2``
+    and the numerator subtracts two numbers of size ``|z|``. At ``|z| = 1e7``
+    that left a relative error of 4e-4; past about ``1e8`` the numerator came
+    out zero or negative and ``math.log`` raised a bare ``ValueError``. The
+    product of the two conjugates is exact,
+    ``(R + z - rho)(R - z + rho) = 1 - rho^2`` with ``R`` the root, so the
+    same logarithm is ``-ln[(R - z + rho) / (1 + rho)]``, a sum of two
+    positive numbers, and ``R = hypot(z - rho, sqrt(1 - rho^2))`` cannot
+    overflow. That branch is taken only where the naive sum has lost more
+    than two significant digits, so everywhere else the arithmetic is the
+    one QuantLib's ``sabrVolatility`` uses and agrees with it to 3.7e-14.
     """
     if abs(z) < Z_SERIES_THRESHOLD:
         return 1.0 - 0.5 * rho * z
-    numerator = math.sqrt(1.0 - 2.0 * rho * z + z * z) + z - rho
-    return z / math.log(numerator / (1.0 - rho))
+    root = math.sqrt(1.0 - 2.0 * rho * z + z * z)
+    numerator = root + z - rho
+    if z - rho >= 0.0 or numerator > 0.01 * root:
+        return z / math.log(numerator / (1.0 - rho))
+    stable_root = math.hypot(z - rho, math.sqrt((1.0 - rho) * (1.0 + rho)))
+    return -z / math.log((stable_root + (rho - z)) / (1.0 + rho))
 
 
 def _checked(value: float, flavour: str, strike: float, expiry: float) -> float:
@@ -164,6 +204,13 @@ def _checked(value: float, flavour: str, strike: float, expiry: float) -> float:
     push the failure downstream into a pricer, where it reads as a bad input
     rather than as a model boundary.
     """
+    if not math.isfinite(value):
+        raise ExpansionBreakdownError(
+            f"Hagan's {flavour} expansion returns {value!r} at strike {strike!r} and "
+            f"expiry {expiry!r} years: the arithmetic overflowed, which happens when "
+            "nu / alpha is astronomically large. No volatility comes out of that; "
+            "check alpha, which is the level of volatility and not a small tolerance."
+        )
     if value <= 0.0:
         raise ExpansionBreakdownError(
             f"Hagan's {flavour} expansion returns {value:.6e} at strike {strike!r} and "
@@ -177,25 +224,59 @@ def _checked(value: float, flavour: str, strike: float, expiry: float) -> float:
 
 
 def lognormal_vol(
-    parameters: SABRParameters, forward: float, strike: float, expiry: float
+    parameters: SABRParameters,
+    forward: float,
+    strike: float,
+    expiry: float,
+    *,
+    shifted_black: bool = False,
 ) -> float:
     """Black implied volatility from Hagan (2.17a), with (2.18) at the money.
+
+    **With a shift it is a shifted-Black volatility, not a Black one.** The
+    expansion runs on ``F + s`` and ``K + s``, so what comes back is the
+    ``sigma`` of ``Black(F + s, K + s, sigma)`` -- the number QuantLib's
+    ``shiftedSabrVolatility`` returns, and it agrees with that to 3.7e-14.
+    Priced in plain ``Black(F, K, sigma)`` it is a different option: 0.001611
+    against the model's 0.002588 at F = 3%, K = 3.5%, two years, a 1% shift.
+    Nothing downstream carries a shift -- :class:`~rates_engine.volatility.
+    units.Volatility`, :func:`rates_engine.models.black.price` and
+    :func:`~rates_engine.pricing.options.swaption_pv` are all unshifted -- so
+    a shifted smile is refused here unless ``shifted_black=True`` says the
+    caller will price in ``Black(F + s, K + s)`` itself. :func:`normal_vol`
+    needs no such flag: a Bachelier price does not move when forward and
+    strike move together, so its volatility means the same with or without
+    a shift, and it is the one to hand to the pricers.
 
     Args:
         parameters: The calibrated smile.
         forward: Forward rate as a decimal, before the shift.
         strike: Strike as a decimal, before the shift.
         expiry: Time to expiry in years, non-negative.
+        shifted_black: Acknowledge that, with a non-zero shift, the answer is
+            a shifted-Black volatility for ``Black(F + shift, K + shift)``.
+            Ignored when the shift is zero.
 
     Returns:
-        The relative volatility as a decimal a year.
+        The relative volatility as a decimal a year: Black's when the shift
+        is zero, shifted Black's otherwise.
 
     Raises:
+        VolUnitsError: The smile is shifted and ``shifted_black`` is not set.
         ShiftRequiredError: The shifted forward or strike is not positive.
-        ValueError: ``expiry`` is negative.
+        ValueError: ``expiry`` is negative, or the forward, strike or expiry
+            is not a finite number.
     """
-    if expiry < 0.0:
-        raise ValueError(f"expiry must be non-negative, got {expiry!r}")
+    if parameters.shift != 0.0 and not shifted_black:
+        raise VolUnitsError(
+            f"with a shift of {parameters.shift!r} Hagan's lognormal expansion returns a "
+            "shifted-Black volatility, valid in Black(F + shift, K + shift) and nowhere "
+            "else. Volatility, black.price and swaption_pv carry no shift, so the number "
+            "would price a different option. Use normal_vol, which a shift does not "
+            "change, or pass shifted_black=True and price the shifted rates yourself."
+        )
+    if not expiry >= 0.0 or math.isinf(expiry):
+        raise ValueError(f"expiry must be a finite non-negative number, got {expiry!r}")
     f, k = _shifted(parameters, forward, strike)
     alpha, beta, rho, nu = parameters.alpha, parameters.beta, parameters.rho, parameters.nu
     one_minus_beta = 1.0 - beta
@@ -231,7 +312,10 @@ def normal_vol(
     This is the one the swaption market quotes, so it is the one the cube
     stores. It is a separate expansion, not the lognormal one multiplied by
     the forward: that shortcut is the at-the-money leading term and it is
-    wrong in the wings.
+    wrong in the wings. A shift leaves its meaning alone: Bachelier prices
+    the same option when forward and strike move together, so the number
+    goes straight to :func:`rates_engine.models.bachelier.price` on the
+    unshifted rates, shifted smile or not.
 
     Args:
         parameters: The calibrated smile.
@@ -244,10 +328,11 @@ def normal_vol(
 
     Raises:
         ShiftRequiredError: The shifted forward or strike is not positive.
-        ValueError: ``expiry`` is negative.
+        ValueError: ``expiry`` is negative, or the forward, strike or expiry
+            is not a finite number.
     """
-    if expiry < 0.0:
-        raise ValueError(f"expiry must be non-negative, got {expiry!r}")
+    if not expiry >= 0.0 or math.isinf(expiry):
+        raise ValueError(f"expiry must be a finite non-negative number, got {expiry!r}")
     f, k = _shifted(parameters, forward, strike)
     alpha, beta, rho, nu = parameters.alpha, parameters.beta, parameters.rho, parameters.nu
     one_minus_beta = 1.0 - beta
@@ -479,7 +564,14 @@ def expansion_is_valid(
 
     Returns:
         ``False`` when the expansion has left its validity region or the
-        shifted forward or strike is not positive, ``True`` otherwise.
+        shifted forward or strike is not positive, ``True`` otherwise. A far
+        wing or a tiny alpha is answered, not raised: ``x(z)`` is computed
+        without the cancellation that used to end in ``math domain error``.
+
+    Raises:
+        ValueError: The forward, strike or expiry is not a finite number, or
+            the expiry is negative -- a malformed question, not a point
+            outside the region.
     """
     try:
         normal_vol(parameters, forward, strike, expiry)

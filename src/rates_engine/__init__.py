@@ -89,6 +89,7 @@ from rates_engine.core.money import Currency, require_same_currency
 from rates_engine.core.results import SCHEMA_VERSION, EngineResult
 from rates_engine.curves.bootstrap import (
     BootstrapResult,
+    FuturesContract,
     FuturesNode,
     ParSwapNode,
     RealizedStubNode,
@@ -120,6 +121,7 @@ from rates_engine.curves.views import (
     zero_curve,
 )
 from rates_engine.hedging.futures_strip import (
+    SR1_DV01,
     SR3_DV01,
     HedgeResult,
     ShockTableResult,
@@ -143,7 +145,7 @@ from rates_engine.hedging.program import (
     load_program,
 )
 from rates_engine.instruments.capfloor import CapFloor, Caplet
-from rates_engine.instruments.cashflow import Cashflow
+from rates_engine.instruments.cashflow import Cashflow, RealisedFixing
 from rates_engine.instruments.fra import FRA
 from rates_engine.instruments.futures import SOFRFuture1M, SOFRFuture3M
 from rates_engine.instruments.swaps import IRSwap, OISSwap
@@ -170,12 +172,16 @@ from rates_engine.pricing.linear import (
     pv,
 )
 from rates_engine.pricing.options import (
+    CapletValuation,
     OptionPriceResult,
+    PeriodStatus,
+    cap_floor_periods,
     cap_floor_pv,
     caplet_forward_rate,
     caplet_numeraire,
     caplet_pv,
     model_for,
+    option_value,
     swaption_pv,
 )
 from rates_engine.pricing.projection import float_leg, fra_fair_rate, project
@@ -214,10 +220,12 @@ __all__ = [
     "Calendar",
     "calibrate_sabr",
     "CalibrationError",
+    "cap_floor_periods",
     "cap_floor_pv",
     "CapFloor",
     "Caplet",
     "caplet_pv",
+    "CapletValuation",
     "Cashflow",
     "compare_interpolations",
     "compare_structures",
@@ -259,6 +267,7 @@ __all__ = [
     "FOMCStepFit",
     "forward_curve",
     "FRA",
+    "FuturesContract",
     "FuturesNode",
     "FuturesSettlement",
     "GreeksResult",
@@ -299,12 +308,14 @@ __all__ = [
     "NoTenorQuoteSourceError",
     "OISSwap",
     "option_greeks",
+    "option_value",
     "OptionKind",
     "OptionPriceResult",
     "par_curve",
     "par_rate",
     "ParametricComparison",
     "ParSwapNode",
+    "PeriodStatus",
     "SwapQuoteNode",
     "project",
     "float_leg",
@@ -324,6 +335,7 @@ __all__ = [
     "pv",
     "pvbp",
     "RatesEngineError",
+    "RealisedFixing",
     "realized_sofr_sigma",
     "RealizedStubNode",
     "RebalanceFrequency",
@@ -347,6 +359,7 @@ __all__ = [
     "SOFRFuture1M",
     "SOFRFuture3M",
     "solve_dual_curve",
+    "SR1_DV01",
     "SR3_DV01",
     "StrikeConvention",
     "strip_hedge",
