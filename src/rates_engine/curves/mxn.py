@@ -347,6 +347,11 @@ class BenchmarkComparison(EngineResult):
     max_difference_bp: float
     sample_dates: tuple[date, ...]
 
+    @property
+    def unresolved_conventions(self) -> tuple[str, ...]:
+        """What either curve rests on; see :func:`_either_rests_on`."""
+        return _either_rests_on(self.first, self.second)
+
     def payload_fields(self) -> dict[str, Any]:
         """Both benchmarks named, and the difference they imply."""
         return {
@@ -355,8 +360,19 @@ class BenchmarkComparison(EngineResult):
             "zero_difference_bp": list(self.zero_difference_bp),
             "max_difference_bp": self.max_difference_bp,
             "sample_dates": [d.isoformat() for d in self.sample_dates],
-            "unresolved_conventions": list(self.first.unresolved_conventions),
+            "unresolved_conventions": list(self.unresolved_conventions),
         }
+
+
+def _either_rests_on(first: MXNCurveResult, second: MXNCurveResult) -> tuple[str, ...]:
+    """The unresolved conventions either curve rests on, in ``UNRESOLVED_MXN`` order.
+
+    The union, so a comparison does not depend on which curve is passed
+    first: copied from ``first``, it left out ``tiie_28_fixing_lag`` with the
+    Fondeo curve first, while the warnings, which cover both, carried it.
+    """
+    either = {*first.unresolved_conventions, *second.unresolved_conventions}
+    return tuple(name for name, _ in UNRESOLVED_MXN if name in either)
 
 
 def compare_benchmarks(first: MXNCurveResult, second: MXNCurveResult) -> BenchmarkComparison:
@@ -401,7 +417,7 @@ def compare_benchmarks(first: MXNCurveResult, second: MXNCurveResult) -> Benchma
             "second_benchmark": second.benchmark.value,
             "max_difference_bp": worst,
             "sampled_nodes": len(shared),
-            "unresolved_conventions": list(first.unresolved_conventions),
+            "unresolved_conventions": list(_either_rests_on(first, second)),
             "note": (
                 "TIIE 28 and TIIE de Fondeo are different rates. This is the gap "
                 "between curves built on each, reported so that using one where the "

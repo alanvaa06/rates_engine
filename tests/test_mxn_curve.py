@@ -249,6 +249,24 @@ class TestComparingTheTwoBenchmarks:
         with pytest.raises(ValueError, match="market move"):
             compare_benchmarks(_curve(), later)
 
+    def test_the_conventions_are_both_curves_whatever_the_order(self):
+        # #21 round 3: copied from `first`, the field left out
+        # tiie_28_fixing_lag with the Fondeo curve first, while the
+        # warnings, from both, carried it.
+        from rates_engine.conventions.indices import UNRESOLVED_MXN
+
+        fondeo = _curve(0.0950, TIIEBenchmark.TIIE_FONDEO)
+        twenty_eight = _curve(0.0985, TIIEBenchmark.TIIE_28)
+        assert "tiie_28_fixing_lag" not in fondeo.unresolved_conventions
+        every = [name for name, _ in UNRESOLVED_MXN]
+        for first, second in ((fondeo, twenty_eight), (twenty_eight, fondeo)):
+            result = compare_benchmarks(first, second)
+            assert result.evidence.fields["unresolved_conventions"] == every
+            assert result.payload_fields()["unresolved_conventions"] == every
+            warned = {w.code.removeprefix("unresolved_convention:")
+                      for w in result.evidence.warnings}
+            assert set(every) == warned
+
     def test_both_curves_evidence_chains_in(self, comparison):
         assert len(comparison.evidence.sources) == 2
 
