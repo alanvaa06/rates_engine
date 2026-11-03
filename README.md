@@ -315,11 +315,15 @@ point to the author's private knowledge base and do not resolve here.
 2. **v0.2** (PRD-002): Black and Bachelier swaptions, caps and
    floors, a SABR vol cube, Nelson-Siegel and FOMC-step curves,
    monotone-convex interpolation, an MCP server.
-3. **v0.3** (PRD-003, this release): a second currency carried in the type,
+3. **v0.3** (PRD-003): a second currency carried in the type,
    the BMV calendar, a TIIE curve that marks every convention it could not
    verify, USD/MXN forwards with the cross-currency basis kept separate,
    Garman-Kohlhagen with vanna-volga and four explicit delta conventions, a
    CFA Level III hedge-structure comparator, and the hedging policy as data.
+4. **v0.4** (this release): the package in layers, instruments that carry
+   their rate index, curves calibrated to real swaps, and the corrections of
+   the 2026-10-15 review: trades that have started valued on their fixings,
+   and a refusal wherever a wrong number used to come back with exit code 0.
 
 Planned for v1.1: `FixedRateBond`, which brings Macaulay and modified
 duration with it, and a real quote source for the dual-curve solver.

@@ -258,7 +258,7 @@ by `bootstrap_discount_curve` (naming every instrument),
 `solve_dual_curve`, `fit_fomc_step_curve` (prices and fixings) and
 `fit_nelson_siegel` (times and rates).
 
-One more condition is not a band at all. `solve_zero_cost_strike` raises
+One more condition is not a band at all. `zero_cost_collar_strike` raises
 it when the protection asked for costs more than the entire opposite wing
 is worth, so no strike funds it and no zero-cost collar exists at that
 protective level. The refusal names the strike to widen. It is here rather

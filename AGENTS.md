@@ -168,7 +168,7 @@ the next interval. On a futures strip the node factors are identical under
 both; on swaps paid with a lag they are not (up to 0.58 bp of zero rate on
 a 12-swap SOFR strip). They differ most in the instantaneous forward
 between nodes, which no instrument constrains.
-`curves.compare_interpolations` measures the gap rather than declaring a
+`rates_engine.compare_interpolations` measures the gap rather than declaring a
 winner. A monotone convex curve with a forward near zero has a node at
 zero between intervals of opposite sign, so a DV01 whose down-bump crosses
 zero differs from a small-bump DV01 by about 1e-5 relative.
