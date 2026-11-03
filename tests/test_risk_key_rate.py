@@ -178,11 +178,14 @@ class TestNormalisedRefusal:
 
         rich = replace(par_swap, fixed_rate=par_swap.fixed_rate + 0.01)
         profile = key_rate_duration(rich, curve_set, TENORS)
-        assert profile.unit == "per_bp"
+        assert profile.unit == "years"
         assert profile.measure == "key_rate_duration"
         assert profile.total != 0.0
 
-    def test_it_is_the_dv01_profile_over_the_price(self, par_swap, curve_set):
+    def test_it_is_the_dv01_profile_over_price_times_a_basis_point(self, par_swap, curve_set):
+        """PRD-001 AC-10.5 defines it as ``KR DV01 / (PV x 1bp)``, a number of
+        years. It used to divide by PV alone, which left it in "per bp" and
+        exactly 1e4 smaller than the effective duration it decomposes."""
         from dataclasses import replace
 
         from rates_engine.pricing.linear import pv
@@ -192,7 +195,22 @@ class TestNormalisedRefusal:
         raw = key_rate_dv01(rich, curve_set, TENORS)
         scaled = key_rate_duration(rich, curve_set, TENORS)
         for tenor in TENORS:
-            assert scaled.values[tenor] == pytest.approx(raw.values[tenor] / price, rel=1e-12)
+            assert scaled.values[tenor] == pytest.approx(
+                raw.values[tenor] / (price * 1e-4), rel=1e-12
+            )
+
+    def test_it_sums_to_the_effective_duration(self, par_swap, curve_set):
+        """``KeyRateResult.total`` promises the parallel measure; for the
+        normalised profile that is ``effective_duration``, in the same unit."""
+        from dataclasses import replace
+
+        from rates_engine.risk.sensitivities import effective_duration
+
+        rich = replace(par_swap, fixed_rate=par_swap.fixed_rate + 0.01)
+        profile = key_rate_duration(rich, curve_set, TENORS)
+        parallel = effective_duration(rich, curve_set)
+        assert profile.unit == parallel.unit == "years"
+        assert profile.total == pytest.approx(parallel.value, rel=SUM_RELATIVE_TOLERANCE)
 
 
 class TestTwoBases:
@@ -228,8 +246,9 @@ class TestTwoBases:
 
     def test_the_two_agree_to_within_the_basis_factor(self, par_swap, strip, as_of):
         # A basis point on an ACT/360 simple forward against one on a
-        # continuously compounded zero rate: roughly 365/360, less the part of
-        # the swap covered by the realised stub, which is not a quote.
+        # continuously compounded zero rate: about (365/360)/(1 + F tau),
+        # 1.00365 on this strip, less the part of the swap covered by the
+        # realised stub, which is not a quote.
         hedge = strip_hedge(par_swap, strip, as_of=as_of)
         ratio = hedge.quote_parallel_dv01 / hedge.swap_dv01
         assert 1.0 < ratio < 365.0 / 360.0

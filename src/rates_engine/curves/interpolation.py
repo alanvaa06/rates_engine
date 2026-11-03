@@ -9,17 +9,35 @@ positive.
 
 Monotone convex fixes the discrete forwards — the average forward over each
 node interval, which is what the market quotes — and builds a continuous
-instantaneous forward that **integrates back to them exactly**. That last
-property is the reason it can be swapped for log-linear without disturbing a
-calibration: every input instrument still reprices, because the quantity each
-instrument pins is preserved by construction, not by the fit.
+instantaneous forward that **integrates back to them exactly**. So a node's
+discount factor is the same under either interpolation, and an instrument
+that reads discount factors only on nodes — a futures period, the realised
+stub — reprices under both by construction.
+
+An instrument that reads a discount factor *inside* an interval is another
+matter: a SOFR OIS paid two business days after each period, a fixed leg
+with intermediate coupons. That factor depends on the instantaneous forward
+across the interval, and the forward at node ``i`` (step 1 below) blends the
+discrete forwards on *both* sides of it, so it moves when the next node
+does. The method is not local. Such instruments still reprice -- a
+calibration can be swapped from log-linear to monotone convex without losing
+its fit -- but only because
+:func:`~rates_engine.curves.bootstrap.bootstrap_discount_curve` sweeps the
+curve until every one of them does, not because the interpolation preserves
+what they pin.
 
 The algorithm in three steps:
 
 1. Estimate an instantaneous forward at each node by interpolating the
    discrete forwards either side of it, with one-sided rules at the ends.
-2. Collar those estimates into ``[0, 2 min(f_i, f_{i+1})]``. This is what
-   makes positive inputs give positive outputs, which is PRD-002 AC-5.2.
+2. Collar those estimates into ``[min(0, 2 f), max(0, 2 f)]`` for each
+   neighbouring interval's discrete forward ``f`` -- Hagan and West's
+   ``[0, 2 min(f_i, f_{i+1})]`` when both are positive. This is what makes
+   positive inputs give positive outputs, which is PRD-002 AC-5.2, and the
+   mirror bound does the same for negative ones. The paper writes only the
+   positive case; clamping a negative interval into its empty range bent a
+   flat negative curve, and dropping the negative neighbour instead made the
+   collar jump as a forward crossed zero.
 3. On each interval fit a quadratic in ``g = f - f_discrete`` chosen from four
    regions, each of which is the one shape that stays monotone there.
 
@@ -75,14 +93,26 @@ def node_forwards(
     inside ``[0, 2 min(f_i, f_{i+1})]`` cannot drive the quadratic on either
     neighbouring interval below zero.
 
+    The bound is sign-aware: ``[min(0, 2 f), max(0, 2 f)]`` for every
+    neighbouring discrete forward ``f``. Hagan and West write the collar for
+    positive inputs; applied to a negative one, ``[0, 2 min]`` is empty and
+    clamping into it returned ``2 min f``, which bent a curve flat at -50 bp
+    into forwards between -88 and -26 bp. The mirror bound keeps a flat
+    negative curve flat, a node between a positive and a negative interval
+    sits at zero, and every bound moves continuously with the forwards, so a
+    bump through zero moves the curve continuously too. When every discrete
+    forward is non-negative the bound is the paper's, and the result is what
+    it always was.
+
     Args:
         times: Node times in years.
-        discrete: Average forward per interval, from :func:`discrete_forwards`.
+        discrete: Average forward per interval, as a decimal rate, from
+            :func:`discrete_forwards`.
         collar: Apply the positivity collar. Turning it off is for showing,
             in a test, that it is what does the work.
 
     Returns:
-        ``len(times) + 1`` forwards, the first at time zero.
+        ``len(times) + 1`` forwards as decimal rates, the first at time zero.
     """
     grid = (0.0, *times)
     count = len(discrete)
@@ -100,14 +130,33 @@ def node_forwards(
     forwards = [first, *interior, last]
 
     if collar:
-        forwards[0] = min(max(0.0, forwards[0]), 2.0 * discrete[0])
+        forwards[0] = _collared(forwards[0], (discrete[0],))
         for index in range(1, count):
-            forwards[index] = min(
-                max(0.0, forwards[index]),
-                2.0 * min(discrete[index - 1], discrete[index]),
-            )
-        forwards[count] = min(max(0.0, forwards[count]), 2.0 * discrete[-1])
+            forwards[index] = _collared(forwards[index], (discrete[index - 1], discrete[index]))
+        forwards[count] = _collared(forwards[count], (discrete[-1],))
     return tuple(forwards)
+
+
+def _collared(forward: float, neighbours: tuple[float, ...]) -> float:
+    """One node forward held inside ``[min(0, 2 f), max(0, 2 f)]`` for each neighbour ``f``.
+
+    With every neighbour non-negative the bounds are ``0`` and ``2 min f``,
+    and ``min(max(0, x), 2 min f)`` is the expression the collar always
+    evaluated, so those curves are unchanged to the bit. With every
+    neighbour negative they are the mirror image, ``2 max f`` and ``0``.
+    With one of each the range closes on zero, and the forward crosses zero
+    at the node.
+
+    Every bound is a continuous function of the neighbouring forwards, so
+    the collar is too. The previous version dropped a negative neighbour
+    from the bound instead, and that was not: a forward moving from +1e-12
+    to -1e-12 moved the node forward next to it from 2e-12 to 1.5%, and a
+    risk bump that pushed a half-basis-point forward through zero made DV01
+    depend on the bump size.
+    """
+    lower = max(min(0.0, 2.0 * f) for f in neighbours)
+    upper = min(max(0.0, 2.0 * f) for f in neighbours)
+    return min(max(lower, forward), upper)
 
 
 def _region(g0: float, g1: float) -> int:
@@ -293,7 +342,9 @@ class MonotoneConvex:
         """The instantaneous forward at a time, for inspecting smoothness.
 
         Args:
-            time: Time in years, non-negative.
+            time: Time in years. Before zero the forward is held at its value
+                at zero, the counterpart of :meth:`log_df` returning zero
+                there and of log-linear holding its first interval's forward.
 
         Returns:
             The instantaneous forward rate as a decimal.
@@ -301,11 +352,15 @@ class MonotoneConvex:
         discrete, node = self.discrete, self.nodes
         if time >= self.times[-1]:
             return node[-1]
+        # A negative time used to fall through the interval search -- it
+        # finds no interval ending after it -- into a branch marked
+        # unreachable that returned the *long-end* forward: 7.79% ten days
+        # before the valuation date on a curve reading 1.80% at it. Clamping
+        # to zero reads the first interval, at its left end.
+        time = max(time, 0.0)
         grid = self._grid
         index = bisect_right(grid, time)
-        if index > 0:
-            left, right = grid[index - 1], grid[index]
-            f_d = discrete[index - 1]
-            g0, g1 = node[index - 1] - f_d, node[index] - f_d
-            return f_d + _g_value(g0, g1, (time - left) / (right - left))
-        return node[-1]  # pragma: no cover - covered by the tail branch above
+        left, right = grid[index - 1], grid[index]
+        f_d = discrete[index - 1]
+        g0, g1 = node[index - 1] - f_d, node[index] - f_d
+        return f_d + _g_value(g0, g1, (time - left) / (right - left))

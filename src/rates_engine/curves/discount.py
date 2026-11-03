@@ -44,8 +44,12 @@ INTERPOLATIONS = ("log_linear_df", "monotone_convex")
     interpolation error inside the period.
 ``monotone_convex``
     Hagan and West (2006). Continuous forwards that still integrate back to
-    the discrete ones exactly, so every calibration instrument reprices
-    either way and the two can be compared on the same fit.
+    the discrete ones exactly. Every calibration instrument reprices either
+    way, so the two can be compared on the same quotes -- but under this one
+    only because the bootstrap sweeps the curve to a fixed point: the
+    forward at a node depends on the interval after it, so an instrument
+    reading a factor inside an interval (a payment lag, an intermediate
+    coupon) is disturbed by every later node until the sweeps settle.
 """
 
 
@@ -387,6 +391,40 @@ class DiscountCurve:
         return extended._seeded(
             self.node_times + (self.time(node),),
             self._log_dfs + (math.log(df),),
+        )
+
+    def with_factor(self, node: date, df: float) -> DiscountCurve:
+        """A copy with the factor at an existing node replaced, every other node kept.
+
+        :meth:`with_node` only appends or replaces the last node, which is all
+        a one-pass bootstrap needs. The sweeps that settle a monotone convex
+        bootstrap re-solve interior nodes with the later ones in place, and
+        this is the operation they repeat.
+
+        Args:
+            node: One of :attr:`nodes`.
+            df: The new discount factor there, dimensionless.
+
+        Returns:
+            The curve with that one factor changed.
+
+        Raises:
+            ValueError: ``node`` is not a node of this curve.
+        """
+        if node not in self.nodes:
+            raise ValueError(f"{node} is not a node of this curve; with_factor only replaces")
+        index = self.nodes.index(node)
+        replaced = DiscountCurve(
+            self.as_of,
+            self.nodes,
+            self.dfs[:index] + (df,) + self.dfs[index + 1 :],
+            self.interpolation,
+            currency=self.currency,
+            provenance=self.provenance,
+        )
+        logs = self._log_dfs
+        return replaced._seeded(
+            self.node_times, logs[:index] + (math.log(df),) + logs[index + 1 :]
         )
 
     def _seeded(
