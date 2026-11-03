@@ -751,8 +751,16 @@ def fit_fomc_step_curve(
     fixing dated ``as_of`` itself is read when the snapshot has it and
     forecast by the path when it does not, QuantLib's default. Not yet
     published is the ordinary state of that fixing during the day, so the
-    forecast lowers no quality: ``forecast_days_on_as_of`` in the evidence
-    counts, per contract, the calendar days that rest on it.
+    forecast lowers no quality: ``fixings_dated_as_of`` in the evidence
+    counts, per contract, the calendar days that rest on it, as
+    ``{label: days}`` -- 0 for a contract with no day on that fixing, or
+    one that read it from the snapshot, whose days are then in
+    ``realised_days``. The name is the one swap and option pricing use for
+    the same event (PR #12); the shape is not theirs. There it is a list
+    with one record per period that fixes on ``as_of``, saying whether the
+    fixing came from the snapshot or the curve; a futures contract does
+    not fix a period on that day but spreads its rate over the calendar
+    days it covers, so the count of those days is what it has to say.
 
     **Every segment must be pinned, and pinned on its own.** A meeting on or
     before ``as_of`` is refused: the rate it set is in the fixings, and the
@@ -946,7 +954,7 @@ def fit_fomc_step_curve(
             },
             "calendar": calendar.name,
             "realised_days": {p.label: p.realised_days for p in priced},
-            "forecast_days_on_as_of": {p.label: p.forecast_days for p in priced},
+            "fixings_dated_as_of": {p.label: p.forecast_days for p in priced},
             "leading_segment_fixing": (
                 {"date": leading.isoformat(), "rate": head[0]}
                 if head and leading is not None

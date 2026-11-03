@@ -661,8 +661,8 @@ class TestFOMCStepFitInProgress:
             fixings=self._snapshot(self._days()),
         )
         assert {w.code for w in fit.evidence.warnings} == {"term_rate_without_convexity"}
-        assert fit.evidence.fields["forecast_days_on_as_of"]["SR1-Oct26"] == 1
-        assert fit.evidence.fields["forecast_days_on_as_of"]["SR3-Sep26"] == 1
+        assert fit.evidence.fields["fixings_dated_as_of"]["SR1-Oct26"] == 1
+        assert fit.evidence.fields["fixings_dated_as_of"]["SR3-Sep26"] == 1
         assert fit.curve.segment_rates == pytest.approx(self.PATH, abs=1e-10)
 
     def test_the_as_of_fixing_is_read_when_present(self):
@@ -1279,7 +1279,7 @@ class TestFOMCStepFitAsksForSofrOnlyWhenADayNeedsIt:
 
     def test_without_a_snapshot_that_fixing_is_forecast_without_a_degradation(self):
         fit = fit_fomc_step_curve(date(2026, 1, 30), self.MEETING, self._strip())
-        assert fit.evidence.fields["forecast_days_on_as_of"] == {"SR1-Feb26": 1, "SR1-Mar26": 0}
+        assert fit.evidence.fields["fixings_dated_as_of"] == {"SR1-Feb26": 1, "SR1-Mar26": 0}
         assert {w.code for w in fit.evidence.warnings} == {"term_rate_without_convexity"}
         assert fit.curve.segment_rates == pytest.approx((0.0365, 0.0340), abs=1e-10)
 
