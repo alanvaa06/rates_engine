@@ -53,6 +53,21 @@ jobs:
             echo "::error::tag ${GITHUB_REF_NAME} does not match pyproject.toml (${project}) and rates_engine.__version__ (${package})"
             exit 1
           fi
+      # The changelog's section is dated when the tag is cut, not when the
+      # version is bumped (docs/RELEASING.md), so between the two it is still
+      # [Unreleased] and nothing else notices. The sdist carries CHANGELOG.md,
+      # and a file on PyPI cannot be replaced: a tag cut before the section is
+      # dated ships a release whose own changelog says it was never released.
+      - name: CHANGELOG.md has a dated section for the version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          heading="## [${tag}] - YYYY-MM-DD"
+          pattern="^## \[$(printf '%s' "$tag" | sed 's/[.]/\\./g')\] - [0-9]{4}-[0-9]{2}-[0-9]{2}[[:space:]]*$"
+          if ! grep -Eq "$pattern" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no heading '${heading}' for tag ${GITHUB_REF_NAME}; date the [Unreleased] section and tag the commit that does"
+            exit 1
+          fi
+          grep -E "$pattern" CHANGELOG.md
       # CI ran on the commit's branch, not necessarily on this commit, and a
       # tag can be pushed on a commit whose CI is red. So the suite runs once
       # more, against the wheel that is about to be uploaded and from the
