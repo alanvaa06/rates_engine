@@ -665,10 +665,11 @@ class TestIncompleteStrip:
             strip_hedge(par_swap, short, as_of=as_of)
 
     def test_a_strip_that_starts_late_refuses(self, par_swap, strip, as_of):
-        # The realised stub covers as_of to 2026-03-18 (#21), so without
-        # SR3-1 the hole is the quarter between the stub and SR3-2.
+        # The swap starts on 2026-03-18, after as_of, so the realised stub
+        # covers none of it (#21's round 3): without SR3-1 the strip starts a
+        # quarter late, with or without the stub.
         late = tuple(i for i in strip if not isinstance(i, FuturesNode) or i.label != "SR3-1")
-        with pytest.raises(IncompleteStripError, match="covering 2026-03-18 to 2026-06-17"):
+        with pytest.raises(IncompleteStripError, match="starts at 2026-06-17"):
             strip_hedge(par_swap, late, as_of=as_of)
         no_stub = tuple(i for i in late if isinstance(i, FuturesNode))
         with pytest.raises(IncompleteStripError, match="starts at 2026-06-17"):

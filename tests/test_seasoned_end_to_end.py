@@ -635,7 +635,11 @@ class TestTheSeasonedHedgeAgainstQuantLib:
         else:
             effective, snapshot = AS_OF, _fixings(_published("SOFR", {AS_OF: 0.0430}))
         swap = OISSwap(effective=effective, maturity=end, fixed_rate=0.04, notional=NOTIONAL)
-        return swap, snapshot, strip_hedge(swap, nodes, as_of=AS_OF, fixings=snapshot)
+        # T starts on as_of, so the realised stub does not cover its first
+        # two months and the default refuses it; the comparison is of the
+        # numbers, which the coverage check does not change.
+        return swap, snapshot, strip_hedge(swap, nodes, as_of=AS_OF, fixings=snapshot,
+                                           require_full_coverage=name == "S")
 
     @pytest.mark.parametrize("name", ["S", "T"])
     def test_the_hedge_is_sized_on_quantlib_s_deltas(self, name):
@@ -791,6 +795,58 @@ class TestTheStripHedgeTakesTheFixings:
         with pytest.raises(IncompleteStripError, match=f"covering {start - timedelta(days=7)}"):
             strip_hedge(swap, (short, *nodes[1:]), as_of=AS_OF,
                         fixings=_fixings(_sofr_history()))
+
+    def test_the_seasoned_hedge_is_sized_under_the_default(self):
+        # Round 2's repro, pinned: 879.36 contracts on the flat 4% strip.
+        from rates_engine.hedging.futures_strip import strip_hedge
+        from rates_engine.instruments.swaps import OISSwap
+
+        nodes, start, end = self._strip()
+        swap = OISSwap(effective=date(2025, 9, 17), maturity=end, fixed_rate=0.04,
+                       notional=NOTIONAL)
+        hedge = strip_hedge(swap, nodes, as_of=AS_OF, fixings=_fixings(_sofr_history()))
+        assert hedge.total_contracts == pytest.approx(879.36, abs=0.005)
+
+    def test_the_stub_does_not_cover_a_swap_that_has_not_started(self):
+        # Review round 3, point 1: counted for every swap, the stub let a spot
+        # swap from 2026-01-20 hedge as complete with 877.93 contracts and
+        # the DV01 of 2026-01-20 to 2026-03-18, about 7% of the total, held
+        # by nothing. No quote moves the stub, so nothing hedges that part;
+        # it is the opening gap it was before #21.
+        from rates_engine.core.errors import IncompleteStripError
+        from rates_engine.hedging.futures_strip import strip_hedge
+        from rates_engine.instruments.swaps import OISSwap
+
+        nodes, start, end = self._strip()
+        swap = OISSwap(effective=date(2026, 1, 20), maturity=end, fixed_rate=0.04,
+                       notional=NOTIONAL)
+        with pytest.raises(IncompleteStripError, match=f"starts at {start} but the swap starts "
+                                                       "at 2026-01-20"):
+            strip_hedge(swap, nodes, as_of=AS_OF)
+        hedge = strip_hedge(swap, nodes, as_of=AS_OF, require_full_coverage=False)
+        assert hedge.evidence.fields["coverage_realised_stub"] is None
+
+    @pytest.mark.parametrize(
+        "effective", [date(2026, 1, 20), date(2025, 9, 17)], ids=["forward", "seasoned"]
+    )
+    def test_a_swap_no_contract_overlaps_is_refused(self, effective):
+        # A swap ending on 2026-03-02, inside the stub, overlaps no contract:
+        # the hedge is zero contracts, and it reported as complete.
+        from rates_engine.core.errors import IncompleteStripError
+        from rates_engine.hedging.futures_strip import strip_hedge
+        from rates_engine.instruments.swaps import OISSwap
+
+        nodes, start, end = self._strip()
+        swap = OISSwap(effective=effective, maturity=date(2026, 3, 2), fixed_rate=0.04,
+                       notional=NOTIONAL)
+        with pytest.raises(IncompleteStripError) as caught:
+            strip_hedge(swap, nodes, as_of=AS_OF, fixings=_fixings(_sofr_history()))
+        message = str(caught.value)
+        assert "no contract in the strip overlaps" in message
+        assert "require_full_coverage=False" in message
+        waived = strip_hedge(swap, nodes, as_of=AS_OF, require_full_coverage=False,
+                             fixings=_fixings(_sofr_history()))
+        assert waived.total_contracts == pytest.approx(0.0, abs=1e-9)
 
 
 # ---------------------------------------------------------------------------

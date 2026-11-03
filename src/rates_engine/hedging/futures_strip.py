@@ -275,12 +275,16 @@ def strip_hedge(
         long_end_source: Passed through to the bootstrap.
         require_full_coverage: When true, a gap between the swap's span and the
             strip's coverage raises rather than producing a partial hedge that
-            reports as complete. A
+            reports as complete. For a swap that has started, a
             :class:`~rates_engine.curves.bootstrap.RealizedStubNode` among
             ``instruments`` covers ``as_of`` to its end: the curve there is
-            the stub's growth, which no quote moves, so a swap that has
-            started is covered from ``as_of`` by the stub and the contracts
-            after it.
+            the stub's growth, which no quote moves, and the contract that
+            would hold it has started and is refused, so the swap is covered
+            from ``as_of`` by the stub and the contracts after it. A swap
+            starting on or after ``as_of`` is not covered by the stub: its
+            days before the first contract are a gap, as they always were.
+            A swap that no contract overlaps is refused too, rather than
+            hedged with no contracts and reported as complete.
         swap_start: Start of the span that must be covered. Defaults to the
             start of the swap's ``span``, its first accrual date as the
             schedule adjusts it, or ``as_of`` for a swap that has started:
@@ -295,7 +299,8 @@ def strip_hedge(
 
     Raises:
         IncompleteStripError: The strip has no contract covering part of the
-            swap's span, and ``require_full_coverage`` is set. A missing
+            swap's span, or none overlapping it at all, and
+            ``require_full_coverage`` is set. A missing
             contract is never interpolated from its neighbours. A gap at
             either end made only of days the swap's calendar closes is not
             refused: it is the swap's date rolled off a holiday, as when
@@ -320,15 +325,23 @@ def strip_hedge(
     default_start, default_end = swap.span
     start = swap_start or max(default_start, as_of)
     end = swap_end or default_end
-    # The realised stub covers as_of to its end. Without it a swap that has
-    # started could only be hedged under the default when as_of happened to
-    # be a futures start date: started contracts are refused, and the stub is
-    # what replaces the one running.
-    stubs = [
-        (as_of, node.end)
-        for node in instruments
-        if isinstance(node, RealizedStubNode) and node.end > as_of
-    ]
+    # The realised stub covers as_of to its end for a swap that has started.
+    # Without it such a swap could only be hedged under the default when
+    # as_of happened to be a futures start date: started contracts are
+    # refused, and the stub is what replaces the one running. A swap that
+    # has not started gets nothing from it: counted for every swap, it let a
+    # spot swap from 2026-01-20 hedge as complete against a stub to
+    # 2026-03-18, the DV01 of those two months, about 7% of the total, held
+    # by nothing, since no quote moves the stub.
+    stubs = (
+        [
+            (as_of, node.end)
+            for node in instruments
+            if isinstance(node, RealizedStubNode) and node.end > as_of
+        ]
+        if default_start < as_of
+        else []
+    )
     tolerated_gaps = (
         _check_coverage(futures, start, end, _roll_calendar(swap), realised=stubs)
         if require_full_coverage
@@ -791,8 +804,11 @@ def _check_coverage(
 
     ``realised`` periods count as covered: the realised stub's, from
     ``as_of`` to its end, where the curve is the stub's growth and no quote
-    moves it. Leaving it out refused every swap that had started unless
-    ``as_of`` fell on a futures start date.
+    moves it, passed only for a swap that has started. Leaving it out
+    refused every such swap unless ``as_of`` fell on a futures start date.
+    They do not count as a hedge: a span that no contract overlaps is
+    refused, because the hedge it would size is no contracts at all, and a
+    seasoned swap ending inside the stub reported that as complete.
 
     A gap at either end made only of days ``calendar`` closes is not a hole
     but the swap's own date rolled off a holiday or a weekend. The June 2030
@@ -817,8 +833,18 @@ def _check_coverage(
 
     Raises:
         IncompleteStripError: Some business day of the span is in no
-            contract's period, and the message says what to pass instead.
+            contract's period, or no contract overlaps the span, and the
+            message says what to pass instead.
     """
+    if not any(f.start < end and f.end > start for f in futures):
+        raise IncompleteStripError(
+            f"no contract in the strip overlaps the swap span {start} to {end}: the strip "
+            f"runs from {min(f.start for f in futures)} to {max(f.end for f in futures)}, so "
+            "the hedge would be no contracts at all, and a realised stub, which no quote "
+            "moves, hedges nothing. Add the contracts that cover the span, or pass "
+            "require_full_coverage=False (hedge.require_full_coverage: false on the CLI) to "
+            "size the empty hedge anyway"
+        )
     ordered = sorted([*((f.start, f.end) for f in futures), *realised])
     covered_from = ordered[0][0]
     covered_to = max(last for _, last in ordered)
