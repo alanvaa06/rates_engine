@@ -104,6 +104,7 @@ def _full_config(as_of) -> dict:
                 "values": [{"date": "2026-01-14", "rate": 0.0430}],
                 "source": "fred",
                 "data_quality": "observed",
+                "check_against_curve": True,
             }
         },
         "risk": {"key_tenors": [0.5, 1.0, 2.0]},

@@ -27,6 +27,7 @@ from rates_engine.market.snapshot import MarketSnapshot, Series
 from rates_engine.models.convexity import ConvexityModel, convexity_adjustment
 from rates_engine.pricing.calibration import SwapQuoteNode
 from rates_engine.pricing.fx_forward import require_plausible_rate
+from rates_engine.pricing.projection import is_paid
 
 __all__ = [
     "calibration_nodes",
@@ -37,6 +38,7 @@ __all__ = [
     "MAX_PLAUSIBLE_OVERNIGHT_FIXING",
     "FIXING_CURVE_FACTOR",
     "FIXING_CURVE_GAP",
+    "FIXING_CHECK_WINDOW_DAYS",
 ]
 
 MAX_PLAUSIBLE_OVERNIGHT_FIXING = 0.20
@@ -59,16 +61,23 @@ cross-check against the curve is for (:data:`FIXING_CURVE_FACTOR`).
 FIXING_CURVE_FACTOR = 4.0
 """How many times off the curve's overnight rate the latest fixing may be.
 
-The latest fixing a ``fixings`` series gives on or before ``as_of`` is
-compared with the curve's forward from ``as_of`` to the next business day:
-the one day of history and the one day of forecast that are closest. It is
-refused when it is both this many times larger or smaller and further than
+The latest fixing the swap reads, of those dated within
+:data:`FIXING_CHECK_WINDOW_DAYS` business days before ``as_of``, is compared
+with the curve's forward from ``as_of`` to the next business day: the one
+day of history and the one day of forecast that are closest. It is refused
+when it is both this many times larger or smaller and further than
 :data:`FIXING_CURVE_GAP`. A rate written in the wrong unit is a hundred
 times off (0.05 for 0.05%), and a typo ten (0.43 for 0.043). The market's
 worst day since SOFR began, the repo spike of 17 September 2019, printed
-5.25% against about 2.2%, 2.4 times; the emergency cut of Sunday 15 March
-2020 left Friday's print some six times above Monday's curve, and a curve
-valued that Monday, against Friday's fixing, is refused with it.
+5.25% against about 2.2%, 2.4 times. A genuine regime change can be more:
+the emergency cut of Sunday 15 March 2020 left Friday's 1.10% 4.4 times
+above a 0.25% curve that Monday, and the check cannot tell that from a
+unit. ``fixings.<SERIES>.check_against_curve: false`` says it is not one,
+and the refusal names that key.
+
+The check is the CLI's and the MCP server's, made here where a file is
+read: a snapshot passed to ``pv`` has no curve of its own to be held
+against.
 """
 
 FIXING_CURVE_GAP = 0.005
@@ -77,6 +86,20 @@ FIXING_CURVE_GAP = 0.005
 Fifty basis points. With :data:`FIXING_CURVE_FACTOR` it keeps the check off
 the noise near zero, where 0.01% against 0.05% is five times off and
 nothing at all: a fixing is refused only when it is both.
+"""
+
+FIXING_CHECK_WINDOW_DAYS = 5
+"""How many business days before ``as_of`` a fixing may be dated and still be held to the curve.
+
+A week of the index's calendar. The curve is today's, and the further back
+a fixing is the less today's overnight rate says about it: SOFR moved four
+hundred basis points in 2022, and a year-old row far below the curve may be
+right. Older rows are not compared, and nor is a row the swap does not
+read: a forward swap reads none, and a file holding rows of 2021-06-01/02
+at 0.01% had it refused as 399 times off the curve's 3.99%. A file in the
+wrong unit is wrong on its most recent row as on any other, and a swap
+that has started reads every business day up to ``as_of``, so the week
+loses nothing the check is for.
 """
 
 _OVERNIGHT_CONVENTION = (
@@ -245,7 +268,10 @@ def ois_swap(config: dict[str, Any]) -> OISSwap:
 
 
 def fixings_snapshot(
-    config: dict[str, Any], as_of: date, curve: DiscountCurve | None = None
+    config: dict[str, Any],
+    as_of: date,
+    curve: DiscountCurve | None = None,
+    swap: OISSwap | None = None,
 ) -> MarketSnapshot | None:
     """The ``fixings`` block of a config as the snapshot the pricers read, or ``None``.
 
@@ -261,17 +287,20 @@ def fixings_snapshot(
     - a date may appear once in a series;
     - a rate must be a number within :data:`MAX_PLAUSIBLE_OVERNIGHT_FIXING`
       (20%): 4.30 for 4.30%, or 0.43 for 0.043, is a unit or a typo;
-    - with ``curve``, the latest rate on or before ``as_of`` must be within
-      :data:`FIXING_CURVE_FACTOR` or :data:`FIXING_CURVE_GAP` of the curve's
-      overnight rate, which catches what no band can, a percent file from
-      the years near zero;
+    - with ``curve`` and ``swap``, the latest rate ``swap`` reads among
+      those dated within :data:`FIXING_CHECK_WINDOW_DAYS` business days
+      before ``as_of`` must be within :data:`FIXING_CURVE_FACTOR` or
+      :data:`FIXING_CURVE_GAP` of the curve's overnight rate, which catches
+      what no band can, a percent file from the years near zero, unless the
+      series says ``check_against_curve: false``;
     - ``data_quality`` must be one of observed, synthetic, proxy, assumed.
 
     Args:
         config: The whole configuration mapping.
         as_of: Valuation date; the snapshot serves nothing dated after it.
-        curve: The curve the trade is valued on, for the cross-check; left
-            out, it is skipped.
+        curve: The curve the trade is valued on, for the cross-check.
+        swap: The trade, whose reads are the only fixings the cross-check
+            compares. Without both ``curve`` and ``swap`` it is skipped.
 
     Returns:
         The snapshot, or ``None`` when the config has no ``fixings`` block.
@@ -279,9 +308,10 @@ def fixings_snapshot(
     Raises:
         ConfigurationError: A date is not ISO 8601, is not a business day of
             the index's calendar, or appears twice in one series; a rate is
-            not a number; or ``data_quality`` is not one of the four.
-        ImplausibleInputError: A rate is outside the band, or the latest one
-            is far off the curve's overnight rate.
+            not a number; ``data_quality`` is not one of the four; or
+            ``check_against_curve`` is not a JSON boolean.
+        ImplausibleInputError: A rate is outside the band, or the latest
+            recent one the swap reads is far off the curve's overnight rate.
     """
     block = config.get("fixings") or {}
     if not block:
@@ -303,8 +333,18 @@ def fixings_snapshot(
                 )
             published[day] = rate
             position[day] = number
-        if curve is not None:
-            _require_near_curve(published, position, where, calendar, curve)
+        # Checked rather than coerced, as hedge.require_full_coverage is:
+        # bool("false") is True.
+        check = spec.get("check_against_curve", True)
+        if not isinstance(check, bool):
+            raise ConfigurationError(
+                f"{where}.check_against_curve is {check!r}; it must be true or false (true, "
+                "the default, refuses a recent fixing far off the curve's overnight rate)"
+            )
+        if check and curve is not None and swap is not None:
+            read = {day: rate for day, rate in published.items()
+                    if _reads(swap, series_id, day, as_of)}
+            _require_near_curve(read, position, where, calendar, curve)
         days = tuple(sorted(published))
         series[series_id] = Series(
             series_id,
@@ -367,6 +407,24 @@ def _data_quality(value: Any, where: str) -> DataQuality:
         ) from error
 
 
+def _reads(swap: OISSwap, series_id: str, day: date, as_of: date) -> bool:
+    """Whether pricing ``swap`` as of ``as_of`` reads the ``series_id`` fixing dated ``day``.
+
+    An overnight swap reads its own index on the days of a period still to
+    be paid, up to ``as_of``, and nothing else: no other series, no day of a
+    period already paid, no day of a period that has not started.
+    """
+    if series_id != swap.index.name or day > as_of:
+        return False
+    schedule = swap.schedule
+    return any(
+        start <= day < end and not is_paid(pay, as_of)
+        for start, end, pay in zip(
+            schedule.accrual_start, schedule.accrual_end, schedule.payment, strict=True
+        )
+    )
+
+
 def _require_near_curve(
     published: dict[date, float],
     position: dict[date, int],
@@ -374,14 +432,17 @@ def _require_near_curve(
     calendar: HolidayCalendar,
     curve: DiscountCurve,
 ) -> None:
-    """Refuse a series whose latest fixing is in another unit than the curve.
+    """Refuse a series whose latest recent fixing is in another unit than the curve.
 
-    See :data:`FIXING_CURVE_FACTOR`. Only the latest fixing on or before
-    ``as_of`` is compared: older ones may be a year and four hundred basis
-    points away from today's curve, as in 2022, and still be right.
+    See :data:`FIXING_CURVE_FACTOR`. ``published`` holds the fixings the
+    swap reads; of those, only the latest dated within
+    :data:`FIXING_CHECK_WINDOW_DAYS` business days before ``as_of`` is
+    compared. Older ones may be a year and four hundred basis points away
+    from today's curve, as in 2022, and still be right.
     """
     as_of = curve.as_of
-    held = [day for day in published if day <= as_of]
+    earliest = calendar.add_business_days(as_of, -FIXING_CHECK_WINDOW_DAYS)
+    held = [day for day in published if earliest <= day <= as_of]
     if not held:
         return
     latest = max(held)
@@ -389,7 +450,9 @@ def _require_near_curve(
     overnight = curve.forward(as_of, calendar.next_business_day(as_of))
     larger, smaller = max(abs(fixing), abs(overnight)), min(abs(fixing), abs(overnight))
     if abs(fixing - overnight) > FIXING_CURVE_GAP and larger > FIXING_CURVE_FACTOR * smaller:
-        times = f"{larger / smaller:.0f} times" if smaller else "infinitely"
+        # One decimal: rounded to a whole number, 4.4 times read "4 times
+        # off", next to the "more than 4 times" it was refused for.
+        times = f"{larger / smaller:.1f} times" if smaller else "infinitely"
         raise ImplausibleInputError(
             f"{where}.values[{position[latest]}].rate, the {latest} fixing, is {fixing!r}, and "
             f"the curve's overnight rate from as_of is {overnight:.6f}: {times} off and "
@@ -397,7 +460,11 @@ def _require_near_curve(
             "curve is a hundred times off (0.05 for 0.05%, a percent file from the years "
             "near zero) and a typo ten (0.43 for 0.043). Fixings are decimals a year: check "
             f"the file's unit. Refused when more than {FIXING_CURVE_FACTOR:.0f} times and "
-            f"{FIXING_CURVE_GAP * 1e4:.0f} bp off (FIXING_CURVE_FACTOR, FIXING_CURVE_GAP)."
+            f"{FIXING_CURVE_GAP * 1e4:.0f} bp off (FIXING_CURVE_FACTOR, FIXING_CURVE_GAP), "
+            f"comparing the latest fixing the swap reads in the {FIXING_CHECK_WINDOW_DAYS} "
+            "business days before as_of. If the rate is right and the market moved, as on "
+            "the Monday after the cut of 15 March 2020, set "
+            f"{where}.check_against_curve: false."
         )
 
 

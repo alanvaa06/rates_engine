@@ -327,10 +327,12 @@ CONFIG_SCHEMA: dict[str, Any] = {
                                 "description": (
                                     "The published rate as a decimal a year: 0.043 is 4.30%, "
                                     "not 4.30. Refused beyond 20% "
-                                    "(MAX_PLAUSIBLE_OVERNIGHT_FIXING), and the latest one when "
-                                    "it is more than four times and 50 bp off the curve's "
-                                    "overnight rate (FIXING_CURVE_FACTOR, FIXING_CURVE_GAP): "
-                                    "0.43 for 0.043, or 0.05 meaning 0.05%."
+                                    "(MAX_PLAUSIBLE_OVERNIGHT_FIXING); and the latest one the "
+                                    "swap reads in the five business days before as_of "
+                                    "(FIXING_CHECK_WINDOW_DAYS) is refused when it is more "
+                                    "than four times and 50 bp off the curve's overnight rate "
+                                    "(FIXING_CURVE_FACTOR, FIXING_CURVE_GAP): 0.43 for 0.043, "
+                                    "or 0.05 meaning 0.05%. See check_against_curve."
                                 ),
                             },
                         },
@@ -348,6 +350,18 @@ CONFIG_SCHEMA: dict[str, Any] = {
                             "observed, synthetic, proxy or assumed; anything else is "
                             "refused. Recorded in the provenance, so every result priced on "
                             "the fixings carries it into its worst_quality."
+                        ),
+                    },
+                    "check_against_curve": {
+                        "default": True,
+                        "description": (
+                            "When true, the latest fixing the swap reads in the five "
+                            "business days before as_of is refused if it is more than four "
+                            "times and 50 bp off the curve's overnight rate, which is what a "
+                            "unit or a typo looks like. Set it false when the rate is right "
+                            "and the market moved: the Monday after the cut of 15 March 2020 "
+                            "read Friday's 1.10% against a 0.25% curve. The 20% band on "
+                            "every rate still applies. A JSON boolean, not a string."
                         ),
                     },
                 },

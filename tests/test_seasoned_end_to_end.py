@@ -1070,7 +1070,7 @@ class TestTheFixingsBlockIsCheckedByPath:
             commands.COMMANDS[name](config)
         message = str(caught.value)
         assert message.startswith(f"fixings.SOFR.values[{last}].rate, the 2026-01-14 fixing")
-        assert "10 times off" in message
+        assert "10.0 times off" in message
 
     def test_a_percent_file_from_the_years_near_zero_is_caught(self):
         # 0.05 meaning 0.05%, on a curve at 0.05%: read as 5%, a rate SOFR
@@ -1078,7 +1078,7 @@ class TestTheFixingsBlockIsCheckedByPath:
         from rates_engine.app import commands
         from rates_engine.core.errors import ImplausibleInputError
 
-        with pytest.raises(ImplausibleInputError, match="100 times off"):
+        with pytest.raises(ImplausibleInputError, match=r"100\.0 times off"):
             commands.COMMANDS["price"](self._at(0.0005, 0.05))
 
     def test_the_market_s_worst_day_is_not_refused(self):
@@ -1171,6 +1171,133 @@ class TestTheFixingsBlockIsCheckedByPath:
         config = _seasoned_config()
         config["fixings"] = {"SOFRR": config["fixings"]["SOFR"]}
         with pytest.raises(ConfigurationError, match="did you mean SOFR"):
+            commands.COMMANDS["price"](config)
+
+    def test_old_rows_a_forward_swap_does_not_read_are_not_compared(self):
+        # Review round 3, point 2: a swap from the March IMM date with rows of
+        # 2021-06-01/02 at 0.01% was refused as "399 times off" the curve's
+        # 3.99%, by rows the swap never reads.
+        from rates_engine.app import commands
+
+        config = _seasoned_config()
+        config["swap"]["effective"] = config["curve"]["stub"]["end"]
+        config["fixings"]["SOFR"]["values"] = [
+            {"date": "2021-06-01", "rate": 0.0001}, {"date": "2021-06-02", "rate": 0.0001}
+        ]
+        bare = dict(config)
+        bare.pop("fixings")
+        assert commands.COMMANDS["price"](config) == commands.COMMANDS["price"](bare)
+
+    def test_a_recent_row_the_swap_does_not_read_is_not_compared(self):
+        # 2026-01-14 is the business day before as_of, inside the window, but
+        # a swap from the March IMM date reads no fixing at all.
+        from rates_engine.app import commands
+
+        config = self._at(0.015, 0.15)
+        config["swap"]["effective"] = config["curve"]["stub"]["end"]
+        config["fixings"]["SOFR"]["values"] = [{"date": "2026-01-14", "rate": 0.15}]
+        assert math.isfinite(commands.COMMANDS["price"](config)["value"])
+
+    def test_a_row_older_than_the_window_is_not_compared(self):
+        # The seasoned swap reads every day from 2025-09-17, but only the
+        # last FIXING_CHECK_WINDOW_DAYS business days before as_of are held
+        # against today's curve: older ones may be right and far from it.
+        from rates_engine.app.builders import (
+            FIXING_CHECK_WINDOW_DAYS,
+            calibration_nodes,
+            fixings_snapshot,
+            ois_swap,
+        )
+        from rates_engine.curves.bootstrap import bootstrap_discount_curve
+
+        assert FIXING_CHECK_WINDOW_DAYS == 5
+        config = self._at(0.015, 0.15)
+        first_in_window = SIFMA_US.add_business_days(AS_OF, -FIXING_CHECK_WINDOW_DAYS)
+        values = config["fixings"]["SOFR"]["values"]
+        config["fixings"]["SOFR"]["values"] = [
+            entry for entry in values if date.fromisoformat(entry["date"]) < first_in_window
+        ]
+        curve = bootstrap_discount_curve(AS_OF, calibration_nodes(config, AS_OF)).curve
+        snapshot = fixings_snapshot(config, AS_OF, curve, ois_swap(config))
+        assert snapshot is not None
+        config["fixings"]["SOFR"]["values"].append(
+            {"date": first_in_window.isoformat(), "rate": 0.15}
+        )
+        from rates_engine.core.errors import ImplausibleInputError
+
+        with pytest.raises(ImplausibleInputError, match=first_in_window.isoformat()):
+            fixings_snapshot(config, AS_OF, curve, ois_swap(config))
+
+    @staticmethod
+    def _monday_after_the_cut() -> dict:
+        """As of Monday 2020-03-16 on a 0.25% curve, with Friday's pre-cut 1.10% print.
+
+        The Fed cut to 0-0.25% on Sunday 15 March 2020. A swap from
+        2020-03-02 has accrued over the first two weeks of March at 1.10%
+        (the level is the review's; the days are SIFMA's), and the curve
+        that Monday is a quarter of a percent.
+        """
+        from rates_engine.conventions.schedule import imm_date, next_imm_on_or_after
+
+        as_of, curve_rate = date(2020, 3, 16), 0.0025
+        start = imm_date(2020, 6)
+        futures, period = [], start
+        for index in range(4):
+            following = next_imm_on_or_after(period + timedelta(days=1))
+            futures.append({"label": f"SR3-{index + 1}", "start": period.isoformat(),
+                            "end": following.isoformat(), "price": 100.0 * (1 - curve_rate)})
+            period = following
+        days, day = [], date(2020, 3, 2)
+        while day < as_of:
+            if SIFMA_US.is_business_day(day):
+                days.append(day)
+            day += timedelta(days=1)
+        return {
+            "as_of": as_of.isoformat(),
+            "curve": {
+                "stub": {"end": start.isoformat(),
+                         "accrual_factor": 1.0 + curve_rate * (start - as_of).days / 360.0},
+                "futures": futures,
+            },
+            "swap": {"effective": "2020-03-02", "maturity": period.isoformat(),
+                     "fixed_rate": 0.01, "notional": NOTIONAL},
+            "fixings": {"SOFR": {"values": [{"date": d.isoformat(), "rate": 0.011}
+                                            for d in days]}},
+        }
+
+    def test_a_regime_change_is_refused_with_the_key_that_waives_it(self):
+        # 1.10% against 0.25% is 4.4 times and 85 bp off: the check cannot
+        # tell it from a unit, so it refuses, and says how to say it is not.
+        # The ratio is shown to one decimal: rounded to "4 times", it read
+        # as inside the "more than 4 times" it was refused for.
+        from rates_engine.app import commands
+        from rates_engine.core.errors import ImplausibleInputError
+
+        with pytest.raises(ImplausibleInputError) as caught:
+            commands.COMMANDS["price"](self._monday_after_the_cut())
+        message = str(caught.value)
+        assert "4.4 times off" in message
+        assert "fixings.SOFR.check_against_curve: false" in message
+
+    def test_check_against_curve_false_prices_the_regime_change(self):
+        from rates_engine.app import commands
+        from rates_engine.app.config import CONFIG_SCHEMA
+
+        config = self._monday_after_the_cut()
+        config["fixings"]["SOFR"]["check_against_curve"] = False
+        for name in ("price", "hedge"):
+            assert commands.COMMANDS[name](config)["evidence"] is not None
+        spec = CONFIG_SCHEMA["fixings"]["keys"]["SOFR"]["keys"]["check_against_curve"]
+        assert spec["default"] is True
+
+    @pytest.mark.parametrize("value", ["false", 0, None])
+    def test_check_against_curve_is_a_json_boolean(self, value):
+        from rates_engine.app import commands
+        from rates_engine.core.errors import ConfigurationError
+
+        config = self._monday_after_the_cut()
+        config["fixings"]["SOFR"]["check_against_curve"] = value
+        with pytest.raises(ConfigurationError, match=r"^fixings\.SOFR\.check_against_curve is "):
             commands.COMMANDS["price"](config)
 
     def test_a_swap_with_no_history_ignores_the_block(self):

@@ -402,7 +402,7 @@ def price(config: dict[str, Any] | None) -> dict[str, Any]:
     )
     curve_set = CurveSet(boot.curve)
     sources = (boot.evidence,)
-    fixings = fixings_snapshot(config, as_of, boot.curve)
+    fixings = fixings_snapshot(config, as_of, boot.curve, swap)
     try:
         return _price_measures(config, swap, curve_set, sources, fixings)
     except MissingFixingError as error:
@@ -544,6 +544,7 @@ def hedge(config: dict[str, Any] | None) -> dict[str, Any]:
         bootstrap_discount_curve(as_of, instruments, long_end_source=long_end_source).curve
         if config.get("fixings")
         else None,
+        swap,
     )
     try:
         result = strip_hedge(
