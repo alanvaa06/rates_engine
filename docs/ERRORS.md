@@ -352,6 +352,13 @@ fixed by editing the file.
 A proposal the programme *forbids* is not one of them; that is
 `PolicyBreachError`, below.
 
+Also raised by the Banxico provider, `banxico.fetch_series` and
+`fetch_snapshot`, when no token was given: Banxico's SIE needs a free API
+token per caller, passed as `token=` or in the `BANXICO_TOKEN` environment
+variable. It is never read from the repository and never defaulted, because
+a token committed once is a token to rotate; the message says where to
+register for one.
+
 ### `UnresolvedConventionError`
 
 **Exit code 2. Raised only when you ask for it.**
@@ -607,6 +614,51 @@ different quantity, so it is never served under these names.
 
 They exist rather than being absent so that reaching for them returns the
 reason instead of an `AttributeError`.
+
+---
+
+## Not a typed refusal: `ValueError`
+
+A few refusals are a plain `ValueError`: the input is not the thing the
+function prices, and no class here would say more than the message does.
+Over the CLI and the MCP server they arrive like any other refusal, as
+`"type": "ValueError"` with exit code 1 and `recoverable: true`. Three came
+with 0.4.0, from valuing what has already happened:
+
+- `swaption_pv`, and `option_greeks` through it, for a swaption expiring on
+  or before the valuation date. An exercise dated `as_of` has happened, as
+  a payment dated that day has been made, so there is no option left: value
+  the swap it became with `pv`, or nothing if it lapsed.
+
+  ```
+  ValueError: the swaption expired on 2026-01-15, on or before the valuation
+  date 2026-01-15: it is no longer an option. If it was exercised, value the
+  swap it became with pv(); if it lapsed it is worth nothing. An exercise
+  dated the valuation date counts as done, as a payment dated that day does.
+  ```
+
+- `Swaption`, when it is built, for an expiry after the underlying's start
+  as its schedule rolls it (`span[0]`), not as written: a swap from
+  Saturday 2026-05-30 accrues from Friday the 29th, so a swaption on it
+  expiring on the 30th is refused. The message names both dates: "a
+  swaption cannot be exercised into a swap that has already begun
+  accruing".
+- `forward_from_curves` and `implied_basis`, and so `rateng fx-forward` and
+  `hedge-structures`, for a delivery on or before the pair's spot date. A
+  delivery on the spot date is a spot trade, and one before it a short
+  date, priced off spot by a swap this package does not model.
+
+  ```
+  ValueError: delivery 2026-01-19 is not after the spot date 2026-01-20
+  (USD/MXN settles 2 business days after the 2026-01-15 valuation date,
+  counted on FEDERAL_RESERVE + BMV). A delivery on the spot date is a spot
+  trade, and one before it a short date priced off the spot by a swap this
+  module does not model; price a delivery after the spot date.
+  ```
+
+Among the others: `Series` refuses a NaN or infinite value, `strip_hedge`
+a set of instruments with no `FuturesNode`, the FX inputs a non-positive
+expiry or volatility, and a CSV a column its header lacks.
 
 ---
 

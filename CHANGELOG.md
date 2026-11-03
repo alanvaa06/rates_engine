@@ -239,6 +239,17 @@ hedge's tolerance of a gap made of closed days lets through.
   valuation date. A swaption expiring on or before the valuation date
   raises `ValueError`. A seasoned
   3% floor went from 314,181.72 to QuantLib's 11,200.15.
+- **`cap_floor_pv`'s evidence describes the periods it values.** `periods`
+  counts the periods not yet paid, where it counted the whole strip, which
+  `instrument.periods` still does. New fields: `periods_paid`,
+  `fixing_lag_days`, `expiry_note` (a caplet expires at its fixing) and
+  `seasoning_note` (how a paid, fixed or fixing-today period is valued).
+  `per_period` has a row per period valued, and each row gains
+  `fixing_date`, `status` (`fixed`, `fixes_today` or `live`),
+  `fixing_source` (`published`, `curve_forward_on_fixing_day`, or `null`
+  for a live period) and `fixing` (the published rate, else `null`); its
+  `forward` is `null` for a fixed period. `instrument` gains
+  `fixing_lag_days`.
 - **`sabr.lognormal_vol` refuses a shifted smile** with `VolUnitsError`
   unless `shifted_black=True`: with a shift it is a shifted-Black
   volatility, which no pricer here carries.

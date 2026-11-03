@@ -154,8 +154,9 @@ class ConfigurationError(RatesEngineError):
     that cannot be read. Under ``--json``, a command line the parser rejects
     is one too. The futures hedge raises it for inputs that
     contradict each other, and ``load_program`` for a policy file it cannot
-    read. The message names the path or the input, and what to write
-    instead.
+    read. The Banxico provider raises it when no API token was given, as
+    ``token=`` or in the ``BANXICO_TOKEN`` environment variable. The message
+    names the path or the input, and what to write instead.
     """
 
     exit_code = 1
