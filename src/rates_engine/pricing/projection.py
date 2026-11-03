@@ -80,6 +80,8 @@ six months before valuation came back at -2.24m USD against QuantLib's
 
 from __future__ import annotations
 
+import bisect
+import math
 from datetime import date
 from functools import singledispatch
 from typing import Any, Protocol, runtime_checkable
@@ -94,6 +96,7 @@ from rates_engine.instruments.cashflow import Cashflow, RealisedFixing
 from rates_engine.instruments.fra import FRA
 from rates_engine.instruments.swaps import IRSwap, OISSwap
 from rates_engine.market.snapshot import MarketSnapshot, Series
+from rates_engine.pricing.fx_forward import require_plausible_rate
 
 __all__ = [
     "Priceable",
@@ -103,7 +106,66 @@ __all__ = [
     "fra_fair_rate",
     "is_paid",
     "may_have_history",
+    "require_plausible_fixing",
+    "MAX_PLAUSIBLE_OVERNIGHT_FIXING",
 ]
+
+MAX_PLAUSIBLE_OVERNIGHT_FIXING = 0.20
+"""Beyond this, as a decimal a year, a published fixing of a rate index is refused.
+
+SOFR has printed between 0.01% and 5.40% since it began in April 2018, its
+one spike 5.25% on 17 September 2019, and the effective federal funds rate
+was last above 20% in 1981. A fixing beyond the band is almost always a typo
+or a unit: 0.43 typed for 0.043 priced the review's seasoned payer at
+14,200,798 USD instead of 255,311, marked ``observed``. A plausibility band
+and not a measurement, named and adjustable like
+:data:`~rates_engine.pricing.fx_forward.MAX_PLAUSIBLE_RATE`, which it narrows
+for this one kind of rate.
+
+It is checked where a fixing is read, by every caller: the overnight days
+an OIS period compounds, a term rate an IRS or FRA period pays, and the
+fixing a caplet pays on (:mod:`rates_engine.pricing.options`). Named for
+the overnight rates it was written for, it holds Term SOFR and TIIE too,
+whose prints have stayed inside it. Not in
+:class:`~rates_engine.market.snapshot.Series`, which also holds yields and
+index levels such as SOFRINDEX, above one. The CLI's ``fixings`` block is
+held to the same band, by its config path, before anything is priced.
+
+No band catches a file in percent from the years SOFR sat near zero: 0.05
+meaning 0.05% reads as 5%, a rate SOFR has printed. That is what the CLI's
+cross-check against the curve is for
+(:data:`~rates_engine.app.builders.FIXING_CURVE_FACTOR`); a snapshot passed
+to the library has no curve of its own, and is not cross-checked.
+"""
+
+_FIXING_CONVENTION = (
+    "A fixing is a decimal a year, as the administrator publishes it: 4.30% is 0.043, "
+    "not 4.30."
+)
+
+
+def require_plausible_fixing(series_id: str, day: date, rate: float, context: str) -> None:
+    """Refuse a published fixing outside :data:`MAX_PLAUSIBLE_OVERNIGHT_FIXING`.
+
+    Args:
+        series_id: The series it was read from, e.g. ``"SOFR"``.
+        day: The date it is for.
+        rate: The fixing, as a decimal a year.
+        context: What read it, said first in the message.
+
+    Raises:
+        ImplausibleInputError: It is not finite or its magnitude is above the
+            band; the message names the series, the date and the value.
+    """
+    if not math.isfinite(rate) or abs(rate) > MAX_PLAUSIBLE_OVERNIGHT_FIXING:
+        require_plausible_rate(
+            rate,
+            f"{context}: the {series_id!r} fixing of {day}",
+            limit=MAX_PLAUSIBLE_OVERNIGHT_FIXING,
+            limit_name="MAX_PLAUSIBLE_OVERNIGHT_FIXING",
+            convention=_FIXING_CONVENTION,
+        )
+
 
 def may_have_history(index: RateIndex, accrual_start: date, as_of: date) -> bool:
     """Whether a period of ``index`` starting on ``accrual_start`` can be decided by ``as_of``.
@@ -347,6 +409,7 @@ def _compounded_history(
         compounded = fixings.compounded(index.name, start, until, calendar=index.calendar)
     except MissingFixingError as error:
         raise MissingFixingError(f"{context}: {error}") from error
+    _require_plausible_history(series, index, start, until, context)
     return RealisedFixing(
         series_id=index.name,
         method="compounded",
@@ -358,6 +421,32 @@ def _compounded_history(
         repeated_days=compounded.repeated_days,
         provenance=series.provenance,
     )
+
+
+def _require_plausible_history(
+    series: Series, index: RateIndex, start: date, until: date, context: str
+) -> None:
+    """Hold every fixing compounded over ``[start, until)`` to the band.
+
+    Those are the business days in the period and, when it opens on a
+    closed day, the business day before it, whose rate it carries in. A row
+    the compounding does not read -- a weekend row a library series may
+    hold, a day before the period -- is not checked. The rows are found by
+    bisection and only one beyond the band is looked at twice, so the check
+    costs a pass over the period's rates and no calendar lookup per day.
+    """
+    calendar = index.calendar
+    first = start if calendar.is_business_day(start) else calendar.previous_business_day(start)
+    low = bisect.bisect_left(series.dates, first)
+    high = bisect.bisect_left(series.dates, until, lo=low)
+    limit = MAX_PLAUSIBLE_OVERNIGHT_FIXING
+    for position in range(low, high):
+        rate = series.values[position]
+        if abs(rate) <= limit:
+            continue
+        day = series.dates[position]
+        if day == first or calendar.is_business_day(day):
+            require_plausible_fixing(index.name, day, rate, context)
 
 
 def _term_history(
@@ -445,6 +534,7 @@ def _term_fixing(
         raise MissingFixingError(
             f"{context}, and it fixes {_fixing_rule(index)}: {error}"
         ) from error
+    require_plausible_fixing(index.name, fixing_date, rate, context)
     return RealisedFixing(
         series_id=index.name,
         method="term",

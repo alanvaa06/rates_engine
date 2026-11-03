@@ -504,6 +504,26 @@ class TestASeasonedCapOrFloor:
         assert today["fixing_source"] == "published"
         assert today["fixing"] == 0.043
 
+    @pytest.mark.parametrize("rate", [0.43, 4.30])
+    def test_a_fixing_in_another_unit_is_refused(self, option_curve_set, rate):
+        # #21 round 3, point 3: the 20% band the CLI applies holds for a
+        # fixing the pricer reads, on the fixed period and the one fixing today.
+        from rates_engine.core.errors import ImplausibleInputError
+
+        with pytest.raises(ImplausibleInputError, match="'TERM_SOFR_3M' fixing of 2025-10-16"):
+            cap_floor_pv(
+                _seasoned("floor"), option_curve_set, VOL,
+                fixings=_fixings(*SEASONED_FIXINGS, rate=rate),
+            )
+        today = MarketSnapshot(AS_OF, {
+            "TERM_SOFR_3M": Series(
+                "TERM_SOFR_3M", SEASONED_FIXINGS, (0.043, rate),
+                Provenance(source="test", series_id="TERM_SOFR_3M"),
+            )
+        })
+        with pytest.raises(ImplausibleInputError, match="'TERM_SOFR_3M' fixing of 2026-01-15"):
+            cap_floor_pv(_seasoned("floor"), option_curve_set, VOL, fixings=today)
+
     @pytest.mark.parametrize("rate", [float("nan"), float("inf")])
     def test_a_fixing_that_is_not_a_number_is_never_valued(self, option_curve_set, rate):
         # What matters is that it never reaches a price, not which layer

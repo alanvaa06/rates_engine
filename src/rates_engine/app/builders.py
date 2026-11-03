@@ -27,7 +27,7 @@ from rates_engine.market.snapshot import MarketSnapshot, Series
 from rates_engine.models.convexity import ConvexityModel, convexity_adjustment
 from rates_engine.pricing.calibration import SwapQuoteNode
 from rates_engine.pricing.fx_forward import require_plausible_rate
-from rates_engine.pricing.projection import is_paid
+from rates_engine.pricing.projection import MAX_PLAUSIBLE_OVERNIGHT_FIXING, is_paid
 
 __all__ = [
     "calibration_nodes",
@@ -35,28 +35,13 @@ __all__ = [
     "fixings_snapshot",
     "flat_curve",
     "fx_inputs",
+    # Defined in pricing.projection, where the pricers read a fixing, so the
+    # CLI and the library hold a rate to one band; re-exported where it was.
     "MAX_PLAUSIBLE_OVERNIGHT_FIXING",
     "FIXING_CURVE_FACTOR",
     "FIXING_CURVE_GAP",
     "FIXING_CHECK_WINDOW_DAYS",
 ]
-
-MAX_PLAUSIBLE_OVERNIGHT_FIXING = 0.20
-"""Beyond this, as a decimal a year, an overnight fixing in a config is refused.
-
-SOFR has printed between 0.01% and 5.40% since it began in April 2018, its
-one spike 5.25% on 17 September 2019, and the effective federal funds rate
-was last above 20% in 1981. A fixing beyond the band is almost always a typo
-or a unit: 0.43 typed for 0.043 priced the review's seasoned payer at
-14,200,798 USD instead of 255,311, marked ``observed``. A plausibility band
-and not a measurement, named and adjustable like
-:data:`~rates_engine.pricing.fx_forward.MAX_PLAUSIBLE_RATE`, which it narrows
-for this one kind of rate.
-
-No band catches a file in percent from the years SOFR sat near zero: 0.05
-meaning 0.05% reads as 5%, a rate SOFR has printed. That is what the
-cross-check against the curve is for (:data:`FIXING_CURVE_FACTOR`).
-"""
 
 FIXING_CURVE_FACTOR = 4.0
 """How many times off the curve's overnight rate the latest fixing may be.

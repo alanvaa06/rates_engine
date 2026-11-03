@@ -70,6 +70,7 @@ from rates_engine.instruments.swaption import Swaption
 from rates_engine.market.snapshot import MarketSnapshot
 from rates_engine.models import bachelier, black
 from rates_engine.pricing.collateral import discounting_fields, valuation_warnings
+from rates_engine.pricing.projection import require_plausible_fixing
 from rates_engine.volatility.units import Volatility
 
 __all__ = [
@@ -490,11 +491,19 @@ def _period_name(caplet: Caplet, valuation: date) -> str:
 
 
 def _finite_fixing(caplet: Caplet, rate: float, what: str) -> float:
+    """The fixing a period pays on, refused unless it is a finite rate inside the band.
+
+    A NaN is a gap in the source file, refused as a missing fixing. A number
+    beyond :data:`~rates_engine.pricing.projection.MAX_PLAUSIBLE_OVERNIGHT_FIXING`
+    is a unit or a typo, 4.30 for 4.30%, and is refused as the linear
+    pricer refuses it.
+    """
     if not math.isfinite(rate):
         raise MissingFixingError(
             f"{what}, and its fixing in the series {caplet.index.name!r} is {rate!r}, not "
             "a finite number. A NaN here is usually a gap in the source file."
         )
+    require_plausible_fixing(caplet.index.name, caplet.fixing_date, rate, what)
     return rate
 
 

@@ -138,6 +138,15 @@ cut of 15 March 2020, so a series can waive it with
 key. It is the CLI's alone: a `MarketSnapshot` passed to the library has
 no curve of its own to be held against.
 
+The band is the library's too. Wherever a published fixing of a rate
+index is read -- the overnight days an OIS period compounds, the term rate
+an IRS, FRA or caplet period pays -- a value beyond
+`MAX_PLAUSIBLE_OVERNIGHT_FIXING` raises, naming the series, the date and
+the value, so `pv`, every risk measure and `strip_hedge` refuse a
+`MarketSnapshot` of SOFR at 0.43 or 4.30 as the CLI does. `Series` itself
+is not banded: it also holds yields and index levels such as SOFRINDEX,
+above one.
+
 ### `MissingDependencyError`
 
 **Exit code 1. Recoverable: install the extra the message names.**

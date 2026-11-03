@@ -320,6 +320,109 @@ def _inputs(evidence) -> list:
     return found
 
 
+class TestTheLibraryHoldsAFixingToTheBand:
+    """Review round 3, point 3: a fixing the pricing reads is held to the 20% band.
+
+    The band lived in the CLI builder only, so through the library a
+    seasoned payer with every SOFR fixing typed 0.43 for 0.043 priced at
+    14,200,798.33 USD instead of 255,311.41, and at 311,143,267.66 in
+    percent, both marked observed. The band is checked where a published
+    fixing of a rate index is read, not in ``Series``, which also holds
+    yields and index levels such as SOFRINDEX, above one.
+    """
+
+    @staticmethod
+    def _seasoned():
+        from rates_engine.instruments.swaps import OISSwap
+
+        nodes, _, end = TestTheStripHedgeTakesTheFixings._strip()
+        swap = OISSwap(effective=date(2025, 9, 17), maturity=end, fixed_rate=0.04,
+                       notional=NOTIONAL)
+        return swap, nodes
+
+    @pytest.mark.parametrize("rate", [0.43, 4.30])
+    def test_pv_refuses_a_history_in_another_unit(self, rate):
+        from rates_engine.core.errors import ImplausibleInputError
+        from rates_engine.curves.bootstrap import bootstrap_discount_curve
+
+        swap, nodes = self._seasoned()
+        curve_set = CurveSet(bootstrap_discount_curve(AS_OF, nodes).curve)
+        with pytest.raises(ImplausibleInputError) as caught:
+            pv(swap, curve_set, fixings=_fixings(_sofr_history(rate)))
+        message = str(caught.value)
+        assert "'SOFR' fixing of 2025-09-17" in message
+        assert f"= {rate!r}" in message
+        assert "MAX_PLAUSIBLE_OVERNIGHT_FIXING" in message
+
+    def test_one_bad_day_inside_the_period_is_named(self):
+        from rates_engine.core.errors import ImplausibleInputError
+        from rates_engine.curves.bootstrap import bootstrap_discount_curve
+
+        swap, nodes = self._seasoned()
+        history = _sofr_history()
+        bad = history.dates.index(date(2025, 11, 4))
+        values = list(history.values)
+        values[bad] = 0.43
+        typo = Series("SOFR", history.dates, tuple(values), history.provenance)
+        curve_set = CurveSet(bootstrap_discount_curve(AS_OF, nodes).curve)
+        with pytest.raises(ImplausibleInputError, match="'SOFR' fixing of 2025-11-04 = 0.43"):
+            pv(swap, curve_set, fixings=_fixings(typo))
+
+    def test_a_row_the_pricing_does_not_read_is_not_held_to_it(self):
+        # 2024-03-01 is before the swap; the band is checked on what is read.
+        from rates_engine.curves.bootstrap import bootstrap_discount_curve
+
+        swap, nodes = self._seasoned()
+        history = _sofr_history()
+        values = list(history.values)
+        values[history.dates.index(date(2024, 3, 1))] = 4.30
+        curve_set = CurveSet(bootstrap_discount_curve(AS_OF, nodes).curve)
+        clean = pv(swap, curve_set, fixings=_fixings(history)).value
+        dirty = Series("SOFR", history.dates, tuple(values), history.provenance)
+        assert pv(swap, curve_set, fixings=_fixings(dirty)).value == clean
+
+    @pytest.mark.parametrize("name", ["dv01", "strip_hedge"])
+    def test_the_risk_and_the_hedge_refuse_it_too(self, name):
+        from rates_engine.core.errors import ImplausibleInputError
+        from rates_engine.curves.bootstrap import bootstrap_discount_curve
+        from rates_engine.hedging.futures_strip import strip_hedge
+        from rates_engine.risk.sensitivities import dv01
+
+        swap, nodes = self._seasoned()
+        snapshot = _fixings(_sofr_history(0.43))
+        with pytest.raises(ImplausibleInputError, match="'SOFR' fixing"):
+            if name == "dv01":
+                curve_set = CurveSet(bootstrap_discount_curve(AS_OF, nodes).curve)
+                dv01(swap, curve_set, fixings=snapshot)
+            else:
+                strip_hedge(swap, nodes, as_of=AS_OF, fixings=snapshot)
+
+    @pytest.mark.parametrize("rate", [0.405, 4.05])
+    def test_a_term_fixing_is_held_to_it(self, rate):
+        # The spot IRS's first period fixes on as_of: 4.05 or 0.405 for 0.0405.
+        from rates_engine.core.errors import ImplausibleInputError
+        from rates_engine.instruments.swaps import IRSwap
+
+        irs = IRSwap(effective=_SPOT, maturity=date(2028, 1, 20), fixed_rate=0.039,
+                     notional=NOTIONAL)
+        snapshot = _fixings(_published("TERM_SOFR_3M", {AS_OF: rate}))
+        with pytest.raises(ImplausibleInputError, match=f"'TERM_SOFR_3M' fixing of {AS_OF}"):
+            pv(irs, CurveSet(_flat_curve()), fixings=snapshot)
+
+    def test_the_band_is_the_one_the_cli_applies(self):
+        from rates_engine.app import builders
+        from rates_engine.pricing import projection
+
+        assert builders.MAX_PLAUSIBLE_OVERNIGHT_FIXING is projection.MAX_PLAUSIBLE_OVERNIGHT_FIXING
+        assert projection.MAX_PLAUSIBLE_OVERNIGHT_FIXING == 0.20
+
+    def test_a_series_still_holds_an_index_level_above_one(self):
+        # SOFRINDEX is a level near 1.2, not a rate; Series takes it.
+        series = Series("SOFRINDEX", (date(2026, 1, 14),), (1.21,),
+                        Provenance(source="test", series_id="SOFRINDEX"))
+        assert series.get(date(2026, 1, 14)) == 1.21
+
+
 class TestRiskTakesTheFixings:
     """Every bump-and-reprice measure prices the trade ``pv`` prices.
 
