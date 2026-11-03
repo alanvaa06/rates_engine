@@ -283,28 +283,6 @@ protective level. The refusal names the strike to widen. It is here rather
 than under a solver error because nothing failed to converge: the bracket
 is exhausted and the answer is that there isn't one.
 
-A `fixings` block in a CLI or MCP config is checked twice. Every rate must
-be within `MAX_PLAUSIBLE_OVERNIGHT_FIXING` (20%), and the latest fixing the
-swap reads in the `FIXING_CHECK_WINDOW_DAYS` (five) business days before
-`as_of` must not be both more than `FIXING_CURVE_FACTOR` (four) times and
-`FIXING_CURVE_GAP` (50 bp) off the curve's overnight rate: a file in
-percent from the years near zero passes any band, and fails this. A row the
-swap does not read, or an older one, is not compared. The comparison
-cannot tell a unit from a market that moved, as on the Monday after the
-cut of 15 March 2020, so a series can waive it with
-`fixings.<SERIES>.check_against_curve: false`, and the refusal names that
-key. It is the CLI's alone: a `MarketSnapshot` passed to the library has
-no curve of its own to be held against.
-
-The band is the library's too. Wherever a published fixing of a rate
-index is read -- the overnight days an OIS period compounds, the term rate
-an IRS, FRA or caplet period pays -- a value beyond
-`MAX_PLAUSIBLE_OVERNIGHT_FIXING` raises, naming the series, the date and
-the value, so `pv`, every risk measure and `strip_hedge` refuse a
-`MarketSnapshot` of SOFR at 0.43 or 4.30 as the CLI does. `Series` itself
-is not banded: it also holds yields and index levels such as SOFRINDEX,
-above one.
-
 ### `MissingDependencyError`
 
 **Exit code 1. Recoverable: install the extra the message names.**
