@@ -22,6 +22,7 @@ import math
 from datetime import date, timedelta
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 import rates_engine
@@ -37,6 +38,7 @@ from rates_engine.core.errors import (
 from rates_engine.core.evidence import DataQuality, Provenance
 from rates_engine.curves.discount import CurveSet, DiscountCurve
 from rates_engine.curves.parametric import (
+    MAX_SEGMENT_AMPLIFICATION,
     TERM_RATE_CAVEAT,
     FOMCStepCurve,
     NelsonSiegel,
@@ -896,16 +898,212 @@ class TestFOMCStepFitSeparatesEverySegment:
         for separable in ("2026-04-30 to 2026-06-18", "2026-06-18 onwards"):
             assert separable not in message
 
+    def _month(self, start: date, end: date) -> tuple[str, date, date, str, float]:
+        return (f"SR1-{start:%b}", start, end, "SR1", _cme_price("SR1", start, end, self._rate))
+
     def test_a_month_inside_the_tangle_separates_it(self):
         """SR1 February sits wholly in the second segment and pins it, and
-        with it the two either side: the fit then finds the path."""
-        start, end = date(2026, 2, 1), date(2026, 3, 1)
-        february = ("SR1-Feb26", start, end, "SR1", _cme_price("SR1", start, end, self._rate))
+        with it the two either side: the rank check passes. It does not
+        separate them well -- March to April and April to June are told
+        apart only by 17 June inside M6, so a basis point on M6 moves March
+        to April by 104 bp -- and the amplification bound refuses it. SR1 May,
+        wholly in April to June, pins that one on its own, and the fit then
+        finds the path."""
+        february = self._month(date(2026, 2, 1), date(2026, 3, 1))
+        with pytest.raises(UnderdeterminedCurveError, match="'SR3-M6'") as excinfo:
+            fit_fomc_step_curve(
+                self.AS_OF, self.MEETINGS, (*self._strip(), february), fixings=self._snapshot()
+            )
+        assert "2026-03-19 to 2026-04-30" in str(excinfo.value)
+        may = self._month(date(2026, 5, 1), date(2026, 6, 1))
         fit = fit_fomc_step_curve(
-            self.AS_OF, self.MEETINGS, (*self._strip(), february), fixings=self._snapshot()
+            self.AS_OF, self.MEETINGS, (*self._strip(), february, may), fixings=self._snapshot()
         )
         assert fit.curve.segment_rates == pytest.approx(self.PATH, abs=1e-9)
         assert fit.max_residual_bp < 1e-6
+
+
+def _amplification(weights: list[list[int]], days: list[int]) -> np.ndarray:
+    """Bp of each segment per bp of each quote, from hand-counted weights.
+
+    ``weights[i][j]`` is the calendar days contract ``i`` prices from segment
+    ``j``, counted by hand; ``days[i]`` its whole period. To first order a
+    contract's rate moves ``weights[i][j] / days[i]`` per unit of segment
+    ``j``, so the least-squares fit maps a quote error into the segments
+    through the pseudo-inverse of that matrix. Rows of the result are
+    segments, columns contracts.
+    """
+    matrix = np.array(weights, dtype=float) / np.array(days, dtype=float)[:, None]
+    return np.linalg.pinv(matrix)
+
+
+class TestFOMCStepFitBoundsQuoteAmplification:
+    """Alan Vazquez's PR #15 round-3 review, the item left: identified is not well identified.
+
+    ``as_of`` 2026-01-15, meetings 2026-01-29, 03-19, 04-30 and 06-18, SOFR
+    at 3.65% before ``as_of``, and SR3 Z5, H6, M6, U6 with SR1 April, priced
+    off 365/340/315/290/265 bp. Five contracts, full rank, and the fit
+    recovers the path. But lowering M6 by 0.15 bp, under half a tick, gave
+    2530.85 / -291.14 / 314.53 / 303.56 / 265.0 bp and passed ``strict``:
+    the segment from April to June is priced alone only by 17 June inside
+    M6, and its error chains back through H6 and Z5 into the first two.
+    """
+
+    AS_OF = date(2026, 1, 15)
+    MEETINGS = (date(2026, 1, 29), date(2026, 3, 19), date(2026, 4, 30), date(2026, 6, 18))
+    PATH = (0.0365, 0.0340, 0.0315, 0.0290, 0.0265)
+    CONTRACTS = (
+        ("SR3-Z5", date(2025, 12, 17), date(2026, 3, 18), "SR3"),
+        ("SR3-H6", date(2026, 3, 18), date(2026, 6, 17), "SR3"),
+        ("SR3-M6", date(2026, 6, 17), date(2026, 9, 16), "SR3"),
+        ("SR3-U6", date(2026, 9, 16), date(2026, 12, 16), "SR3"),
+        ("SR1-Apr26", date(2026, 4, 1), date(2026, 5, 1), "SR1"),
+    )
+    WEIGHTS = (
+        [14, 48, 0, 0, 0],  # Z5: 15-28 Jan, 29 Jan-17 Mar; 17 Dec-14 Jan is fixed
+        [0, 1, 42, 48, 0],  # H6: 18 Mar, 19 Mar-29 Apr, 30 Apr-16 Jun
+        [0, 0, 0, 1, 90],  # M6: 17 Jun, then 18 Jun-15 Sep
+        [0, 0, 0, 0, 91],  # U6: all after the last meeting
+        [0, 0, 29, 1, 0],  # April: 1-29 Apr, 30 Apr
+    )
+    DAYS = (91, 91, 91, 91, 30)
+    """Every meeting is a Thursday, so the day before each is a business day
+    and no weekend carries a rate across a boundary: the counts are plain
+    calendar days."""
+
+    def _rate(self, day: date) -> float:
+        if day < self.AS_OF:
+            return self.PATH[0]
+        return self.PATH[sum(1 for meeting in self.MEETINGS if day >= meeting)]
+
+    def _strip(self) -> tuple[tuple[str, date, date, str, float], ...]:
+        return tuple(
+            (label, start, end, symbol, _cme_price(symbol, start, end, self._rate))
+            for label, start, end, symbol in self.CONTRACTS
+        )
+
+    def _snapshot(self) -> MarketSnapshot:
+        return _sofr_snapshot(
+            self.AS_OF, date(2025, 12, 1), self.AS_OF - timedelta(days=1), self._rate
+        )
+
+    def test_a_strip_that_magnifies_a_quote_into_a_segment_is_refused(self):
+        amplification = np.abs(_amplification(list(self.WEIGHTS), list(self.DAYS)))
+        per_segment = amplification.max(axis=1)
+        assert amplification.max() == pytest.approx(14524.14, abs=0.01)
+        with pytest.raises(UnderdeterminedCurveError) as excinfo:
+            fit_fomc_step_curve(
+                self.AS_OF, self.MEETINGS, self._strip(), fixings=self._snapshot(), strict=False
+            )
+        message = str(excinfo.value)
+        assert f"{amplification.max():.1f} bp" in message
+        assert "'SR3-M6'" in message
+        names = (
+            "2026-01-15 to 2026-01-29",
+            "2026-01-29 to 2026-03-19",
+            "2026-03-19 to 2026-04-30",
+            "2026-04-30 to 2026-06-18",
+            "2026-06-18 onwards",
+        )
+        for name, worst in zip(names, per_segment, strict=True):
+            assert (name in message) == (worst > MAX_SEGMENT_AMPLIFICATION), (name, worst)
+        assert "on its own" in message
+
+    def test_the_fixture_strip_reports_an_amplification_near_one(self, step_fit):
+        """``as_of`` 2026-09-16 and meetings on the Thursdays 5 November,
+        17 December, 28 January and 18 March: every contract starts after
+        ``as_of`` and every boundary falls on a weekday."""
+        weights = [
+            [31, 0, 0, 0, 0],  # SR1 Oct
+            [4, 26, 0, 0, 0],  # SR1 Nov: 1-4, 5-30
+            [0, 16, 15, 0, 0],  # SR1 Dec: 1-16, 17-31
+            [0, 0, 27, 4, 0],  # SR1 Jan: 1-27, 28-31
+            [0, 0, 0, 28, 0],  # SR1 Feb
+            [0, 0, 0, 17, 14],  # SR1 Mar: 1-17, 18-31
+            [0, 0, 0, 0, 30],  # SR1 Apr
+            [0, 1, 42, 48, 0],  # SR3 Dec26: 16 Dec, 17 Dec-27 Jan, 28 Jan-16 Mar
+            [0, 0, 0, 1, 90],  # SR3 Mar27: 17 Mar, then 18 Mar-15 Jun
+        ]
+        days = [31, 30, 31, 31, 28, 31, 30, 91, 91]
+        expected = float(np.abs(_amplification(weights, days)).max())
+        reported = step_fit.evidence.fields["segment_amplification_bp_per_bp"]
+        assert reported == pytest.approx(expected, rel=1e-9)
+        assert reported == pytest.approx(1.0, abs=0.01)
+
+    def test_the_measure_is_what_a_quote_does_to_the_fit(self, strip, meetings, step_fit):
+        """Not the formula again: move each price by a basis point, refit,
+        and the largest segment move per basis point is the reported
+        amplification, to the first order SR3's weights are taken at."""
+        dates = tuple(d for d, _ in meetings)
+        base = np.array(step_fit.curve.segment_rates)
+        worst = 0.0
+        for index in range(len(strip)):
+            label, start, end, symbol, price = strip[index]
+            bumped = (*strip[:index], (label, start, end, symbol, price - 0.01), *strip[index + 1 :])
+            fit = fit_fomc_step_curve(AS_OF, dates, bumped, strict=False)
+            moved = np.abs(np.array(fit.curve.segment_rates) - base) * 1e4
+            worst = max(worst, float(moved.max()))
+        reported = step_fit.evidence.fields["segment_amplification_bp_per_bp"]
+        assert worst == pytest.approx(reported, rel=1e-3)
+
+
+class TestFOMCStepFitAmplificationBound:
+    """Where ``MAX_SEGMENT_AMPLIFICATION`` falls: one day against two.
+
+    ``as_of`` Thursday 2026-01-29, one meeting, SR1 February and SR1 March.
+    March is wholly after the meeting and pins the second segment alone;
+    February pins the first only through the days before the meeting. With
+    the meeting on Monday 2 February that is one day -- Sunday the 1st, on
+    Friday's rate -- of 28, so a quote moves the first segment 28 times
+    over; on Tuesday the 3rd it is two days, and 14 times.
+    """
+
+    AS_OF = date(2026, 1, 29)
+    MONTHS = (
+        ("SR1-Feb26", date(2026, 2, 1), date(2026, 3, 1)),
+        ("SR1-Mar26", date(2026, 3, 1), date(2026, 4, 1)),
+    )
+
+    def _strip(self, meeting: date, *, february_bump_bp: float = 0.0):
+        def rate(day: date) -> float:
+            return 0.0365 if day < meeting else 0.0340
+
+        return tuple(
+            (
+                label,
+                start,
+                end,
+                "SR1",
+                _cme_price("SR1", start, end, rate)
+                - (february_bump_bp / 100.0 if label == "SR1-Feb26" else 0.0),
+            )
+            for label, start, end in self.MONTHS
+        )
+
+    def test_the_bound_sits_between_one_day_of_a_month_and_two(self):
+        one_day = float(np.abs(_amplification([[1, 27], [0, 31]], [28, 31])).max())
+        two_days = float(np.abs(_amplification([[2, 26], [0, 31]], [28, 31])).max())
+        assert (one_day, two_days) == pytest.approx((28.0, 14.0))
+        assert two_days < MAX_SEGMENT_AMPLIFICATION < one_day
+
+    def test_one_day_of_a_month_is_refused(self):
+        monday = date(2026, 2, 2)
+        with pytest.raises(UnderdeterminedCurveError) as excinfo:
+            fit_fomc_step_curve(self.AS_OF, (monday,), self._strip(monday))
+        message = str(excinfo.value)
+        assert "28.0 bp" in message
+        assert "2026-01-29 to 2026-02-02" in message
+        assert "2026-02-02 onwards" not in message
+
+    def test_two_days_fit_and_report_it(self):
+        tuesday = date(2026, 2, 3)
+        fit = fit_fomc_step_curve(self.AS_OF, (tuesday,), self._strip(tuesday))
+        assert fit.evidence.fields["segment_amplification_bp_per_bp"] == pytest.approx(14.0)
+        bumped = fit_fomc_step_curve(
+            self.AS_OF, (tuesday,), self._strip(tuesday, february_bump_bp=1.0)
+        )
+        first_move = (bumped.curve.segment_rates[0] - fit.curve.segment_rates[0]) * 1e4
+        assert first_move == pytest.approx(14.0, abs=1e-6)
 
 
 class TestFOMCStepFitPinsAFixedLeadingSegment:
@@ -961,22 +1159,28 @@ class TestFOMCStepFitPinsAFixedLeadingSegment:
             "rate": self.ON_THE_DAY,
         }
 
-    def test_without_that_fixing_the_path_forecasts_the_same_day(self):
-        """The other side of the convention on ``as_of``, and the same path."""
-        fit = fit_fomc_step_curve(
-            self.DECISION_DAY,
-            self.MEETING,
-            self._strip(self._decision_day_rate),
-            fixings=_sofr_snapshot(
+    def test_without_that_fixing_the_one_day_forecast_is_too_weak_to_fit(self):
+        """The other side of the convention on ``as_of``. Without the
+        fixing the path forecasts the decision day, but only one day of SR1
+        January's 31 prices it, so a basis point on January moves it by 31
+        and the implied move at the meeting with it. The amplification bound
+        refuses that and names the fixing that pins it."""
+        with pytest.raises(UnderdeterminedCurveError) as excinfo:
+            fit_fomc_step_curve(
                 self.DECISION_DAY,
-                date(2025, 12, 20),
-                self.DECISION_DAY - timedelta(days=1),
-                self._decision_day_rate,
-            ),
-        )
-        assert fit.curve.segment_rates == pytest.approx((self.ON_THE_DAY, self.AFTER), abs=1e-10)
-        assert fit.evidence.fields["leading_segment_fixing"] is None
-        assert fit.evidence.fields["forecast_days_on_as_of"]["SR1-Jan26"] == 1
+                self.MEETING,
+                self._strip(self._decision_day_rate),
+                fixings=_sofr_snapshot(
+                    self.DECISION_DAY,
+                    date(2025, 12, 20),
+                    self.DECISION_DAY - timedelta(days=1),
+                    self._decision_day_rate,
+                ),
+            )
+        message = str(excinfo.value)
+        assert "31.0 bp" in message
+        assert "'2026-01-28 to 2026-01-29': 31.0" in message
+        assert "fixing dated 2026-01-28" in message
 
     def test_a_weekend_as_of_pins_the_first_segment_to_fridays_fixing(self):
         saturday, monday = date(2026, 1, 24), date(2026, 1, 26)

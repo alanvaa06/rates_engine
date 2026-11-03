@@ -768,6 +768,15 @@ def fit_fomc_step_curve(
     ``strict`` with a move of +1172 bp. The strip's contract-by-segment
     weights, from its days still to come, must have full column rank.
 
+    **And pinned firmly enough that a quote's noise does not set it.** Full
+    rank still admits a segment that a single day of one contract prices
+    on its own: on the review's strip, lowering one quarter by 0.15 bp,
+    less than half its tick, moved the first segment by 2166 bp and passed
+    ``strict``. The most one basis point of any quote can move any
+    segment is measured, refused above
+    :data:`MAX_SEGMENT_AMPLIFICATION`, and recorded otherwise as
+    ``segment_amplification_bp_per_bp`` in the evidence.
+
     **A first segment that is all fixing is pinned to it.** On a decision
     day, with the meeting effective tomorrow, the first segment is
     ``as_of`` alone; on a weekend before a Monday meeting it is days that
@@ -799,14 +808,17 @@ def fit_fomc_step_curve(
     Returns:
         The :class:`FOMCStepFit`. Its evidence records how many calendar days
         of each contract were priced from fixings, how many rest on a
-        forecast of the ``as_of`` fixing, and the fixing a first segment was
-        pinned to, if one was.
+        forecast of the ``as_of`` fixing, the fixing a first segment was
+        pinned to, if one was, and the most a basis point of one quote moves
+        one segment.
 
     Raises:
         UnderdeterminedCurveError: Fewer contracts than segments to fit, a
             meeting on or before ``as_of``, a segment no contract prices a
-            day of, or segments the strip prices only in combinations it
-            cannot separate -- named in the message.
+            day of, segments the strip prices only in combinations it
+            cannot separate, or segments a quote moves by more than
+            :data:`MAX_SEGMENT_AMPLIFICATION` bp per bp -- named in the
+            message.
         UnsupportedConventionError: A contract is neither SR1 nor SR3.
         ImplausibleInputError: A price or a fixing is NaN or infinite.
         MissingFixingError: A contract covers a business day before ``as_of``
@@ -875,7 +887,7 @@ def fit_fomc_step_curve(
             + (", less the stub, which is its fixing" if head else "")
             + "). Extend the strip or drop the meetings it does not reach."
         )
-    _require_every_segment_identified(
+    amplification = _require_every_segment_identified(
         as_of, meeting_dates, priced, first_free=len(head), leading=leading
     )
 
@@ -925,6 +937,7 @@ def fit_fomc_step_curve(
             "residuals_bp": residuals,
             "max_residual_bp": worst,
             "implied_moves_bp": moves,
+            "segment_amplification_bp_per_bp": amplification,
             "term_rate_caveat": TERM_RATE_CAVEAT,
             "convexity_adjustment_applied": False,
             "settlement_rules": {
@@ -1023,6 +1036,25 @@ counts. A segment moved less than this by every such direction is pinned
 for any purpose a price quoted to a hundredth of a basis point can serve.
 """
 
+MAX_SEGMENT_AMPLIFICATION = 25.0
+"""Basis points a segment may move per basis point of one quote, at most.
+
+A strip of full rank can still pin a segment only through a day or two of
+a contract that mostly prices others, and then the fit hands that
+segment whatever error the quote carries, magnified. A segment that a
+whole month prices on its own moves one for one with that month's
+price; one that only a single day of a 28-day month prices on its own
+moves 28 for one, a single day of a quarter 91 for one, and the error
+chains into every segment priced through the same contracts. At 25, a
+price rounded to SR3's half-basis-point tick -- off by a quarter of a
+basis point at most -- moves a segment by up to 6.25 bp, and a whole tick
+by 12.5. The bound falls between one day of a month, refused at 28 to 31,
+and two, which pass at 14 to 15.5. The fixture strip in the tests, nine
+contracts against four meetings, measures 0.996; the strip in Alan
+Vazquez's PR #15 round-3 review, where 0.15 bp on one quote moved the
+first segment by 2166 bp and passed ``strict``, measures 14,524.
+"""
+
 
 def _require_every_segment_identified(
     as_of: date,
@@ -1031,8 +1063,8 @@ def _require_every_segment_identified(
     *,
     first_free: int,
     leading: date | None,
-) -> None:
-    """Refuse a path whose free segments the strip does not determine one by one.
+) -> float:
+    """Refuse a path whose free segments the strip does not determine one by one, or well.
 
     Counting contracts is not enough: one whose period is wholly fixed pins
     nothing, and a meeting beyond the strip's last day leaves the segment
@@ -1055,6 +1087,21 @@ def _require_every_segment_identified(
     singular value at 1e-20 of the largest. The least well separated strip
     in the tests, where one day of one quarter tells a segment apart, keeps
     3.4e-3, and a full year of SR1 and SR3 against eight meetings keeps 0.21.
+
+    Full rank says each segment is determined, not how firmly: that 3.4e-3
+    strip has full rank and is refused below. Dividing each row by the
+    contract's whole period, fixed days included, gives what a basis point
+    of each segment does to each contract's rate; the least-squares fit maps
+    a quote error back into the segments through the pseudo-inverse of that,
+    so its largest entry is the most any one quote can move any one segment,
+    in bp per bp. Above :data:`MAX_SEGMENT_AMPLIFICATION` the strip is
+    refused, naming the segments that move more than the bound and the
+    quote that moves one most. Dividing by the days the path prices instead
+    would make a contract mostly fixed look more sensitive than its price
+    is, and understate what its error does.
+
+    Returns:
+        That largest entry, for the evidence.
     """
     live = [p for p in priced if p.priced_by_path]
     segments = len(meeting_dates) + 1
@@ -1078,18 +1125,18 @@ def _require_every_segment_identified(
             if day not in contract.fixed:
                 weights[row, bisect_right(meeting_dates, day)] += count
     weights = weights[:, first_free:]
+    pin_hint = (
+        ""
+        if leading is None
+        else f" The first segment holds no business day after as_of: its rate is the {SOFR.name} "
+        f"fixing dated {leading.isoformat()}, and passing it in fixings= pins it."
+    )
     idle = [names[first_free + j] for j in range(free) if not weights[:, j].any()]
     if idle:
-        hint = ""
-        if leading is not None and names[0] in idle:
-            hint = (
-                f" The first segment holds no business day after as_of: its rate is the {SOFR.name} "
-                f"fixing dated {leading.isoformat()}, and passing it in fixings= pins it."
-            )
         raise UnderdeterminedCurveError(
             f"no contract prices a day in the segments {idle}, so nothing pins their rate. "
             "Drop the meetings the strip does not reach, or add a contract that covers them."
-            + hint
+            + (pin_hint if names[0] in idle else "")
         )
     rank = int(np.linalg.matrix_rank(weights))
     if rank < free:
@@ -1108,3 +1155,25 @@ def _require_every_segment_identified(
             "prices one of them on its own -- an SR1 for a month between two meetings -- or "
             "drop a meeting."
         )
+    periods = np.array([float(contract.days) for contract in live])
+    amplification = np.abs(np.linalg.pinv(weights / periods[:, None]))
+    worst = float(amplification.max())
+    if worst > MAX_SEGMENT_AMPLIFICATION:
+        by_segment = amplification.max(axis=1)
+        weak = {
+            names[first_free + j]: round(float(by_segment[j]), 1)
+            for j in range(free)
+            if by_segment[j] > MAX_SEGMENT_AMPLIFICATION
+        }
+        segment, quote = np.unravel_index(int(amplification.argmax()), amplification.shape)
+        raise UnderdeterminedCurveError(
+            "the strip pins every segment, but some only through a few days of contracts "
+            f"that mostly price others: a 1 bp change in {live[int(quote)].label!r} moves "
+            f"{names[first_free + int(segment)]!r} by up to {worst:.1f} bp, above the bound "
+            f"of {MAX_SEGMENT_AMPLIFICATION} bp per bp, so quote noise and not the market "
+            f"would set those rates. Bp per bp of quote, by segment: {weak}. Add a contract "
+            "that prices those segments on its own -- an SR1 for a month between two "
+            "meetings -- or drop a meeting."
+            + (pin_hint if names[0] in weak else "")
+        )
+    return worst
