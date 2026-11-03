@@ -123,10 +123,15 @@ hedge's tolerance of a gap made of closed days lets through.
   2030, the June IMM date, rolled to the 20th) is tolerated and listed in
   the evidence field `coverage_tolerated_gaps`; a real gap's message names
   `swap_start=`/`swap_end=` and `require_full_coverage`. `strip_hedge`
-  checks a swap that has started from `as_of`, and a `RealizedStubNode`
-  covers `as_of` to its end, so such a swap hedges under the default
-  `require_full_coverage`; the evidence lists the stub under
-  `coverage_realised_stub`. A swaption expiring on the 30th is refused.
+  checks a swap that has started from `as_of`, and for such a swap, and
+  only for one, a `RealizedStubNode` covers `as_of` to its end, so it
+  hedges under the default `require_full_coverage`; the evidence lists the
+  stub under `coverage_realised_stub`. A swap starting on or after `as_of`
+  gets nothing from the stub, which no quote moves: its days before the
+  first contract are a gap, as in 0.3.0. A span that no contract overlaps
+  is refused with `IncompleteStripError` rather than hedged with no
+  contracts, unless `require_full_coverage=False`. A swaption expiring on
+  the 30th is refused.
   Nothing moves when both dates are business days.
 - **A schedule the roll convention leaves with no accrual period raises
   `ConventionError` when the instrument is built.** Friday 2026-05-29 to
@@ -182,8 +187,9 @@ hedge's tolerance of a gap made of closed days lets through.
   evidence's `fixings_dated_as_of` (`"source": "curve"`) and is not a
   degradation, so a spot IRS priced before the print on an observed curve
   reads `observed`. A snapshot with no series named after the index is
-  refused even for that fixing, with `MissingFixingError` naming the
-  series, as for caps. Term SOFR fixes two SIFMA business days before its
+  refused even for that fixing, and for an overnight period opening on
+  `as_of`, whose first day is otherwise forecast the same way, with
+  `MissingFixingError` naming the series, as for caps. Term SOFR fixes two SIFMA business days before its
   period (the ARRC convention, as for caplets below); TIIE 28 is read on
   its period start, a lag still to be verified. Without the fixings it
   needs, a trade raises `MissingFixingError` (exit code 1) naming the
@@ -197,7 +203,16 @@ hedge's tolerance of a gap made of closed days lets through.
   refusal names `fixings.SOFR.values`. A curve entry that needs history is
   refused by its path: `curve.futures[i]` (give the rest of a started
   contract as `curve.stub`) or `curve.par_swaps[i]` (a par quote starts on
-  or after `as_of`, and the fixings block cannot help it).
+  or after `as_of`, and the fixings block cannot help it). Every fixing the
+  pricing reads -- each day an OIS period compounds, the term fixing an IRS
+  or FRA period pays, the fixing a caplet pays on -- is held to
+  `MAX_PLAUSIBLE_OVERNIGHT_FIXING` (20%) by
+  `pricing.projection.require_plausible_fixing`, which raises
+  `ImplausibleInputError` naming the series, the date and the value, so a
+  `MarketSnapshot` of SOFR at 0.43 or 4.30 is refused by `pv`, every risk
+  measure and `strip_hedge` as by the CLI. A row the pricing does not read
+  is not checked, and `Series` is not banded: it also holds yields and
+  index levels, `SOFRINDEX` above one.
 - **`key_rate_duration` is in years.** It is `KR DV01 / (PV x 1bp)`, and its
   `total` equals `effective_duration`; it was reported per basis point,
   1e4 smaller.
@@ -207,8 +222,9 @@ hedge's tolerance of a gap made of closed days lets through.
   day on or before `as_of`: a snapshot without it is then refused with
   `MissingFixingError`, naming the contracts and the day, and so is one
   missing a business day before `as_of`. A fixing dated `as_of` is read if
-  present and otherwise forecast, recorded in `forecast_days_on_as_of` with
-  no degradation. A snapshot without the series, held for something else
+  present and otherwise forecast, with no degradation; the evidence's
+  `fixings_dated_as_of` gives the days of each contract that rest on the
+  forecast, 0 for one that read the fixing. A snapshot without the series, held for something else
   (Treasury yields, say), does not refuse a strip that needs no fixings.
 - **A forward that starts before the curve's valuation date is refused.**
   `DiscountCurve.forward` raises `MissingFixingError` when `start` is before
@@ -544,7 +560,18 @@ hedge's tolerance of a gap made of closed days lets through.
   segments: the contract-by-segment weights, from unfixed days, must have
   full column rank, and the message names the segments it cannot separate
   (five SR3s whose last two sit in one segment passed `strict` with a
-  +1172 bp move). A first segment with no business day after `as_of` (the
+  +1172 bp move). Nor may a quote move a segment by more than
+  `MAX_SEGMENT_AMPLIFICATION`, 25 bp per bp: the largest entry of the
+  pseudo-inverse of those weights, each row divided by the contract's whole
+  period. Above it the fit raises `UnderdeterminedCurveError` naming the
+  segments, the quote that moves one most and the remedy; below it the
+  figure is in the evidence as `segment_amplification_bp_per_bp`. Meetings
+  in January, March, April and June against SR3 Z5, H6, M6, U6 and SR1
+  April priced the April-June segment on its own only through 17 June, in
+  M6, so M6 0.15 bp lower, under half a tick, put the first segment at
+  2530.85 bp under `strict`; that strip measures 14,524 bp per bp. A segment priced on its
+  own by one day of an SR1 month measures about 30 and is refused. A first
+  segment with no business day after `as_of` (the
   decision day, or a weekend before a Monday meeting) is pinned to its
   fixing when the snapshot holds it (`leading_segment_fixing` in the
   evidence), and the strip fits the rest.
@@ -691,7 +718,9 @@ hedge's tolerance of a gap made of closed days lets through.
   on a cap), and the unresolved convention `tiie_28_fixing_lag`.
   `tiie_28_fixing_lag` is stamped on TIIE 28 curves and instruments, not
   on TIIE de Fondeo ones; `strict_conventions` on a TIIE 28 curve
-  describes it.
+  describes it. `compare_benchmarks` reports the conventions either curve
+  rests on, in `UNRESOLVED_MXN` order whichever curve is passed first, and
+  `BenchmarkComparison.unresolved_conventions` gives the same names.
 - `fixings=` on `risk.bumps.repriced`, every measure in
   `risk.sensitivities`, and `strip_hedge`; `HedgeResult.fixings`;
   `pricing.linear.discounted_value_with_history`;
@@ -702,9 +731,10 @@ hedge's tolerance of a gap made of closed days lets through.
   `iterations`, `max_iterations`, `iteration_tolerance`.
   `DiscountCurve.with_factor`.
 - `fit_fomc_step_curve(fixings=, calendar=)`, `fixings` a `MarketSnapshot`
-  with a `"SOFR"` series, and its evidence `forecast_days_on_as_of` and
-  `leading_segment_fixing`; `calendar=` on `FOMCStepCurve.compounded`,
-  `.averaged` and `.discount_curve`.
+  with a `"SOFR"` series, and its evidence `fixings_dated_as_of`,
+  `leading_segment_fixing` and `segment_amplification_bp_per_bp`;
+  `curves.parametric.MAX_SEGMENT_AMPLIFICATION`; `calendar=` on
+  `FOMCStepCurve.compounded`, `.averaged` and `.discount_curve`.
 - `all_views(par_start=, par_payment_lag_days=)`; `CurveView.start`,
   `CurveView.payment_lag_days`. `models.convexity.MAX_PLAUSIBLE_SIGMA`.
 - `pricing.options.option_value`, `PeriodStatus` (`paid`, `fixed`,
@@ -723,6 +753,8 @@ hedge's tolerance of a gap made of closed days lets through.
 - `StructureQuote.basis_bp`, `.r_domestic_effective`, `.carried()`;
   `StructureQuote` accepts a lognormal `Volatility`;
   `hedging.fx_structures.MIN_PLAUSIBLE_FX_VOLATILITY`.
+- `pricing.projection.MAX_PLAUSIBLE_OVERNIGHT_FIXING` and
+  `require_plausible_fixing`.
 - `pricing.fx_forward.MAX_PLAUSIBLE_RATE`, `require_plausible_rate`
   (`limit=`, `limit_name=`, `convention=` for a narrower band),
   `require_plausible_basis`; `forward_from_curves(inputs=...)`;
@@ -740,15 +772,26 @@ hedge's tolerance of a gap made of closed days lets through.
   `calibration_nodes` applies to each `par_swaps` entry and `fx_inputs` to
   the `fx` block, for a caller that skips `require_config`.
 - The config's `fixings` block (`fixings.SOFR.values`, `source`,
-  `data_quality`) for `price` and `hedge`, checked by path. A date that is
-  not ISO 8601 or falls on a SIFMA closed day, a date given twice, a
-  non-numeric rate or an unknown `data_quality` is a `ConfigurationError`.
-  A rate beyond `MAX_PLAUSIBLE_OVERNIGHT_FIXING` (20%), or a latest fixing
-  more than `FIXING_CURVE_FACTOR` (4) times and more than
-  `FIXING_CURVE_GAP` (50 bp) off the curve's overnight rate, is an
-  `ImplausibleInputError`: 0.43 for 0.043 priced a seasoned payer at
-  14,200,798.33 instead of 255,311.41, and 0.05 meaning 0.05% read as 5%.
-  Also `app.builders.fixings_snapshot(curve=)` and the three constants.
+  `data_quality`, `check_against_curve`) for `price` and `hedge`, checked
+  by path. A date that is not ISO 8601 or falls on a SIFMA closed day, a
+  date given twice, a non-numeric rate, an unknown `data_quality` or a
+  `check_against_curve` that is not a JSON boolean is a
+  `ConfigurationError`. A rate beyond `MAX_PLAUSIBLE_OVERNIGHT_FIXING`
+  (20%) is an `ImplausibleInputError`: 0.43 for 0.043 priced a seasoned
+  payer at 14,200,798.33 instead of 255,311.41. So is the latest fixing the
+  swap reads among those dated in the `FIXING_CHECK_WINDOW_DAYS` (5)
+  business days before `as_of`, when it is more than `FIXING_CURVE_FACTOR`
+  (4) times and more than `FIXING_CURVE_GAP` (50 bp) off the curve's
+  overnight rate: 0.05 meaning 0.05% read as 5%. A row the swap does not
+  read, or an older one, is not compared, so a swap starting after `as_of`
+  is held to the band alone. The comparison cannot tell a unit from a market
+  that moved -- the Monday after the cut of 15 March 2020 read Friday's
+  1.10% against a 0.25% curve, 4.4 times -- so
+  `fixings.<SERIES>.check_against_curve: false` waives it; the refusal
+  names that key and gives the ratio to one decimal. The cross-check is
+  the CLI's and the MCP server's alone. Also
+  `app.builders.fixings_snapshot(curve=, swap=)`, `FIXING_CURVE_FACTOR`,
+  `FIXING_CURVE_GAP` and `FIXING_CHECK_WINDOW_DAYS`.
 - `describe` lists `FEDERAL_RESERVE` among `calendars`.
 - The sdist now carries `tests/conftest.py`, `tests/fixtures/`, `scripts/`,
   `AGENTS.md`, `CHANGELOG.md`, `llms.txt` and `docs/**/*.md` (new
