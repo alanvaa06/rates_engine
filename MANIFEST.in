@@ -1,0 +1,24 @@
+# What the sdist carries beyond the package. conda-forge and the
+# distributions build from the sdist and run its tests, and setuptools picks
+# up tests/test_*.py on its own but not conftest.py or tests/fixtures/ — so
+# without this file the suite fails at collection, before a single test runs.
+# CI's package job builds the sdist and runs the suite from it, against the
+# wheel, so a file missing here is a red check rather than a downstream bug.
+graft tests
+
+# Read by the tests, not by the package: AGENTS.md (the module map in
+# test_layering.py), docs/ERRORS.md (test_errors_contract.py) and
+# scripts/write_example_config.py (test_readme_quickstart.py). README.md,
+# LICENSE and pyproject.toml are in the sdist already.
+include AGENTS.md CHANGELOG.md llms.txt
+recursive-include docs *.md
+graft scripts
+
+# Whatever a local run leaves in those trees: bytecode (which empties every
+# __pycache__, and an empty directory does not reach the sdist), and the
+# example database Hypothesis writes to the working directory when the suite
+# is run from inside tests/. The other caches live at the repository root,
+# which is never grafted. On a clean checkout setuptools notes that these
+# lines matched nothing; that note is not a warning about the package.
+global-exclude *.py[cod]
+prune tests/.hypothesis

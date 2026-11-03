@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build:
-    name: Build the distribution
+    name: Build and test the distribution
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,8 +19,12 @@ jobs:
           python-version: "3.11"
       - name: Build
         run: |
-          python -m pip install --upgrade pip build
+          python -m pip install --upgrade pip build twine
           python -m build
+      # PyPI rejects an upload whose metadata it cannot render, and by then
+      # TestPyPI has already taken the same files.
+      - name: The metadata PyPI will render is valid
+        run: twine check --strict dist/*
       # A sdist or wheel that does not install is found here rather than by
       # the first person to run pip install.
       - name: The wheel installs and the console script works
@@ -29,6 +33,40 @@ jobs:
           /tmp/check/bin/pip install dist/*.whl
           /tmp/check/bin/python -c "import rates_engine; print(rates_engine.__version__)"
           /tmp/check/bin/rateng describe --json > /dev/null
+      # The tag names the release, pyproject.toml names the files and
+      # rates_engine.__version__ is what a user's code sees; nothing else makes
+      # them agree, and a version on PyPI can never be uploaded again. The
+      # package's number is read from the wheel just installed, so it is the
+      # one that ships. A run dispatched by hand from a branch has no tag to
+      # compare and stops here: dispatch it from the tag instead.
+      - name: The tag, pyproject.toml and the package agree on the version
+        run: |
+          if [ "$GITHUB_REF_TYPE" != "tag" ]; then
+            echo "::error::a release is built from a tag, and this run is on ${GITHUB_REF_TYPE} ${GITHUB_REF_NAME}"
+            exit 1
+          fi
+          tag="${GITHUB_REF_NAME#v}"
+          project="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          package="$(/tmp/check/bin/python -c 'import rates_engine; print(rates_engine.__version__)')"
+          echo "tag ${GITHUB_REF_NAME}, pyproject.toml ${project}, rates_engine.__version__ ${package}"
+          if [ "$tag" != "$project" ] || [ "$tag" != "$package" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match pyproject.toml (${project}) and rates_engine.__version__ (${package})"
+            exit 1
+          fi
+      # CI ran on the commit's branch, not necessarily on this commit, and a
+      # tag can be pushed on a commit whose CI is red. So the suite runs once
+      # more, against the wheel that is about to be uploaded and from the
+      # unpacked sdist, exactly as CI's package job does. A failure here stops
+      # the run before either index sees a file.
+      - name: The suite passes from the sdist, against the wheel
+        run: |
+          export PATH="/tmp/check/bin:$PATH"
+          pip install "$(ls dist/*.whl)[dev,config]"
+          mkdir /tmp/sdist
+          tar -xzf dist/*.tar.gz -C /tmp/sdist
+          cd /tmp/sdist/*/
+          python -c "import rates_engine, sys; sys.exit(0 if rates_engine.__file__.startswith('/tmp/check/') else 'not the wheel: ' + rates_engine.__file__)"
+          pytest -q
       - uses: actions/upload-artifact@v4
         with:
           name: dist
@@ -59,7 +97,10 @@ jobs:
     runs-on: ubuntu-latest
     # A protected environment. This job waits for a human to release it, which
     # is the approval gate PRD-001's definition of done asks for: TestPyPI is
-    # automatic on a tag, PyPI is not.
+    # automatic on a tag, PyPI is not. The protection lives in the repository
+    # settings, not in this file: an environment that does not exist yet is
+    # created on first use with no reviewers, and this job then publishes
+    # unattended. docs/RELEASING.md lists the one-time setup that prevents it.
     environment: pypi
     permissions:
       id-token: write

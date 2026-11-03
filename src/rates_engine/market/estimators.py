@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
-from rates_engine.core.errors import InsufficientDataError
+from rates_engine.core.errors import InsufficientDataError, MissingFixingError
 from rates_engine.core.evidence import Evidence
 from rates_engine.core.results import EngineResult
 from rates_engine.market.snapshot import MarketSnapshot
@@ -81,7 +81,8 @@ def realized_sofr_sigma(
         snapshot: Snapshot holding the fixings.
         window: Number of daily changes to use.
         series_id: Overnight series to estimate from.
-        as_of: Last date considered. Defaults to the snapshot's own.
+        as_of: Last date considered, on or before the snapshot's own, which
+            is the default.
 
     Returns:
         The :class:`SigmaEstimate`.
@@ -90,8 +91,18 @@ def realized_sofr_sigma(
         InsufficientDataError: Fewer than
             :data:`MIN_REALIZED_OBSERVATIONS` changes are available. A
             volatility from thirty observations is a number, not an estimate.
-        MissingFixingError: The snapshot has no such series.
+        MissingFixingError: The snapshot has no such series, or ``as_of``
+            is after the snapshot's valuation date.
     """
+    if as_of is not None and as_of > snapshot.as_of:
+        # The snapshot serves nothing after its own date, so a later as_of
+        # would be quietly ignored; on the snapshot's old terms it read the
+        # future instead. Neither is what the caller asked for.
+        raise MissingFixingError(
+            f"realised sigma as of {as_of} needs fixings after the snapshot's valuation "
+            f"date {snapshot.as_of}, and a snapshot serves nothing dated after its as_of. "
+            "Build the snapshot as of the date you want sigma at"
+        )
     series = snapshot.require(series_id)
     cutoff = as_of or snapshot.as_of
     usable = [(d, v) for d, v in zip(series.dates, series.values, strict=True) if d <= cutoff]

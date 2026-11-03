@@ -67,11 +67,12 @@ class TestTheFixedHolidays:
             date(2026, 5, 1),    # Labour Day
             date(2026, 9, 16),   # National Day
             date(2026, 11, 2),   # All Souls
-            date(2026, 12, 12),  # Our Lady of Guadalupe
+            date(2025, 12, 12),  # Our Lady of Guadalupe (a Saturday in 2026)
             date(2026, 12, 25),  # Christmas
         ],
     )
     def test_it_is_a_holiday(self, day):
+        assert day.weekday() < 5
         assert day in BMV.holidays(day.year)
         assert not BMV.is_business_day(day)
 
@@ -83,11 +84,28 @@ class TestTheFixedHolidays:
         assert date(2026, 4, 3) in BMV.holidays(2026)
         assert date(2026, 4, 2) not in SIFMA_US.holidays(2026)
 
-    def test_there_are_thirteen_rules_at_most_twelve_dates_in_a_year(self):
-        """Thirteen rules, but inauguration fires once every six years, so an
-        ordinary year has twelve dates."""
-        assert len(BMV.holidays(2026)) == 11
-        assert len(BMV.holidays(2024)) == 12
+    def test_a_year_lists_the_weekdays_its_rules_close(self):
+        """Eleven dates in an ordinary year, twelve in an inauguration year,
+        and ``holidays(year)`` keeps the ones that fall on a weekday, as
+        SIFMA's does: a fixed-date holiday on a weekend is not observed, so
+        it closes nothing. Worked by hand: 12 December 2026 is a Saturday;
+        in 2024, 2 November is; in 2022, 1 January is a Saturday and 1 May
+        and 25 December are Sundays."""
+        assert len(BMV.holidays(2026)) == 10
+        assert len(BMV.holidays(2024)) == 11
+        assert len(BMV.holidays(2022)) == 8
+        assert date(2026, 12, 12) not in BMV.holidays(2026)
+        assert date(2024, 11, 2) not in BMV.holidays(2024)
+
+    def test_every_listed_holiday_closes_a_weekday(self):
+        """Review finding (round 3): until v0.4 BMV listed weekend dates such
+        as Saturday 16 September 2023 and Saturday 12 December 2026, while
+        SIFMA_US lists weekday closures only, so ``holidays(year)`` meant two
+        different things on the two calendars. ``is_business_day`` did not
+        change: a weekend was never a business day."""
+        for year in range(1990, 2061):
+            weekend = [day for day in BMV.holidays(year) if day.weekday() >= 5]
+            assert weekend == [], year
 
 
 class TestTheMondayObservanceReform:
@@ -95,9 +113,12 @@ class TestTheMondayObservanceReform:
 
     @pytest.mark.parametrize(
         "year,expected",
-        [(2004, date(2004, 2, 5)), (2005, date(2005, 2, 5))],
+        # 5 February 2005 was a Saturday, which closes nothing and is not
+        # listed; 2003 is the next year back with the 5th on a weekday.
+        [(2003, date(2003, 2, 5)), (2004, date(2004, 2, 5))],
     )
     def test_constitution_day_is_fixed_through_2005(self, year, expected):
+        assert expected.weekday() < 5
         assert expected in BMV.holidays(year)
 
     @pytest.mark.parametrize(
@@ -118,7 +139,10 @@ class TestTheMondayObservanceReform:
         assert third.weekday() == 0
 
     def test_revolution_day_is_fixed_through_2005(self):
-        assert date(2005, 11, 20) in BMV.holidays(2005)
+        # 20 November fell on a Sunday in 2005 and a Saturday in 2004, so
+        # the last year the fixed date closed a weekday was 2003 (Thursday).
+        assert date(2003, 11, 20).weekday() == 3
+        assert date(2003, 11, 20) in BMV.holidays(2003)
 
     def test_revolution_day_is_the_third_monday_from_2006(self):
         third = date(2026, 11, 16)
@@ -126,8 +150,17 @@ class TestTheMondayObservanceReform:
         assert third.weekday() == 0
 
     def test_the_boundary_year_is_2006_not_2005(self):
-        assert date(2005, 2, 5) in BMV.holidays(2005)
-        assert date(2006, 2, 5) not in BMV.holidays(2006)
+        """Pinned on weekdays the two rules disagree about. In 2005 the
+        Monday rule would have closed Monday 7 February and Monday 21
+        November; the fixed dates, Saturday 5 February and Sunday 20
+        November, closed nothing, so both Mondays were ordinary days. In
+        2006 the Monday rule closes Monday 20 March, and the fixed date,
+        Tuesday 21 March, is open."""
+        assert BMV.is_business_day(date(2005, 2, 7))
+        assert BMV.is_business_day(date(2005, 11, 21))
+        assert date(2006, 2, 6) in BMV.holidays(2006)
+        assert not BMV.is_business_day(date(2006, 3, 20))
+        assert BMV.is_business_day(date(2006, 3, 21))
 
 
 class TestInaugurationDay:
@@ -149,23 +182,32 @@ class TestNoWeekendObservance:
     """The rule this calendar does *not* have, asserted so nobody adds one."""
 
     def test_a_saturday_holiday_is_not_moved_to_friday(self):
-        """1 January 2022 was a Saturday. SIFMA observes it on the Friday;
-        the BMV rules carry no such roll, so 31 December 2021 stays a
-        business day. Inventing an observance rule here would be the same
-        error as renaming the calendar."""
-        assert date(2022, 1, 1) in BMV.holidays(2022)
+        """1 January 2022 was a Saturday. The BMV rules carry no roll, so 31
+        December 2021 stays a business day. Inventing an observance rule here
+        would be the same error as renaming the calendar.
+
+        The Saturday itself is not listed either: it closes nothing, and
+        ``holidays(year)`` is the weekdays a calendar closes."""
         assert date(2022, 1, 1).weekday() == 5
+        assert date(2022, 1, 1) not in BMV.holidays(2022)
         assert date(2021, 12, 31) not in BMV.holidays(2021)
+        assert date(2021, 12, 31) not in BMV.holidays(2022)
         assert BMV.is_business_day(date(2021, 12, 31))
+        assert not BMV.is_business_day(date(2022, 1, 1))
+        assert BMV.is_business_day(date(2022, 1, 3))
 
     def test_sifma_does_roll_and_the_two_therefore_differ(self):
-        """SIFMA observes New Year 2022 on Friday 31 December 2021 — a date
-        that belongs to `holidays(2022)`, not `holidays(2021)`, which is the
-        boundary the base class has to handle. The BMV calendar has no such
-        rule, so the same Friday is an ordinary business day there."""
-        assert date(2021, 12, 31) in SIFMA_US.holidays(2022)
-        assert not SIFMA_US.is_business_day(date(2021, 12, 31))
-        assert BMV.is_business_day(date(2021, 12, 31))
+        """Christmas 2021 was a Saturday. SIFMA observes it on Friday 24
+        December -- FRED has no SOFR that day -- while the BMV calendar has
+        no roll, so the same Friday is an ordinary business day there.
+
+        This used to be New Year's Day 2022, on the belief that SIFMA closes
+        the Friday before a Saturday 1 January. It does not: SOFR was
+        published on 31 December 2021, and SIFMA_US no longer closes it."""
+        assert date(2021, 12, 25).weekday() == 5
+        assert date(2021, 12, 24) in SIFMA_US.holidays(2021)
+        assert not SIFMA_US.is_business_day(date(2021, 12, 24))
+        assert BMV.is_business_day(date(2021, 12, 24))
 
 
 class TestDerivedBehaviour:

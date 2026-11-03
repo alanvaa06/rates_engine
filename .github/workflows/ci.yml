@@ -94,6 +94,11 @@ jobs:
           - os: ubuntu-latest
             python-version: "3.13"
             label: "3.13"
+          # pyproject.toml classifies the package for 3.14, and a classifier
+          # nothing runs is a claim rather than a fact.
+          - os: ubuntu-latest
+            python-version: "3.14"
+            label: "3.14"
           # One Windows cell, not three. What differs on Windows here is the
           # filesystem and the console encoding, not the language, and this
           # package is developed on win32 — so the cell is load-bearing rather
@@ -116,6 +121,80 @@ jobs:
         # Fully offline: the FRED provider is stubbed and every number comes
         # from a versioned fixture.
         run: pytest -q --durations=10
+
+  minimum:
+    name: Tests (3.11, minimum dependencies)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # Every other job installs the newest numpy, pandas and scipy, so a
+      # floor that stopped being true — an API this package now uses that the
+      # oldest admitted release lacks, or a set of floors that cannot be
+      # installed together, which is what pandas>=2.2 with numpy>=2.0 was —
+      # passes all of them. This job installs each floor exactly. The pins are
+      # read from pyproject.toml rather than written here, so moving a floor
+      # moves the job with it; a dependency written as anything but `>=` stops
+      # the job rather than being guessed at.
+      - name: Pin every core dependency to its floor
+        run: |
+          python - <<'PY' > minimum.txt
+          import tomllib
+          from pathlib import Path
+
+          config = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+          for requirement in config["project"]["dependencies"]:
+              name, floor = requirement.split(">=")
+              print(f"{name}=={floor}")
+          PY
+          cat minimum.txt
+      # One resolver call with the pins as constraints, so pip has to find
+      # test tools that work with the old releases rather than upgrading past
+      # them.
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,config]" -c minimum.txt
+          pip list | grep -i -E "^(numpy|pandas|scipy) "
+      - name: Test
+        run: pytest -q
+
+  package:
+    name: Package (sdist and wheel)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # What PyPI receives, built the way release.yml builds it. Every other
+      # job installs the checkout in editable mode, which hides a file the
+      # sdist leaves out and a test that finds the repository through the
+      # installed package: the sdist once shipped the tests without
+      # conftest.py or the fixtures, and pytest stopped at collection.
+      - name: Build
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+      - name: The metadata PyPI will render is valid
+        run: twine check --strict dist/*
+      # The wheel goes into a venv of its own and the tests run from the
+      # unpacked sdist, which is how conda-forge and the distributions test a
+      # release. Nothing puts the checkout or the sdist's src/ on sys.path, so
+      # every test here ran against the installed wheel — and the first step
+      # proves it rather than assuming it.
+      - name: The suite passes from the sdist, against the wheel
+        run: |
+          python -m venv /tmp/wheel
+          export PATH="/tmp/wheel/bin:$PATH"
+          pip install "$(ls dist/*.whl)[dev,config]"
+          mkdir /tmp/sdist
+          tar -xzf dist/*.tar.gz -C /tmp/sdist
+          cd /tmp/sdist/*/
+          python -c "import rates_engine, sys; sys.exit(0 if rates_engine.__file__.startswith('/tmp/wheel/') else 'not the wheel: ' + rates_engine.__file__)"
+          pytest -q
 
   core:
     name: Core install (no extras)

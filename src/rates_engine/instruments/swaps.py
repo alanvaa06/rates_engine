@@ -93,6 +93,8 @@ class OISSwap:
 
     Raises:
         UnsupportedConventionError: ``index`` is not an overnight rate.
+        ConventionError: The roll convention leaves the schedule no accrual
+            period, which is refused here rather than at the first price.
     """
 
     effective: date
@@ -113,6 +115,9 @@ class OISSwap:
                 f"an OIS floats on an overnight rate; {self.index.name} is a "
                 f"{self.index.tenor.value} term rate. Use IRSwap for a term index."
             )
+        # Built now, so terms the schedule cannot serve are refused when the
+        # swap is written down, not by the first pv() that reaches for them.
+        _ = self.schedule
 
     @property
     def rate_index(self) -> RateIndex:
@@ -137,8 +142,15 @@ class OISSwap:
         what stretch of the curve a trade touches — the hedge coverage check,
         for one — does not have to know which attribute each product spells
         its dates with.
+
+        The dates are the schedule's, adjusted by the roll convention, not
+        the terms as written: ``effective`` Saturday 30 May 2026 starts
+        accruing on Friday the 29th, and the span says the 29th. Until v0.4
+        it returned ``effective`` and ``maturity`` unadjusted, so a hedge
+        coverage check could miss the Friday and a swaption could expire
+        after the swap it exercises into had begun.
         """
-        return self.effective, self.maturity
+        return self.schedule.accrual_start[0], self.schedule.accrual_end[-1]
 
     def with_terms(self, **changes: object) -> OISSwap:
         """A copy with some terms changed; the original is untouched.
@@ -227,6 +239,8 @@ class IRSwap:
         UnsupportedConventionError: The index is not a term rate in whole
             months (TIIE 28 accrues 28-day periods, which this schedule cannot
             generate), or its tenor disagrees with ``float_frequency_months``.
+        ConventionError: The roll convention leaves either leg's schedule no
+            accrual period, refused here rather than at the first price.
     """
 
     effective: date
@@ -264,6 +278,8 @@ class IRSwap:
         # hash alike. Changing one later with ``replace`` must change both.
         object.__setattr__(self, "index", index)
         object.__setattr__(self, "float_frequency_months", index.tenor.months)
+        # Both legs built now; see OISSwap.__post_init__.
+        _ = self.fixed_schedule, self.float_schedule
 
     @property
     def float_index(self) -> RateIndex:
@@ -296,8 +312,13 @@ class IRSwap:
 
     @property
     def span(self) -> tuple[date, date]:
-        """First accrual start and last accrual end, as a half-open interval."""
-        return self.effective, self.maturity
+        """First accrual start and last accrual end, as a half-open interval.
+
+        The schedule's adjusted dates, as for :attr:`OISSwap.span`. The two
+        legs share them: both start on the adjusted effective date and end on
+        the adjusted maturity, whatever their frequencies.
+        """
+        return self.fixed_schedule.accrual_start[0], self.fixed_schedule.accrual_end[-1]
 
     def with_terms(self, **changes: object) -> IRSwap:
         """A copy with some terms changed; see :meth:`OISSwap.with_terms`.

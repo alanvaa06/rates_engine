@@ -18,7 +18,10 @@ Run it from the repository root:
     python scripts/audit_acceptance.py 002        # just one
     python scripts/audit_acceptance.py --all      # including unstarted ones
 
-Exit code 0 when every criterion is covered, 1 when any is not.
+Exit code 0 when every criterion is covered and the suite passes; 1 when a
+criterion is uncovered or pytest exits non-zero — a failing test, a
+collection error, an empty run. A criterion is met by a passing test, not by
+a test that names it.
 """
 
 from __future__ import annotations
@@ -101,16 +104,18 @@ def coverage() -> dict[tuple[str, str], set[str]]:
     return found
 
 
-def run_suite() -> tuple[str, set[tuple[str, str]]]:
+def run_suite() -> tuple[str, set[tuple[str, str]], bool]:
     """Run the suite and collect which tests were skipped.
 
     Returns:
-        The summary line, and the ``(prd, criterion)`` pairs whose
-        third-party half was skipped.
+        The summary line; the ``(prd, criterion)`` pairs whose third-party
+        half was skipped; and whether pytest exited 0. The exit code rather
+        than the report's counts, because pytest also fails a run for
+        reasons no test case records, such as collecting nothing.
     """
     report = ROOT / ".audit-report.json"
     try:
-        subprocess.run(
+        done = subprocess.run(
             [sys.executable, "-m", "pytest", "-q", "--tb=no", "-rs",
              f"--junit-xml={report.with_suffix('.xml')}"],
             capture_output=True, text=True, cwd=ROOT, check=False,
@@ -132,13 +137,23 @@ def run_suite() -> tuple[str, set[tuple[str, str]]]:
                 continue
             text = (node.get("message") or "") + (node.text or "")
             skipped.update(REFERENCE.findall(text))
-        totals = tree.getroot().find("testsuite") or tree.getroot()
+        # Not `find(...) or root`: an Element's truth value is its number of
+        # children, deprecated since Python 3.12, and a suite element with
+        # no test cases under it would have been skipped for the root.
+        totals = tree.getroot().find("testsuite")
+        if totals is None:
+            totals = tree.getroot()
+        counts = {
+            key: int(totals.get(key, 0)) for key in ("tests", "skipped", "failures", "errors")
+        }
+        # JUnit's `tests` counts every case, so a failed or errored one has to
+        # come off it as well as a skipped one, or a red run reads as passed.
+        passed = counts["tests"] - counts["skipped"] - counts["failures"] - counts["errors"]
         summary = (
-            f"{int(totals.get('tests', 0)) - int(totals.get('skipped', 0))} passed, "
-            f"{totals.get('skipped', 0)} skipped, {totals.get('failures', 0)} failed, "
-            f"{totals.get('errors', 0)} errored"
+            f"{passed} passed, {counts['skipped']} skipped, {counts['failures']} failed, "
+            f"{counts['errors']} errored"
         )
-        return summary, skipped
+        return summary, skipped, done.returncode == 0
     finally:
         for leftover in (report, report.with_suffix(".xml")):
             leftover.unlink(missing_ok=True)
@@ -151,14 +166,15 @@ def main(argv: list[str] | None = None) -> int:
         argv: Optionally one PRD number, such as ``["002"]``, or ``["--all"]``.
 
     Returns:
-        ``0`` when every criterion is covered, ``1`` otherwise.
+        ``0`` when every criterion is covered and the suite passed, ``1``
+        otherwise.
     """
     arguments = sys.argv[1:] if argv is None else argv
     every = "--all" in arguments
     selected = next((a for a in arguments if not a.startswith("-")), None)
     documents, unstarted = prds(selected, every=every)
     covered = coverage()
-    summary, skipped = run_suite()
+    summary, skipped, green = run_suite()
 
     total = 0
     uncovered: list[str] = []
@@ -198,7 +214,12 @@ def main(argv: list[str] | None = None) -> int:
         )
     if uncovered:
         print(f"\nUNCOVERED: {', '.join(uncovered)}")
-    return 1 if uncovered else 0
+    if not green:
+        # The table above says which criteria a test names; it cannot say
+        # which of those tests failed. A red suite therefore fails the whole
+        # audit rather than being pinned on criteria by guesswork.
+        print(f"\nSUITE FAILED ({summary}): no criterion is met while it is red.")
+    return 1 if uncovered or not green else 0
 
 
 if __name__ == "__main__":  # pragma: no cover - script entry point

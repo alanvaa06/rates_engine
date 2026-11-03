@@ -1,8 +1,21 @@
 {
   "file": "sifma_holidays.csv",
   "generated_by": "tests/fixtures/generate.py",
-  "generated_at": "2026-09-16T23:27:11.825647+00:00",
+  "generated_at": "2026-10-22T16:31:48.509290+00:00",
   "seed": 20260916,
   "data_quality": "assumed",
-  "note": "Generated FROM rates_engine.conventions.calendar, so it cannot catch a wrong rule \u2014 it exists to be diffed against SIFMA's published calendar by a human. PRD-001 AC-1.2 marks that check [manual-check]; it has NOT been done, because this environment cannot reach sifma.org. The Saturday-observed-on-Friday rule is the specific line to confirm."
+  "data_quality_by_range": [
+    {
+      "from": "2022-01-01",
+      "to": "2026-10-14",
+      "data_quality": "observed"
+    },
+    {
+      "from": "2026-10-15",
+      "to": "2030-12-31",
+      "data_quality": "assumed"
+    }
+  ],
+  "criterion": "A range is 'observed' when SIFMA_US agrees, on every weekday in it, with the New York Fed's SOFR publication record: a business day exactly where SOFR was published. The record is FRED series SOFR, downloaded on 2026-10-15 for 2018-04-03 to 2026-10-14, and is pasted as a list of dates in tests/test_sifma_publication_record.py, which holds the calendar to it and ties SIFMA_US.VERIFIED_FROM and VERIFIED_THROUGH to its ends. Anything after the record is the rules extrapolated, so 'assumed'.",
+  "note": "Generated FROM rates_engine.conventions.calendar, so on its own it cannot catch a wrong rule; the independent check is the publication record named in 'criterion'. That check is PRD-001 AC-1.2's [manual-check], done against the record rather than against sifma.org, which this environment cannot reach. It found three wrong rules in v0.3, all fixed in v0.4: Memorial Day a week early when the last Monday of May is the 29th to 31st; New Year's Day and Veterans Day on a Saturday moved to the Friday, which SIFMA does not do; and no closure on 2018-12-05. Rules the record has not yet exercised: Juneteenth on a Saturday (first 2027-06-19)."
 }

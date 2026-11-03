@@ -156,8 +156,9 @@ def strip_hedge(
             strip's coverage raises rather than producing a partial hedge that
             reports as complete.
         swap_start: Start of the span that must be covered. Defaults to the
-            swap's ``effective``.
-        swap_end: End of that span. Defaults to the swap's ``maturity``.
+            start of the swap's ``span``, its first accrual date as the
+            schedule adjusts it.
+        swap_end: End of that span. Defaults to the end of the swap's ``span``.
 
     Returns:
         The :class:`HedgeResult`.
