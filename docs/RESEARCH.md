@@ -12,8 +12,8 @@ of claim, and a reader deserves to know which one they are getting.
 | --- | --- | --- | --- |
 | Accrual period ends adjusted Modified Following, payment two business days after | `conventions/schedule.py` | CME Eris SOFR Swap Futures rulebook (chapter 62) and ISDA, *Key Changes in the 2021 ISDA Interest Rate Derivatives Definitions* (2006 default) | Secondary: read through search summaries; the CME PDFs did not load |
 | SR1 settlement: arithmetic average of daily SOFR, ACT/360 | `instruments/futures.py` | CME contract definition, via the vault note *SOFR Futures — Pricing, Convexity and Hedging Swaps* | Secondary |
-| SR3 settlement: daily compounded SOFR between IMM dates, ACT/360 | `instruments/futures.py` | Same | Secondary |
-| Non-publication days repeat the last published rate | `market/snapshot.py` | CME and New York Fed rule, via the same note | Secondary |
+| SR3 settlement: SOFR compounded between IMM dates, `prod(1 + r_i d_i / 360)` over publication days, ACT/360 | `market/snapshot.py`, `instruments/futures.py` | CME contract definition, via the vault note *SOFR Futures — Pricing, Convexity and Hedging Swaps*; cross-checked against QuantLib 1.44 `OvernightIndexedCoupon` | Secondary; QuantLib agrees to 1e-13 |
+| Non-publication days take the previous business day's rate and accrue at it as one simple-interest period | `market/snapshot.py` | CME and New York Fed rule, via the same note | Secondary |
 | Ho-Lee convexity adjustment, `0.5 σ² T₁ T₂` | `models/convexity.py` | Hull, via *Forward vs Futures and the Eurodollar Convexity Bias* | Secondary |
 | Hull-White convexity adjustment | `models/convexity.py` | Henrard, transcribed by Skov and Skovmand (eq. 74-75) | **Not read in Henrard** |
 | Convexity material only past two years | `models/convexity.py`, tested qualitatively | Skov and Skovmand | Secondary |
@@ -27,6 +27,8 @@ of claim, and a reader deserves to know which one they are getting.
 | Hedging a swap with a futures strip; the convexity residual | `hedging/futures_strip.py` | CFA Level III *Derivatives — Swap Strategies*; CME/Rogerson 2025 whitepaper | Whitepaper **not read** |
 | Key-rate shocks as a partition of unity | `risk/bumps.py` | Standard construction; the property is asserted directly rather than cited | Derived here |
 | Duration conventions: money duration, PVBP, effective duration and convexity | `risk/sensitivities.py` | CFA Level I *Fixed Income* | Read |
+| SIFMA US holidays, observance rules and the 2018-12-05 closure | `conventions/calendar.py` | New York Fed SOFR publication record (FRED series `SOFR`), every weekday 2018-04-03 to 2026-10-14, in `tests/test_sifma_publication_record.py` | Read: checked day by day |
+| A seasoned OIS coupon: realised fixings compounded to `as_of`, times `P(as_of)/P(end)` | `pricing/projection.py` | QuantLib `OvernightIndexedCouponPricer`; checked against QuantLib 1.44 in `tests/test_seasoned_swaps.py` | Secondary; QuantLib 1.44 agrees to 5e-8 USD |
 
 ## Formulas added in v2
 
@@ -47,6 +49,7 @@ of claim, and a reader deserves to know which one they are getting.
 | Concentrated least squares: betas linear given tau | `curves/parametric.py` | Standard result; the reason is argued in the module rather than cited | Derived here |
 | Piecewise-constant policy path fitted to the futures strip | `curves/parametric.py` | Heitfield and Park, via *SOFR Futures — Pricing, Convexity and Hedging Swaps* | Secondary |
 | Monotone convex interpolation, the four regions and the step-2 collar | `curves/interpolation.py` | Hagan and West 2006, *Interpolation Methods for Curve Construction* | **Not read in Hagan-West** |
+| Iterative (Gauss-Seidel) bootstrap for a non-local interpolation | `curves/bootstrap.py` | QuantLib `IterativeBootstrap` (code) | Secondary |
 
 ## Formulas added in v3
 
@@ -58,10 +61,14 @@ of claim, and a reader deserves to know which one they are getting.
 | The four FX delta conventions and the premium adjustment | `models/fx_delta.py` | *Volatility, Greeks and Option Strategy Practice (2026)*, on the units-and-conventions traps | Secondary |
 | Delta-neutral straddle strike, `F exp(±σ²T/2)` | `volatility/fx_smile.py` | Standard; the sign follows from the premium adjustment and is derived in the module | Derived here |
 | Vanna-volga: price at ATM plus the vega, vanna and volga the flat price fails to hedge | `volatility/fx_smile.py` | Castagna and Mercurio, via *Forwards, Multi-Curve and Swaptions (Post-LIBOR)* | **Not read in Castagna-Mercurio** |
+| Piecewise vanna-volga with ten-delta pillars | `volatility/fx_smile.py` | A construction choice without a paper | Derived here |
+| The broker (market strangle) butterfly | `volatility/fx_smile.py` | Clark 2011, *Foreign Exchange Option Pricing*; Reiswich and Wystup 2010, *Journal of Derivatives* 18(2) | Secondary, **not read**; verified numerically against QuantLib 1.44 market strangles |
+| The FX forward measured from the spot date, `S [P_f(T)/P_f(spot)] / [P_d(T)/P_d(spot)]`; every day of the USD/MXN spot lag counted on both the Federal Reserve and BMV calendars (T+1 must be a US business day for ARS, CLP and MXN) | `pricing/fx_forward.py`, `conventions/currency_pair.py` | ObjectLab Kit FX date conventions; Wikipedia, "Foreign exchange date conventions"; QuantLib `FxSwapRateHelper` (code) for parity | Secondary, not fetched from this build (quoted in Alan Vazquez's review of #13); the rule applied by hand to QuantLib 1.44's holiday lists matches `JointCalendar(...).advance` on all 730 days of 2026-27 (`tests/test_fx_spot_date.py`); parity agrees with QuantLib to 1e-12 |
+| The dollar leg settles on the Federal Reserve calendar: no Saturday observance, no Good Friday | `conventions/settlement.py` | QuantLib `UnitedStates(FederalReserve)` (code) | Secondary; its holiday list agrees on every weekday 1978-2100 (`tests/test_fx_spot_date.py`) |
 | Hedge structures and the cost-versus-protection trade-off | `hedging/fx_structures.py` | CFA Level III Reading 19; *CFA L3 Derivatives — Forwards, Futures, and Options* | Read |
 | `σ²(RDC) = σ²(RFC) + σ²(RFX) + 2ρσσ` | `hedging/fx_structures.py` | *CFA L3 Asset Allocation — Constraints, Currency, and Benchmarks* | Read |
 | The Mexican holiday calendar, thirteen rules | `conventions/calendar.py` | QuantLib `ql/time/calendars/mexico.cpp`, **read directly** | Read — but it is the **BMV** calendar, not Banxico's |
-| TIIE day count, coupon period, benchmark distinction | `curves/mxn.py` | **Nothing reachable.** Recorded in `UNRESOLVED_MXN` | **Not established** |
+| TIIE day count, coupon period, benchmark distinction, TIIE 28 fixing lag | `conventions/indices.py` | **Nothing reachable.** Recorded in `UNRESOLVED_MXN` | **Not established** |
 
 ## What "not read" costs, concretely
 
@@ -109,7 +116,11 @@ positive interpolated forwards, and `tests/test_interpolation.py` asserts it
 on six shapes including a sawtooth that goes negative with the collar
 switched off. That the *uncollared* version fails is what shows the test has
 something to catch. Reproducing every node's discount factor to 1e-13 across
-all four regions bounds the transcription of the integrals.
+all four regions bounds the transcription of the integrals. The collar is
+sign-aware, `[min(0, 2f), max(0, 2f)]` per neighbour — an extension of
+ours: the paper states it for positive inputs. It keeps each interval's
+sign and is continuous at zero; a node between a positive and a negative
+interval sits at zero.
 
 **Vanna-volga.** Transcribed from a secondary source, and the protection is
 the property the construction is defined by: it must reproduce the three
@@ -136,7 +147,7 @@ return 403 at this environment's egress proxy, and a code search across
 QuantLib for TIIE returns zero hits. The TIIE day count, the 28-day coupon
 period, which conventions attach to TIIE 28 as against TIIE de Fondeo, and
 the SIE series identifiers are all assumptions. They are stored as data —
-`rates_engine.curves.mxn.UNRESOLVED_MXN` — so that every peso result names
+`rates_engine.conventions.indices.UNRESOLVED_MXN` — so that every peso result names
 them, carries a degradation that reaches `ASSUMED`, and can be made to
 refuse outright. Resolving them shortens a tuple; no code changes. See
 `docs/forge/research/003-mxn-conventions.md` for what was tried.
@@ -194,11 +205,11 @@ something it cannot reach by construction.
 | Assumption | Where | How it is marked |
 | --- | --- | --- |
 | SR1 contract notional is USD 5,000,000 | `instruments/futures.py` | `notional_source="assumed"`; the DV01 of 41.67 is derived from it, not quoted |
-| SIFMA observes a Saturday holiday on the preceding Friday | `conventions/calendar.py` | The fixture's provenance records the manual check as **not done** |
+| Juneteenth on a Saturday is observed on the Friday (first on 2027-06-19) | `conventions/calendar.py` | The one SIFMA rule the SOFR publication record has not yet exercised; QuantLib 1.44 applies the same rule |
 | Treasury par yields are usable as a stand-in for OIS par | `curves/bootstrap.py` | Opt-in only; marks every node; a `Degradation` names the swap spread as an unquantified bias |
 | SABR's backbone exponent β is 0.5 unless the caller says otherwise | `models/sabr.py` | Carried in every `SABRParameters` and every calibration payload; the module says why it is fixed rather than fitted |
 | A term rate read off a futures-fitted curve carries no convexity adjustment | `curves/parametric.py` | `TERM_RATE_CAVEAT` plus a `Degradation` marking the result `assumed`; the evidence sets `convexity_adjustment_applied: false` |
-| Every MXN convention: TIIE day count, coupon period, benchmark distinction, SIE identifiers, and that the calendar is the BMV's | `curves/mxn.py` | `UNRESOLVED_MXN`, one `Degradation` each on every peso result; `strict_conventions=True` refuses |
+| Every MXN convention: TIIE day count, coupon period, benchmark distinction, TIIE 28 fixing lag, SIE identifiers, and that the calendar is the BMV's | `conventions/indices.py` | `UNRESOLVED_MXN`, one `Degradation` each on every peso result that rests on it (the TIIE 28 lag on TIIE 28 curves and instruments only); `strict_conventions=True` refuses |
 | The USD/MXN pip is 1e-4 | `conventions/currency_pair.py` | Declared on `CurrencyPair` with no default, and serialised into every payload that reports forward points |
 | A cross-currency basis beyond ±500 bp is not a quote | `pricing/fx_forward.py` | `MAX_PLAUSIBLE_BASIS_BP`, a named constant; the refusal says the band is a plausibility check rather than a measurement |
 | The cross-currency basis enters as a flat zero-coupon spread on the quote-currency leg, not as the par spread a cross-currency swap quotes | `pricing/fx_forward.py` | `BASIS_LEG` names the leg; the module docstring names the spread as a zero spread; no instrument or curve here takes the par basis |

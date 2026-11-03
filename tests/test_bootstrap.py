@@ -12,6 +12,7 @@ from rates_engine.conventions.schedule import imm_date, next_imm_on_or_after
 from rates_engine.core.errors import (
     BootstrapResidualError,
     CurveArbitrageError,
+    ImplausibleInputError,
     UnderdeterminedCurveError,
 )
 from rates_engine.curves.bootstrap import (
@@ -193,6 +194,91 @@ class TestRefusalsAndDrops:
         assert lenient.dropped_instruments
         assert all("residual" in d["reason"] for d in lenient.dropped_instruments)
         assert all("label" in d for d in lenient.dropped_instruments)
+
+
+class TestNonFiniteQuotes:
+    """A NaN or an infinite quote is an input error, named before any solving.
+
+    It used to reach the root finder: a NaN residual is never positive, so the
+    bracket search ran out and raised ``CurveArbitrageError`` (exit 2, "the
+    calculation is impossible") about a quote that was simply not a number.
+    """
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_a_futures_node(self, as_of, strip, bad):
+        broken = replace(strip[3], forward_rate=bad)
+        instruments = strip[:3] + (broken,) + strip[4:]
+        with pytest.raises(ImplausibleInputError, match=broken.label):
+            bootstrap_discount_curve(as_of, instruments)
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+    def test_a_realised_stub(self, as_of, bad):
+        with pytest.raises(ImplausibleInputError, match="realized_stub"):
+            bootstrap_discount_curve(
+                as_of, (RealizedStubNode(end=imm_date(2026, 3), accrual_factor=bad),)
+            )
+
+    def test_a_par_swap_node(self, as_of):
+        node = ParSwapNode(
+            start=as_of,
+            payment_dates=(date(2027, 1, 15),),
+            year_fractions=(1.0139,),
+            quoted_rate=float("nan"),
+            label="ois_nan",
+        )
+        with pytest.raises(ImplausibleInputError, match="ois_nan"):
+            bootstrap_discount_curve(as_of, (node,))
+
+    def test_a_swap_quote_node(self, as_of):
+        from rates_engine.instruments.swaps import OISSwap
+        from rates_engine.pricing.calibration import SwapQuoteNode
+
+        swap = OISSwap(effective=date(2026, 1, 20), maturity=date(2028, 1, 20), fixed_rate=0.04)
+        with pytest.raises(ImplausibleInputError, match="swap_nan"):
+            bootstrap_discount_curve(
+                as_of, (SwapQuoteNode(swap, float("nan"), label="swap_nan"),)
+            )
+
+    def test_it_is_an_input_error_not_a_curve_error(self, as_of, strip):
+        broken = replace(strip[1], forward_rate=float("nan"))
+        with pytest.raises(ImplausibleInputError) as excinfo:
+            bootstrap_discount_curve(as_of, (strip[0], broken) + strip[2:])
+        assert excinfo.value.exit_code == 1
+        assert not isinstance(excinfo.value, CurveArbitrageError)
+
+    def test_every_offender_is_named_at_once(self, as_of, strip):
+        first = replace(strip[2], forward_rate=float("nan"))
+        second = replace(strip[5], forward_rate=float("inf"))
+        instruments = strip[:2] + (first,) + strip[3:5] + (second,) + strip[6:]
+        with pytest.raises(ImplausibleInputError) as excinfo:
+            bootstrap_discount_curve(as_of, instruments)
+        assert first.label in str(excinfo.value)
+        assert second.label in str(excinfo.value)
+
+    def test_a_finite_quote_too_large_to_price_is_not_called_nan(self, as_of, strip):
+        """A forward of 1e308 is finite; its residual overflows to -inf. The
+        message used to call it "NaN or infinite", which sends the reader
+        looking for a NaN that is not there."""
+        huge = replace(strip[3], forward_rate=1e308)
+        with pytest.raises(ImplausibleInputError, match="too large to price"):
+            bootstrap_discount_curve(as_of, strip[:3] + (huge,) + strip[4:])
+
+    def test_the_dual_solver_refuses_with_the_same_guard(self):
+        """One guard for both solvers, so the two messages cannot drift."""
+        from rates_engine.curves.dual import BasisSwapNode, solve_dual_curve
+
+        as_of = date(2026, 1, 15)
+        end = date(2027, 1, 15)
+        ois = (RealizedStubNode(end=end, accrual_factor=1.04),)
+        broken = BasisSwapNode(((as_of, end),), float("nan"), label="basis_nan")
+        with pytest.raises(ImplausibleInputError) as dual:
+            solve_dual_curve(as_of, ois, (), (broken,))
+        with pytest.raises(ImplausibleInputError) as single:
+            bootstrap_discount_curve(
+                as_of, (RealizedStubNode(end=end, accrual_factor=float("nan")),)
+            )
+        shared = "have no finite residual on a trial curve"
+        assert shared in str(dual.value) and shared in str(single.value)
 
 
 class TestEvidence:

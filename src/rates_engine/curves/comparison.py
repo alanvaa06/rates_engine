@@ -1,11 +1,20 @@
 """Bootstrapping the same instruments two ways, and reporting where they differ.
 
 PRD-002 AC-5.1. The point of the exercise is that they should *not* differ in
-the thing a calibration pins — every instrument reprices under both, because
-both reproduce the discrete forwards exactly — and should differ in the thing
-neither instrument constrains, which is the instantaneous forward between
-nodes. Reporting the second while asserting the first is the honest way to
-show what an interpolation choice does and does not buy.
+the thing a calibration pins — every instrument reprices under both — and
+should differ in the thing no instrument constrains, which is the
+instantaneous forward between nodes. Reporting the second while asserting
+the first is the honest way to show what an interpolation choice does and
+does not buy.
+
+How far the agreement reaches depends on the instruments. Both
+interpolations reproduce the discrete forwards exactly, so a strip that reads
+discount factors only on nodes -- futures periods, a realised stub -- gives
+the two curves the same node factors. A swap paid two days after each period
+reads factors inside intervals, where the two interpolations disagree, so
+each bootstrap moves its nodes to make the swap reprice and the node factors
+differ too (monotone convex gets there by sweeping, see
+:mod:`rates_engine.curves.bootstrap`). ``max_df_difference`` reports how much.
 """
 
 from __future__ import annotations
@@ -135,9 +144,13 @@ def compare_interpolations(
             "max_df_difference": worst_df,
             "scan_step_days": step_days,
             "note": (
-                "Both reproduce the discrete forwards exactly, so both reprice every "
-                "instrument. They differ only in the instantaneous forward between "
-                "nodes, which no instrument constrains."
+                "Both bootstraps reprice every instrument; the monotone convex one is "
+                "swept until it does. Where every instrument reads discount factors on "
+                "nodes only, the node factors agree and the curves differ in the "
+                "instantaneous forward between nodes, which no instrument constrains. "
+                "Where an instrument reads a factor inside an interval (a payment lag, "
+                "an intermediate coupon) the node factors differ as well, by up to "
+                "max_df_difference."
             ),
         },
         sources=(linear.evidence, convex.evidence),

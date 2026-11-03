@@ -58,7 +58,7 @@ class FRA:
     def __post_init__(self) -> None:
         if self.index.tenor is IndexTenor.OVERNIGHT:
             raise UnsupportedConventionError(
-                f"a FRA settles against a term rate known at the period start; "
+                f"a FRA settles against a term rate known by the period start; "
                 f"{self.index.name} is an overnight rate, compounded in arrears. "
                 "An overnight period is an OISSwap of one period."
             )

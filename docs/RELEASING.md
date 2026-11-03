@@ -49,7 +49,8 @@ project.
    wearing a disguise.
 2. `ruff check src tests` and `mypy src/rates_engine` are clean.
 3. `CHANGELOG.md` has a dated section for the version, including any change to
-   a golden tolerance.
+   a golden tolerance: `[Unreleased]` becomes `## [X.Y.Z] - YYYY-MM-DD`, in
+   the commit the tag will name, and the compare links at the bottom follow.
 4. The version in `pyproject.toml` matches `rates_engine.__version__`, which
    `tests/test_readme_quickstart.py` checks.
 
@@ -64,10 +65,13 @@ git push origin vX.Y.Z
 
 The tag is what triggers the release workflow. Its build job refuses to go
 on unless the tag, `pyproject.toml` and the installed wheel's
-`rates_engine.__version__` all say `X.Y.Z`, and it runs the whole suite
-against the wheel, from the unpacked sdist, before either index sees a
-file. A run started by hand has to be started from the tag (*Use workflow
-from* › *Tags*); from a branch it stops at the version check.
+`rates_engine.__version__` all say `X.Y.Z` and `CHANGELOG.md` has a
+heading `## [X.Y.Z] - YYYY-MM-DD`, and it runs the whole suite against the
+wheel, from the unpacked sdist, before either index sees a file. A tag cut
+while the section still reads `[Unreleased]` stops there: delete the tag,
+date the section, and tag the commit that does. A run started by hand has
+to be started from the tag (*Use workflow from* › *Tags*); from a branch it
+stops at the version check.
 
 ## Publishing
 
