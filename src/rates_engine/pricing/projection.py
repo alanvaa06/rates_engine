@@ -47,7 +47,12 @@ known on the trade date and is counted in full. Its floating coupon:
   rate already covers the days in between: a period that started on Friday
   and is valued on Saturday has its weekend decided. Forecasting it from
   the curve, as #12 did, put a weekend start 0.03 bp off QuantLib. A period
-  starting on a business day ``as_of`` has no history.
+  starting on a business day ``as_of`` has no history, and its first day is
+  forecast without the print as a term rate's is: when there is no
+  snapshot or the index's series lacks that day. A snapshot with no series
+  named after the index is refused for it, as for a term rate below: read
+  as a print not out yet, an OIS from ``as_of`` with its 6% print under
+  ``"SOFR_ON"`` priced at the curve's 60,759.12 instead of 66,348.45.
 - a term rate is history once its fixing date is before ``as_of``, whether
   or not its period has begun, and pays that fixing. A fixing dated
   ``as_of`` itself is used when ``fixings`` holds it and projected off the
@@ -382,6 +387,32 @@ def _overnight_decided_until(
     return as_of
 
 
+def _todays_overnight_series(
+    swap: OISSwap, start: date, end: date, as_of: date, fixings: MarketSnapshot
+) -> None:
+    """Refuse a snapshot without the index's series for a period opening on ``as_of``.
+
+    Such a period reads the print of ``as_of`` if the series has it and
+    forecasts the day if not, which :func:`_overnight_decided_until`
+    decides. A series absent from the snapshot is neither: it is a wrong
+    snapshot, refused as :func:`_todays_series` refuses it for a term rate.
+    A period that began earlier needs history and is refused by
+    :func:`_compounded_history` without this.
+    """
+    index = swap.index
+    if index.name in fixings.series:
+        return
+    try:
+        fixings.require(index.name)
+    except MissingFixingError as missing:
+        raise MissingFixingError(
+            f"{_trade(swap)}: the period from {start} to {end} accrues the overnight rate of "
+            f"the valuation date {as_of}, and the fixings passed have no series named after "
+            f"its index ({missing}). Name the series {index.name!r}; an absent series is not "
+            "a fixing that has yet to be published."
+        ) from missing
+
+
 def _compounded_history(
     index: RateIndex,
     start: date,
@@ -574,6 +605,8 @@ def _ois_float(
             continue
         tau = year_fraction(start, end, day_count)
         realised: RealisedFixing | None = None
+        if start == as_of and fixings is not None:
+            _todays_overnight_series(swap, start, end, as_of, fixings)
         if start < decided_until:
             until = min(end, decided_until)
             realised = _compounded_history(

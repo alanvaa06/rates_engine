@@ -1088,6 +1088,51 @@ class TestASnapshotWithoutTheIndexIsRefusedEvenForTodaysFixing:
         assert pv(fra, curve_set, fixings=misnamed).value == pv(fra, curve_set).value
         assert pv(fra, curve_set).evidence.warnings == ()
 
+    # An OIS from as_of reads the print of as_of if it is there. Review round
+    # 3 of #21, point 4: under 'SOFR_ON' that print was read as "not out
+    # yet", and the swap priced at the curve's 60,759.12 on the review's
+    # strip instead of 66,348.45 at 6%, with no record. Decision A is the
+    # term rule: a day missing from the series is forecast, a series missing
+    # from the snapshot is refused.
+    SPOT_OIS = OISSwap(effective=AS_OF, maturity=date(2027, 1, 15), fixed_rate=0.04,
+                       notional=NOTIONAL)
+
+    def test_an_ois_from_as_of_refuses_a_misnamed_series(self):
+        misnamed = _fixings(_term("SOFR_ON", {AS_OF: 0.06}))
+        with pytest.raises(MissingFixingError) as caught:
+            pv(self.SPOT_OIS, CurveSet(_flat_curve()), fixings=misnamed)
+        message = str(caught.value)
+        for needed in (
+            "OISSwap 2026-01-15 to 2027-01-15",
+            "the period from 2026-01-15 to 2027-01-15 accrues the overnight rate of the "
+            "valuation date 2026-01-15",
+            "has no series 'SOFR'; it has ['SOFR_ON']",
+            "Name the series 'SOFR'; an absent series is not a fixing that has yet to be "
+            "published.",
+        ):
+            assert needed in message, (needed, message)
+
+    def test_an_ois_from_as_of_under_the_right_name_reads_the_print(self):
+        curve_set = CurveSet(_flat_curve())
+        snapshot = _fixings(_term("SOFR", {AS_OF: 0.06}))
+        read = pv(self.SPOT_OIS, curve_set, fixings=snapshot)
+        assert read.value != pv(self.SPOT_OIS, curve_set).value
+        assert read.evidence.fields["realised_fixings"][0]["series_id"] == "SOFR"
+
+    def test_an_ois_from_as_of_forecasts_a_day_missing_from_the_series(self):
+        curve_set = CurveSet(_flat_curve())
+        older = _fixings(_term("SOFR", {date(2026, 1, 14): 0.06}))
+        assert pv(self.SPOT_OIS, curve_set, fixings=older).value == (
+            pv(self.SPOT_OIS, curve_set).value
+        )
+
+    def test_an_ois_that_has_not_started_ignores_the_snapshot(self):
+        swap = OISSwap(effective=date(2026, 1, 20), maturity=date(2027, 1, 20), fixed_rate=0.04,
+                       notional=NOTIONAL)
+        curve_set = CurveSet(_flat_curve())
+        misnamed = _fixings(_term("SOFR_ON", {AS_OF: 0.06}))
+        assert pv(swap, curve_set, fixings=misnamed).value == pv(swap, curve_set).value
+
 
 class TestTheFixingDateIsLookedUpOnlyNearTheValuationDate:
     """A period starting weeks after as_of cannot have fixed, so its fixing date is not computed.
