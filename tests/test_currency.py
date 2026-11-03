@@ -219,8 +219,21 @@ class TestMixingRefuses:
         assert "MXN" in message and "USD" in message
 
     def test_the_refusal_names_the_operation_and_the_flow(self):
+        # The instrument is checked before it is projected -- a seasoned
+        # trade's projection asks for fixings first -- so its refusal names
+        # the instrument. A flow paid in another currency than the product
+        # that projected it declares is still refused by name.
         with pytest.raises(CurrencyMismatchError) as excinfo:
             pv(_OneFlow(_flow(Currency.MXN)), CurveSet(_curve(Currency.USD)))
+        assert "valuing a _OneFlow" in str(excinfo.value)
+
+        class _Mislabelled(_OneFlow):
+            @property
+            def currency(self) -> Currency:
+                return Currency.USD
+
+        with pytest.raises(CurrencyMismatchError) as excinfo:
+            pv(_Mislabelled(_flow(Currency.MXN)), CurveSet(_curve(Currency.USD)))
         assert "discounting a fixed cashflow paid" in str(excinfo.value)
 
     def test_it_points_at_fx_rather_than_converting(self):

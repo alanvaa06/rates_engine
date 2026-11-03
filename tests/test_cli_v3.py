@@ -9,6 +9,7 @@ tool there with no second serialisation to keep in step.
 from __future__ import annotations
 
 import json
+import math
 import subprocess
 import sys
 from datetime import date
@@ -204,3 +205,177 @@ class TestTheyReachMCPUnchanged:
         assert mcp_server.call_tool("fx-forward", config) == dumps(
             commands.COMMANDS["fx-forward"](config)
         )
+
+
+class TestTheTwoCommandsAgreeOnTheForward:
+    """The review's finding 3 under 1.4: hedge-structures ignored `basis_bp`.
+
+    Same config, two commands: fx-forward applied the basis and
+    hedge-structures' forward row locked at the parity forward, 1,941 pips
+    apart at one year on a -100 bp basis
+    (`REVISION-rates_engine-2026-10-15-repro/risk-app/r16_basis_consistency.py`).
+    The reference is QuantLib 1.44, not this package: flat continuously
+    compounded ACT/365F curves at 9.5% MXN and 4.2% USD, the spot date
+    2026-09-18 -- `ql.Mexico().advance(2026-09-16, 2, ql.Days)`, a day the
+    Federal Reserve is open too -- and
+    `S [P_usd(T)/P_usd(spot)] / [P_mxn(T)/P_mxn(spot)] = 19.50128422562187`,
+    with the documented zero-spread basis applied over the QuantLib
+    `Actual365Fixed` span from spot to delivery, 0.9945205479452055.
+    """
+
+    QUANTLIB_PARITY = 19.50128422562187
+    YEARS_FROM_SPOT = 0.9945205479452055
+
+    @pytest.fixture
+    def config(self):
+        config = json.loads(json.dumps(FX_CONFIG))
+        config["fx"]["delivery"] = "2027-09-16"
+        config["fx"]["basis_bp"] = -100.0
+        config["exposure"]["hedge_ratio"] = 1.0
+        del config["hedge_program"]
+        return config
+
+    def test_the_forward_matches_quantlib_with_the_basis(self, config):
+        payload = commands.COMMANDS["fx-forward"](config)
+        assert payload["cip_forward"] == pytest.approx(self.QUANTLIB_PARITY, rel=1e-12)
+        assert payload["outright"] == pytest.approx(
+            self.QUANTLIB_PARITY * math.exp(-0.01 * self.YEARS_FROM_SPOT), rel=1e-12
+        )
+
+    def test_the_forward_row_locks_at_the_same_outright(self, config):
+        outright = commands.COMMANDS["fx-forward"](config)["outright"]
+        table = commands.COMMANDS["hedge-structures"](config)
+        row = next(s for s in table["structures"] if s["name"] == "forward")
+        assert row["worst_case_rate"] == pytest.approx(outright, rel=1e-12)
+        assert row["best_case_rate"] == pytest.approx(outright, rel=1e-12)
+
+    def test_the_payload_shows_the_basis_it_used(self, config):
+        table = commands.COMMANDS["hedge-structures"](config)
+        fields = table["evidence"]["fields"]
+        assert fields["basis_bp"] == -100.0
+        assert fields["basis_leg"] == "quote"
+        assert fields["r_domestic_effective"] == pytest.approx(0.0950 - 0.0100)
+
+    def test_the_options_run_from_the_spot_date_like_the_forward(self, config):
+        """The premium is paid on the spot date and an option delivering on
+        the settlement date expires the spot lag before it, so the option's
+        life is the forward's span, not the valuation date's."""
+        table = commands.COMMANDS["hedge-structures"](config)
+        assert table["evidence"]["fields"]["expiry"] == pytest.approx(
+            self.YEARS_FROM_SPOT, rel=1e-12
+        )
+
+    def test_the_table_inherits_the_peso_curves_assumption(self, config):
+        """Its rates come off a peso curve, and `llms.txt` promises every
+        price discounted on one reads `assumed`."""
+        table = commands.COMMANDS["hedge-structures"](config)
+        assert table["evidence"]["data_quality"] == "assumed"
+
+
+class TestTheRatesSayWhatTheyAre:
+    """`r_domestic` and `r_foreign` are continuous ACT/365F, and now say so.
+
+    A money-market quote (simple, ACT/360, how SOFR and TIIE are published)
+    is a different number for the same rate; read as continuous it moves the
+    one-year USD/MXN forward by hundreds of pips with nothing to show for it.
+    """
+
+    def test_the_forward_records_the_convention_of_its_inputs(self):
+        payload = commands.COMMANDS["fx-forward"](json.loads(json.dumps(FX_CONFIG)))
+        inputs = {p["series_id"]: p for p in payload["evidence"]["inputs"]}
+        for key in ("fx.r_domestic", "fx.r_foreign"):
+            assert inputs[key]["instrument_kind"] == "continuously_compounded_rate_act365f"
+            assert "ACT/365F" in inputs[key]["notes"]
+
+    def test_the_builder_documents_it(self):
+        from rates_engine.app.builders import flat_curve, fx_inputs
+
+        for function in (fx_inputs, flat_curve):
+            doc = function.__doc__ or ""
+            assert "continuously compounded" in doc and "ACT/365F" in doc
+
+
+class TestTheFxBlockIsCheckedBeforeItIsUsed:
+    """`REVISION-rates_engine-2026-10-15-repro/risk-app/r14_fx_inputs.py`:
+    every one of these was priced and reported exit 0."""
+
+    @staticmethod
+    def _config(**fx):
+        config = json.loads(json.dumps(FX_CONFIG))
+        config["fx"].update(fx)
+        return config
+
+    def test_a_volatility_in_percent_refuses(self):
+        from rates_engine.core.errors import VolUnitsError
+
+        with pytest.raises(VolUnitsError):
+            commands.COMMANDS["hedge-structures"](self._config(volatility=11.5))
+
+    def test_a_negative_volatility_refuses(self):
+        with pytest.raises(ValueError, match="volatility"):
+            commands.COMMANDS["hedge-structures"](self._config(volatility=-0.115))
+
+    @pytest.mark.parametrize("command", ["fx-forward", "hedge-structures"])
+    def test_a_delivery_in_the_past_refuses(self, command):
+        with pytest.raises(ValueError, match="not after"):
+            commands.COMMANDS[command](self._config(delivery="2026-06-15"))
+
+    @pytest.mark.parametrize("command", ["fx-forward", "hedge-structures"])
+    def test_a_rate_in_percent_refuses(self, command):
+        from rates_engine.core.errors import ImplausibleInputError
+
+        with pytest.raises(ImplausibleInputError, match="r_domestic"):
+            commands.COMMANDS[command](self._config(r_domestic=9.5))
+
+    def test_a_rate_in_percent_is_exit_one_with_a_document(self, tmp_path):
+        path = tmp_path / "percent.json"
+        path.write_text(json.dumps(self._config(r_domestic=9.5)), encoding="utf-8")
+        done = _run("fx-forward", "--config", str(path), "--json")
+        assert done.returncode == 1
+        error = json.loads(done.stdout)["error"]
+        assert error["type"] == "ImplausibleInputError"
+        assert "ACT/365F" in error["message"]
+
+    @pytest.mark.parametrize("missing", ["spot", "r_foreign"])
+    def test_a_missing_key_refuses_by_name(self, missing):
+        from rates_engine.core.errors import ConfigurationError
+
+        config = json.loads(json.dumps(FX_CONFIG))
+        del config["fx"][missing]
+        with pytest.raises(ConfigurationError, match=missing):
+            commands.COMMANDS["fx-forward"](config)
+
+    def test_a_missing_volatility_refuses_by_name(self):
+        from rates_engine.core.errors import ConfigurationError
+
+        config = json.loads(json.dumps(FX_CONFIG))
+        del config["fx"]["volatility"]
+        with pytest.raises(ConfigurationError, match="volatility"):
+            commands.COMMANDS["hedge-structures"](config)
+
+
+class TestThereIsOneForward:
+    """Alan Vazquez on PR #13 (cleanup): hedge-structures repeated
+    fx-forward's `forward_from_curves(...)` call word for word, which is how
+    the two came to disagree by 1,941 pips in the first place. Both now go
+    through one function."""
+
+    def test_both_commands_build_it_in_the_same_place(self, monkeypatch):
+        calls = []
+        original = commands._usdmxn_forward
+
+        def counting(inputs):
+            calls.append(inputs.delivery)
+            return original(inputs)
+
+        monkeypatch.setattr(commands, "_usdmxn_forward", counting)
+        config = {k: v for k, v in FX_CONFIG.items() if k != "hedge_program"}
+        commands.fx_forward(json.loads(json.dumps(config)))
+        commands.hedge_structures(json.loads(json.dumps(config)))
+        assert len(calls) == 2
+
+    def test_neither_body_calls_the_pricer_itself(self):
+        import inspect
+
+        for function in (commands.fx_forward, commands.hedge_structures):
+            assert "forward_from_curves(" not in inspect.getsource(function)

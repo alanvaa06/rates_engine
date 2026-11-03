@@ -47,6 +47,11 @@ class CurveView:
             percent peso curve from a nine percent dollar one, and an export
             that omitted it would be the one place a currency could be lost
             on the way out.
+        start: Start date of every swap in a par curve, else ``None``.
+        payment_lag_days: Business days from accrual end to payment for a par
+            curve, else ``None``. With ``start`` it is what separates a par
+            view from the quotes a curve was built from: see
+            :func:`par_curve`.
     """
 
     kind: str
@@ -57,6 +62,8 @@ class CurveView:
     frequency_months: int | None = None
     tenor_months: int | None = None
     currency: Currency = Currency.USD
+    start: date | None = None
+    payment_lag_days: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialise, with every convention present and ``None`` where not applicable."""
@@ -69,6 +76,8 @@ class CurveView:
             "frequency_months": self.frequency_months,
             "tenor_months": self.tenor_months,
             "currency": self.currency.value,
+            "start": self.start.isoformat() if self.start else None,
+            "payment_lag_days": self.payment_lag_days,
         }
 
 
@@ -152,6 +161,16 @@ def par_curve(
     of a basis point — small enough to look like rounding and large enough to
     fail a round-trip test.
 
+    **This is not, by default, the quoted par rate.** The defaults describe
+    the textbook par curve: swaps starting on the valuation date and paying
+    on each period end. A SOFR OIS is quoted from spot, two business days
+    later, and pays two business days after each period, so the default view
+    of a curve bootstrapped from such quotes differs from them -- by 0.02 to
+    0.47 bp on a twelve-swap strip. Pass ``start`` and ``payment_lag_days`` as
+    the swaps were quoted and the view returns the quotes. The view records
+    both in its payload either way, so the difference is visible where it
+    is read.
+
     Args:
         curve: The discount curve.
         dates: Maturities to report. Defaults to the curve's own nodes.
@@ -160,10 +179,12 @@ def par_curve(
         start: Swap start date. Defaults to the curve's valuation date.
         calendar: Calendar for payment rolls.
         convention: Roll rule for payment dates.
-        payment_lag_days: Business days from accrual end to payment.
+        payment_lag_days: Business days from accrual end to payment; 0 by
+            default.
 
     Returns:
-        A :class:`CurveView` of kind ``"par"``.
+        A :class:`CurveView` of kind ``"par"``, carrying its ``start`` and
+        ``payment_lag_days``.
 
     Raises:
         ValueError: A requested maturity is not after the start date.
@@ -203,6 +224,8 @@ def par_curve(
         day_count=day_count,
         frequency_months=frequency_months,
         currency=curve.currency,
+        start=begin,
+        payment_lag_days=payment_lag_days,
     )
 
 
@@ -261,6 +284,8 @@ def all_views(
     par_day_count: DayCount = DayCount.ACT_360,
     forward_tenor_months: int = 3,
     source_evidence: Evidence | None = None,
+    par_start: date | None = None,
+    par_payment_lag_days: int = 0,
 ) -> CurveViews:
     """Export all four views of a curve at once.
 
@@ -274,11 +299,17 @@ def all_views(
         forward_tenor_months: Forward tenor in months.
         source_evidence: Evidence of the curve being viewed, chained in so a
             proxied curve is still visibly proxied after conversion.
+        par_start: Start of the par view's swaps. Defaults to the valuation
+            date; see :func:`par_curve` for why that is not the quoted par
+            rate of a spot-starting swap.
+        par_payment_lag_days: Business days from accrual end to payment in the
+            par view; 0 by default.
 
     Returns:
         The :class:`CurveViews`.
     """
     points = tuple(dates or curve.nodes)
+    begin = par_start or curve.as_of
     evidence = Evidence(
         produced_by="curves.all_views",
         fields={
@@ -288,6 +319,15 @@ def all_views(
             "zero_day_count": zero_day_count.value,
             "par_frequency_months": par_frequency_months,
             "par_day_count": par_day_count.value,
+            "par_start": begin.isoformat(),
+            "par_payment_lag_days": par_payment_lag_days,
+            "par_note": (
+                f"Par rates of swaps starting {begin.isoformat()} and paying "
+                f"{par_payment_lag_days} business days after each period end: the par "
+                "curve of these conventions, not the quoted rate of a swap on others. A "
+                "SOFR OIS quoted from spot with a two-day payment lag differs from the "
+                "default view by a fraction of a basis point."
+            ),
             "forward_tenor_months": forward_tenor_months,
         },
         sources=(source_evidence,) if source_evidence else (),
@@ -304,7 +344,12 @@ def all_views(
         ),
         zero=zero_curve(curve, points, compounding=compounding, day_count=zero_day_count),
         par=par_curve(
-            curve, points, frequency_months=par_frequency_months, day_count=par_day_count
+            curve,
+            points,
+            frequency_months=par_frequency_months,
+            day_count=par_day_count,
+            start=begin,
+            payment_lag_days=par_payment_lag_days,
         ),
         forward=forward_curve(curve, points, tenor_months=forward_tenor_months),
     )

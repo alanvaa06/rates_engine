@@ -125,6 +125,106 @@ class TestQuotedPointsComeBackUntouched:
         assert quote.evidence.fields["source"] == "quoted"
 
 
+class TestAQuotedStrikeIsFoundWhicheverWayItWasComputed:
+    """A strike is matched to a quote within a tolerance, not by float equality.
+
+    ``forward + offset`` and the strike the fixture writes down differ by a
+    rounding error -- 6.9e-18 at most here -- and exact equality called 8 of
+    the 27 quoted points unquoted, refitted them and reported ``sabr``.
+    """
+
+    def test_the_tolerance_is_far_below_any_real_strike_spacing(self):
+        from rates_engine.volatility.cube import STRIKE_TOLERANCE
+
+        # A millionth of a basis point: well above float noise on a rate,
+        # and nothing a market would ever quote as two different strikes.
+        assert 1e-15 < STRIKE_TOLERANCE <= 1e-10
+
+    def test_an_absolute_cube_reads_forward_plus_offset_as_the_quote(self, cube, rows):
+        for r in rows:
+            strike = r["forward"] + r["strike_offset"]
+            quote = cube.volatility_at(r["expiry"], r["tenor"], strike, r["forward"])
+            assert quote.source == "quoted", (r, strike)
+            assert quote.volatility.value == r["normal_vol_bp"]
+
+    def test_a_relative_cube_reads_the_written_strike_as_the_quote(self, rows):
+        relative = VolCube(
+            as_of=AS_OF,
+            points=tuple(
+                CubePoint(
+                    r["expiry"], r["tenor"], r["strike_offset"],
+                    Volatility(r["normal_vol_bp"], VolUnits.NORMAL_BP),
+                )
+                for r in rows
+            ),
+            strike_convention=StrikeConvention.RELATIVE_TO_FORWARD,
+        )
+        for r in rows:
+            quote = relative.volatility_at(r["expiry"], r["tenor"], r["strike"], r["forward"])
+            assert quote.source == "quoted", r
+            assert quote.volatility.value == r["normal_vol_bp"]
+
+    def test_a_strike_a_tenth_of_a_basis_point_away_is_not_the_quote(self, cube, forwards):
+        forward = forwards[(1.0, 5.0)]
+        quote = cube.volatility_at(1.0, 5.0, forward + 1e-5, forward)
+        assert quote.source == "sabr"
+
+
+class TestExtrapolationSaysSo:
+    """Outside the quoted strikes SABR extrapolates, and the answer is marked.
+
+    The 1y5y smile is quoted from 3.25% to 5.25%. A strike of 20% used to come
+    back as 248.5 bp, ``source="sabr"`` and an evidence note saying it was
+    interpolated.
+    """
+
+    @pytest.fixture
+    def far(self, cube, forwards):
+        return cube.volatility_at(1.0, 5.0, 0.20, forwards[(1.0, 5.0)])
+
+    def test_it_is_labelled_an_extrapolation(self, far):
+        assert far.source == "sabr_extrapolated"
+        assert far.reliable is False
+        assert far.evidence.fields["extrapolated"] is True
+        assert far.evidence.fields["quoted_strike_range"] == pytest.approx([0.0325, 0.0525])
+
+    def test_it_carries_a_warning_that_marks_it_assumed(self, far):
+        codes = [w.code for w in far.evidence.warnings]
+        assert codes == ["outside_quoted_strikes"]
+        assert far.evidence.worst_quality is DataQuality.ASSUMED
+        assert "extrapolat" in far.evidence.warnings[0].message
+
+    def test_the_provenance_no_longer_calls_it_interpolated(self, far):
+        notes = far.evidence.inputs[0].notes or ""
+        assert "Interpolated" not in notes
+        assert "Extrapolated" in notes
+
+    @pytest.mark.parametrize("strike", [0.005, 0.01, 0.10])
+    def test_both_wings_are_caught(self, cube, forwards, strike):
+        quote = cube.volatility_at(1.0, 5.0, strike, forwards[(1.0, 5.0)])
+        assert quote.source == "sabr_extrapolated"
+        assert not quote.reliable
+
+    def test_a_fill_inside_the_smile_is_reliable_and_unwarned(self, cube, forwards):
+        expiry, tenor, offset = HOLE
+        forward = forwards[(expiry, tenor)]
+        inside = cube.volatility_at(expiry, tenor, forward + offset, forward)
+        assert inside.source == "sabr"
+        assert inside.reliable is True
+        assert inside.evidence.warnings == ()
+        assert inside.evidence.fields["extrapolated"] is False
+
+    def test_a_quote_is_reliable(self, cube, forwards):
+        forward = forwards[(5.0, 5.0)]
+        assert cube.volatility_at(5.0, 5.0, forward, forward).reliable is True
+
+    def test_the_payload_carries_the_flag(self, far):
+        payload = far.payload_fields()
+        assert payload["reliable"] is False
+        assert payload["source"] == "sabr_extrapolated"
+        json.dumps(far.to_dict())
+
+
 class TestSABRFillsTheGap:
     """PRD-002 AC-3.1: an unquoted strike comes from the smile of its own slice."""
 

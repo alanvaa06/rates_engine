@@ -58,13 +58,28 @@ def delivery() -> date:
     return AS_OF + timedelta(days=365)
 
 
+def _growth(curve: DiscountCurve, spot_date: date, delivery: date) -> float:
+    """``P(spot) / P(T)``: what a unit placed on the spot date grows to at ``T``."""
+    return curve.df(spot_date) / curve.df(delivery)
+
+
 class TestCoveredInterestParity:
-    """PRD-003 AC-2.1: `F = S P_foreign / P_domestic`, an identity."""
+    """PRD-003 AC-2.1: `F = S [P_f(T)/P_f(spot)] / [P_d(T)/P_d(spot)]`, an identity.
+
+    The spot rate is the price for delivery on the spot date, so parity
+    carries both currencies from there to delivery. These tests asserted
+    `F P_d(T) = S P_f(T)` -- parity from the valuation date -- until the
+    review measured that as 76 pips too high at every tenor against
+    QuantLib's `FxSwapRateHelper`; `TestTheForwardRunsFromTheSpotDate`
+    pins the QuantLib numbers.
+    """
 
     def test_the_parity_relation_holds_exactly(self, usd, mxn, delivery):
         result = forward_from_curves(USDMXN, SPOT, delivery, mxn, usd)
-        assert result.cip_forward * mxn.df(delivery) == pytest.approx(
-            SPOT * usd.df(delivery), rel=1e-12
+        spot_date = USDMXN.spot_date(AS_OF)
+        assert result.cip_forward == pytest.approx(
+            SPOT * _growth(mxn, spot_date, delivery) / _growth(usd, spot_date, delivery),
+            rel=1e-12,
         )
 
     def test_with_no_basis_the_outright_is_the_parity_forward(self, usd, mxn, delivery):
@@ -104,7 +119,10 @@ class TestCoveredInterestParity:
     def test_it_holds_at_every_tenor(self, usd, mxn, years):
         day = AS_OF + timedelta(days=365 * years)
         result = forward_from_curves(USDMXN, SPOT, day, mxn, usd)
-        assert result.cip_forward * mxn.df(day) == pytest.approx(SPOT * usd.df(day), rel=1e-12)
+        spot_date = USDMXN.spot_date(AS_OF)
+        assert result.cip_forward == pytest.approx(
+            SPOT * _growth(mxn, spot_date, day) / _growth(usd, spot_date, day), rel=1e-12
+        )
 
 
 class TestTheBasisIsKeptSeparate:
@@ -203,9 +221,13 @@ class TestInvertingAQuotedForward:
     def test_it_reports_which_curves_it_used(self, usd, mxn, delivery):
         back = implied_basis(USDMXN, SPOT, 19.60, delivery, mxn, usd)
         fields = back.evidence.fields
+        spot_date = USDMXN.spot_date(AS_OF)
         assert fields["domestic_currency"] == "MXN"
         assert fields["foreign_currency"] == "USD"
-        assert fields["cip_forward"] == pytest.approx(SPOT * usd.df(delivery) / mxn.df(delivery))
+        assert fields["spot_date"] == spot_date.isoformat()
+        assert fields["cip_forward"] == pytest.approx(
+            SPOT * _growth(mxn, spot_date, delivery) / _growth(usd, spot_date, delivery)
+        )
 
     def test_it_says_it_reads_the_basis_rather_than_fitting_a_curve(self, usd, mxn, delivery):
         back = implied_basis(USDMXN, SPOT, 19.60, delivery, mxn, usd)
@@ -324,6 +346,23 @@ class TestArgumentRefusals:
         with pytest.raises(ValueError, match="not after"):
             forward_from_curves(USDMXN, SPOT, AS_OF, mxn, usd)
 
+    def test_a_delivery_on_the_spot_date_refuses(self, usd, mxn):
+        """Delivery on the spot date is a spot trade, and before it is a
+        short date (overnight, tom-next) priced off the spot by a swap this
+        module does not model. Both refuse rather than extrapolating parity
+        backwards from the spot date."""
+        spot_date = USDMXN.spot_date(AS_OF)
+        with pytest.raises(ValueError, match="spot date"):
+            forward_from_curves(USDMXN, SPOT, spot_date, mxn, usd)
+        with pytest.raises(ValueError, match="spot date"):
+            implied_basis(USDMXN, SPOT, 18.6, spot_date, mxn, usd)
+
+    def test_a_delivery_between_the_trade_and_the_spot_date_refuses(self, usd, mxn):
+        tomorrow = AS_OF + timedelta(days=1)
+        assert tomorrow < USDMXN.spot_date(AS_OF)
+        with pytest.raises(ValueError, match="spot date"):
+            forward_from_curves(USDMXN, SPOT, tomorrow, mxn, usd)
+
     def test_a_non_positive_market_forward_refuses(self, usd, mxn, delivery):
         with pytest.raises(ValueError, match="positive rates"):
             implied_basis(USDMXN, SPOT, 0.0, delivery, mxn, usd)
@@ -352,3 +391,204 @@ class TestSerialisation:
             USDMXN, SPOT, delivery, mxn, usd, source_evidence=(source,)
         )
         assert source in result.evidence.sources
+
+
+class TestTheForwardRunsFromTheSpotDate:
+    """The review's finding 1.4: the forward was measured from the valuation date.
+
+    Reference values from QuantLib 1.44, not from this package. Flat
+    continuously compounded ACT/365F curves (`ql.FlatForward`), the spot date
+    two business days of `ql.JointCalendar(ql.UnitedStates(
+    ql.UnitedStates.FederalReserve), ql.Mexico())` after `as_of` (the peso
+    rule, see `tests/test_fx_spot_date.py`; no US holiday falls on T+1 of
+    these trade dates, so QuantLib's general FX rule gives the same spot
+    date), deliveries from advancing the spot date by the tenor (Following),
+    and
+
+        F = S * [P_usd(T) / P_usd(spot)] / [P_mxn(T) / P_mxn(spot)]
+
+    which `ql.FxSwapRateHelper(points, spot, tenor, 2, cal, Following,
+    False, True, usd_curve)` reproduces: a peso curve bootstrapped from these
+    points returns the input peso growth from spot to delivery to within
+    1.6e-15 (`REVISION-rates_engine-2026-10-15-repro/curves/
+    r13_fx_forward_spot_lag.py`). Before the fix this package returned the
+    `from_as_of` column, 76 to 78 pips higher.
+    """
+
+    # (as_of, delivery, r_mxn, r_usd, QuantLib forward from spot, forward from as_of)
+    CASES = [
+        (date(2026, 1, 15), date(2026, 1, 27), 0.07, 0.04, 18.510646898129057, 18.518255576612674),
+        (date(2026, 1, 15), date(2026, 2, 20), 0.07, 0.04, 18.547197088565415, 18.554820790762086),
+        (date(2026, 1, 15), date(2026, 4, 20), 0.07, 0.04, 18.637356720434322, 18.64501748214895),
+        (date(2026, 1, 15), date(2027, 1, 20), 0.07, 0.04, 19.063408878140066, 19.07124476576483),
+        # 16 September is a Mexican holiday, so the spot date is T+3: 81.7 pips.
+        (date(2026, 9, 14), date(2026, 12, 17), 0.095, 0.042, 18.746075628829782, 18.75424350643008),
+    ]
+    IDS = ["1W", "1M", "3M", "1Y", "3M across 16 September"]
+
+    @staticmethod
+    def _flat(as_of: date, rate: float, currency: Currency) -> DiscountCurve:
+        far = date(as_of.year + 5, as_of.month, as_of.day)
+        years = (far - as_of).days / 365.0
+        return DiscountCurve(as_of, (far,), (math.exp(-rate * years),), currency=currency)
+
+    @pytest.mark.parametrize(("as_of", "delivery", "r_mxn", "r_usd", "quantlib", "stale"), CASES, ids=IDS)
+    def test_the_outright_matches_quantlib(self, as_of, delivery, r_mxn, r_usd, quantlib, stale):
+        result = forward_from_curves(
+            USDMXN, 18.50, delivery,
+            self._flat(as_of, r_mxn, Currency.MXN), self._flat(as_of, r_usd, Currency.USD),
+        )
+        assert result.outright == pytest.approx(quantlib, rel=1e-12)
+        assert abs(USDMXN.pips(stale - quantlib)) > 75.0  # what the bug returned
+
+    @pytest.mark.parametrize(("as_of", "delivery", "r_mxn", "r_usd", "quantlib", "stale"), CASES, ids=IDS)
+    def test_a_zero_basis_forward_implies_a_zero_basis(self, as_of, delivery, r_mxn, r_usd, quantlib, stale):
+        """Before the fix this read -125 bp at one week off a forward with no
+        basis in it at all: the 76 pips of misplaced carry, divided by a
+        short year fraction."""
+        back = implied_basis(
+            USDMXN, 18.50, quantlib, delivery,
+            self._flat(as_of, r_mxn, Currency.MXN), self._flat(as_of, r_usd, Currency.USD),
+        )
+        assert back.basis_bp == pytest.approx(0.0, abs=1e-6)
+        del stale
+
+    def test_the_basis_accrues_from_the_spot_date_too(self):
+        """A quote-leg spread is a shift of the peso rate between spot and
+        delivery, so its exponent is the same year fraction parity uses."""
+        as_of, delivery = date(2026, 9, 14), date(2026, 12, 17)
+        mxn, usd = self._flat(as_of, 0.095, Currency.MXN), self._flat(as_of, 0.042, Currency.USD)
+        result = forward_from_curves(USDMXN, 18.50, delivery, mxn, usd, basis_bp=-100.0)
+        years_from_spot = 0.2493150684931507  # QuantLib Actual365Fixed, 17 Sep to 17 Dec
+        assert result.outright == pytest.approx(
+            18.746075628829782 * math.exp(-0.01 * years_from_spot), rel=1e-12
+        )
+
+    def test_the_evidence_names_the_spot_date_and_the_span(self):
+        as_of, delivery = date(2026, 9, 14), date(2026, 12, 17)
+        result = forward_from_curves(
+            USDMXN, 18.50, delivery,
+            self._flat(as_of, 0.095, Currency.MXN), self._flat(as_of, 0.042, Currency.USD),
+        )
+        fields = result.evidence.fields
+        assert fields["spot_date"] == "2026-09-17"
+        assert fields["year_fraction"] == pytest.approx(0.2493150684931507, rel=1e-12)
+        assert result.payload_fields()["spot_date"] == "2026-09-17"
+        assert result.spot_date == date(2026, 9, 17)
+
+    def test_a_us_holiday_on_t_plus_one_moves_the_forward(self):
+        """Alan Vazquez's correction on PR #13: for the peso, T+1 has to be a
+        US business day too. Struck on 25 November 2026 the spot date is
+        Monday the 30th, not Friday the 27th (Thanksgiving is the 26th), so
+        three days less carry: 81.6 pips on a 26 February delivery, 27.2 a
+        day at 9.5% and 4.2%. Both numbers are `ql.FlatForward` discount
+        factors run from the stated spot date, so neither comes from here."""
+        as_of, delivery = date(2026, 11, 25), date(2027, 2, 26)
+        result = forward_from_curves(
+            USDMXN, 18.50, delivery,
+            self._flat(as_of, 0.095, Currency.MXN), self._flat(as_of, 0.042, Currency.USD),
+        )
+        from_the_30th = 18.737911308516377  # QuantLib, spot date 2026-11-30
+        from_the_27th = 18.746075628829786  # QuantLib, spot date 2026-11-27 (round 2)
+        assert result.spot_date == date(2026, 11, 30)
+        assert result.outright == pytest.approx(from_the_30th, rel=1e-12)
+        assert USDMXN.pips(from_the_27th - from_the_30th) == pytest.approx(81.643, abs=1e-3)
+        assert result.year_fraction == pytest.approx(0.2410958904109589, rel=1e-12)
+
+    def test_the_evidence_names_the_calendars_the_lag_was_counted_on(self):
+        """Alan Vazquez's round-3 finding 4: the evidence named the settlement
+        calendars but not the ones the lag was counted on, which is the half
+        of the rule that moved."""
+        as_of, delivery = date(2026, 11, 25), date(2027, 2, 26)
+        mxn = self._flat(as_of, 0.095, Currency.MXN)
+        usd = self._flat(as_of, 0.042, Currency.USD)
+        forward = forward_from_curves(USDMXN, 18.50, delivery, mxn, usd)
+        back = implied_basis(USDMXN, 18.50, forward.outright, delivery, mxn, usd)
+        for fields in (forward.evidence.fields, back.evidence.fields):
+            assert fields["spot_lag_days"] == 2
+            assert fields["spot_lag_calendars"] == ["FEDERAL_RESERVE", "BMV"]
+            assert fields["settlement_calendars"] == {"USD": "FEDERAL_RESERVE", "MXN": "BMV"}
+            assert fields["spot_date"] == "2026-11-30"
+
+    def test_a_delivery_before_the_spot_date_names_the_lag_calendars(self):
+        as_of = date(2026, 11, 25)
+        mxn = self._flat(as_of, 0.095, Currency.MXN)
+        usd = self._flat(as_of, 0.042, Currency.USD)
+        with pytest.raises(ValueError, match=r"2026-11-30 .*counted on FEDERAL_RESERVE \+ BMV"):
+            forward_from_curves(USDMXN, 18.50, date(2026, 11, 27), mxn, usd)
+
+
+class TestAForwardInheritsItsCurvesAssumptions:
+    """The review's finding 1.4 (evidence): a peso forward came back `observed`.
+
+    `llms.txt` promises that every price discounted on a peso curve carries
+    the unresolved MXN conventions, so its quality reads `assumed`. The
+    forward discounts the quote leg on the peso curve and ignored both
+    curves' provenance (`REVISION-rates_engine-2026-10-15-repro/risk-app/
+    r03_fx_evidence.py`: a TIIE de Fondeo curve with seven assumptions in
+    its provenance gave a forward reading `observed`). It now carries what
+    `pricing.collateral.curve_warnings` says every valuation on those curves
+    carries.
+    """
+
+    @staticmethod
+    def _peso_curve():
+        from rates_engine.curves.bootstrap import RealizedStubNode
+        from rates_engine.curves.mxn import TIIEBenchmark, bootstrap_mxn_curve
+
+        end = date(2027, 9, 16)
+        stub = RealizedStubNode(end=end, accrual_factor=1.0 + R_MXN * (end - AS_OF).days / 360.0)
+        return bootstrap_mxn_curve(AS_OF, (stub,), TIIEBenchmark.TIIE_FONDEO).curve
+
+    def test_a_bootstrapped_peso_curve_makes_the_forward_assumed(self, usd, delivery):
+        from rates_engine.core.evidence import DataQuality
+
+        peso = self._peso_curve()
+        assert peso.provenance, "the fixture should carry the MXN assumptions"
+        result = forward_from_curves(USDMXN, SPOT, delivery, peso, usd)
+        assert result.evidence.worst_quality is DataQuality.ASSUMED
+        codes = {w.code for w in result.evidence.warnings}
+        assert {d.code for d in peso.provenance} <= codes
+
+    def test_a_hand_built_peso_curve_still_carries_the_collateral_assumption(
+        self, usd, mxn, delivery
+    ):
+        """No provenance on the curve, but the rate peso collateral earns is
+        itself unverified, which `collateral_warnings` reports for any MXN
+        discounting."""
+        from rates_engine.core.evidence import DataQuality
+
+        assert mxn.provenance == ()
+        result = forward_from_curves(USDMXN, SPOT, delivery, mxn, usd)
+        assert result.evidence.worst_quality is DataQuality.ASSUMED
+        assert "unresolved_convention:mxn_collateral_rate" in {
+            w.code for w in result.evidence.warnings
+        }
+
+    def test_a_degraded_dollar_curve_is_carried_too(self, mxn, delivery):
+        from rates_engine.core.evidence import DataQuality, Degradation
+
+        proxy = Degradation(
+            code="treasury_par_proxy",
+            message="long end from Treasury par yields",
+            data_quality=DataQuality.PROXY,
+        )
+        nodes = tuple(AS_OF + timedelta(days=365 * k) for k in (1, 2, 3, 5))
+        usd = DiscountCurve(
+            AS_OF, nodes, tuple(math.exp(-R_USD * k) for k in (1, 2, 3, 5)),
+            currency=Currency.USD, provenance=(proxy,),
+        )
+        result = forward_from_curves(USDMXN, SPOT, delivery, mxn, usd)
+        assert "treasury_par_proxy" in {w.code for w in result.evidence.warnings}
+
+    def test_each_code_is_reported_once(self, usd, delivery):
+        peso = self._peso_curve()
+        codes = [w.code for w in forward_from_curves(USDMXN, SPOT, delivery, peso, usd).evidence.warnings]
+        assert len(codes) == len(set(codes))
+
+    def test_the_inverse_carries_them_as_well(self, usd, delivery):
+        from rates_engine.core.evidence import DataQuality
+
+        peso = self._peso_curve()
+        back = implied_basis(USDMXN, SPOT, 19.60, delivery, peso, usd)
+        assert back.evidence.worst_quality is DataQuality.ASSUMED

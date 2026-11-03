@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import time
 from collections.abc import Callable
@@ -23,7 +24,9 @@ from datetime import date, timedelta
 
 from rates_engine import (
     CurveSet,
+    DiscountCurve,
     FuturesNode,
+    IRSwap,
     OISSwap,
     RealizedStubNode,
     Side,
@@ -39,6 +42,8 @@ from rates_engine import (
 )
 
 AS_OF = date(2026, 1, 15)
+SPOT = date(2026, 1, 20)
+"""T+2 from :data:`AS_OF` on SIFMA: Martin Luther King Day is the 19th."""
 
 
 def _strip(quarters: int, *, slope: float = 0.0) -> tuple:
@@ -59,6 +64,12 @@ def _strip(quarters: int, *, slope: float = 0.0) -> tuple:
         )
         period = following
     return tuple(instruments)
+
+
+def _flat_curve(years: int, rate: float = 0.04) -> DiscountCurve:
+    """A flat continuous curve with a node a year, long enough for a 30-year swap."""
+    nodes = tuple(AS_OF + timedelta(days=365 * k) for k in range(1, years + 1))
+    return DiscountCurve(AS_OF, nodes, tuple(math.exp(-rate * k) for k in range(1, years + 1)))
 
 
 def _span(instruments: tuple) -> tuple[date, date]:
@@ -86,6 +97,16 @@ def cases() -> dict[str, tuple[Callable[[], object], int]]:
     two_year = _par_swap(short_set, *_span(short_strip))
     hedge = strip_hedge(two_year, short_strip, as_of=AS_OF)
     tenors = (0.5, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0)
+    # Two trades struck today, settling spot. The 10-year swap above starts
+    # 62 days out, past the window in which a period can have fixed, so it
+    # cannot show what a trade with a possible history costs a risk measure:
+    # every spot trade is inside that window.
+    flat_set = CurveSet(_flat_curve(32))
+    spot_ois = OISSwap(effective=SPOT, maturity=date(2036, 1, 22), fixed_rate=0.04,
+                       notional=100_000_000.0, side=Side.PAYER)
+    spot_irs = IRSwap(effective=SPOT, maturity=date(2056, 1, 20), fixed_rate=0.04,
+                      notional=100_000_000.0, fixed_frequency_months=12,
+                      float_frequency_months=3)
     return {
         "bootstrap_40q_loglinear": (lambda: bootstrap_discount_curve(AS_OF, long_strip), 5),
         "bootstrap_40q_monotone_convex": (
@@ -105,6 +126,8 @@ def cases() -> dict[str, tuple[Callable[[], object], int]]:
         ),
         "pv_10y_ois_monotone_convex": (lambda: pv(ten_year, mc_set), 10),
         "dv01_10y_ois": (lambda: dv01(ten_year, long_set), 20),
+        "dv01_10y_ois_spot": (lambda: dv01(spot_ois, flat_set), 20),
+        "dv01_30y_irs_quarterly_spot": (lambda: dv01(spot_irs, flat_set), 5),
         "key_rate_dv01_10y_10tenors": (lambda: key_rate_dv01(ten_year, long_set, tenors), 3),
         "strip_hedge_2y_8q": (lambda: strip_hedge(two_year, short_strip, as_of=AS_OF), 2),
         "shock_table_8_shocks": (lambda: shock_table(hedge), 3),

@@ -24,6 +24,7 @@ for.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -65,6 +66,24 @@ populations and separates them cleanly, which 0.5% does not.
 
 LOGNORMAL_MAX_DECIMAL = 5.0
 """Above 500% a lognormal vol is almost certainly basis points read as percent."""
+
+
+def _require_finite_non_negative(value: float) -> None:
+    """Refuse a NaN, an infinity or a negative number before any band is read.
+
+    The order matters. Every comparison with NaN is false, so a NaN passed the
+    negative check, the zero check and both ends of the magnitude band, and
+    the pricer then returned NaN for the option without a word. An infinity
+    was caught by the ceiling only because the ceiling happened to be there,
+    and :meth:`Volatility.unchecked`, which skips the ceiling, let it through.
+    """
+    if not math.isfinite(value):
+        raise ValueError(
+            f"volatility must be a finite number, got {value!r}. A NaN usually means a "
+            "missing quote upstream; fix the quote rather than the volatility."
+        )
+    if value < 0.0:
+        raise ValueError(f"volatility must be non-negative, got {value!r}")
 
 
 class VolUnits(StrEnum):
@@ -110,15 +129,14 @@ class Volatility:
             the residual case the type system cannot catch, where the enum is
             right and the number is not. Exactly zero is allowed and means the
             degenerate deterministic case.
-        ValueError: The value is negative.
+        ValueError: The value is negative, or not a finite number.
     """
 
     value: float
     units: VolUnits
 
     def __post_init__(self) -> None:
-        if self.value < 0.0:
-            raise ValueError(f"volatility must be non-negative, got {self.value!r}")
+        _require_finite_non_negative(self.value)
         if self.value == 0.0:
             return
         if self.units.is_normal:
@@ -170,10 +188,11 @@ class Volatility:
             The :class:`Volatility`.
 
         Raises:
-            ValueError: The value is negative.
+            ValueError: The value is negative, or not a finite number. The
+                band is what this skips; whether the value is a number at
+                all is not a magnitude question.
         """
-        if value < 0.0:
-            raise ValueError(f"volatility must be non-negative, got {value!r}")
+        _require_finite_non_negative(value)
         instance = object.__new__(cls)
         object.__setattr__(instance, "value", float(value))
         object.__setattr__(instance, "units", units)
