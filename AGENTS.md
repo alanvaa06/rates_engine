@@ -342,17 +342,42 @@ with `MissingFixingError`. Paid flows count for nothing. A fixing dated
 before `as_of` is required; one dated `as_of` is read if you pass it and
 forecast if you do not, as QuantLib does by default, without a
 degradation, and a swap or FRA records it in `fixings_dated_as_of`. A
-snapshot without the index's series is refused even for a term fixing
-dated `as_of`. A forward before the curve's `as_of` is refused too, and so
-is a curve entry that needs history: a started futures contract goes in
-`curve.stub` (a `RealizedStubNode`), and a par swap must start on or after
-`as_of`. The `fixings` block prices the swap, never the curve. A started
-swap's hedge is checked from `as_of`, with the stub covering `as_of` to
-its end. The fixing lag lives on `RateIndex.fixing_lag_days`, so an IRS, a
-FRA and a caplet on one period fix on one day. The fixings used are in the
+snapshot without the index's series is refused even then: for a term
+fixing dated `as_of`, and for an OIS period opening on `as_of`. Name the
+series after the index (`SOFR`, not `SOFR_ON`). Every fixing read must be
+within 20% (`MAX_PLAUSIBLE_OVERNIGHT_FIXING`), library and CLI alike, so
+4.30 for 4.30% is `ImplausibleInputError`. A forward before the curve's
+`as_of` is refused too, and so is a curve entry that needs history: a
+started futures contract goes in `curve.stub` (a `RealizedStubNode`), and
+a par swap must start on or after `as_of`. The `fixings` block prices the
+swap, never the curve.
+
+**The realised stub hedges nothing, and covers only a swap that has
+started.** A started swap's hedge is checked from `as_of`, with the stub
+covering `as_of` to its end. A swap starting on or after `as_of` is not
+covered by it: with the stub ending at the March IMM date, a spot swap's
+first two months are a gap, and `strip_hedge` raises
+`IncompleteStripError` under the default `require_full_coverage`. So does
+a span no contract overlaps. Pass `require_full_coverage=False` to size
+the partial hedge anyway, or `swap_start=` for the span you mean.
+
+The fixing lag lives on `RateIndex.fixing_lag_days`, so an IRS, a FRA and
+a caplet on one period fix on one day. The fixings used are in the
 evidence as `realised_fixings`, chained once into every risk measure. In a
 config, rates are decimals and dates SIFMA business days, and the latest
-fixing must sit near the curve's overnight rate.
+fixing the swap reads in the five business days before `as_of` must sit
+within four times or 50 bp of the curve's overnight rate. When the rate is
+right and the market moved (a backtest on the Monday after the cut of 15
+March 2020), set `fixings.SOFR.check_against_curve: false`; the 20% band
+still applies.
+
+**An FOMC step fit refuses a strip that pins a segment only weakly.**
+Full rank is not enough: if a 1 bp move in one quote would move a segment
+by more than `MAX_SEGMENT_AMPLIFICATION` (25 bp), `fit_fomc_step_curve`
+raises `UnderdeterminedCurveError` naming the segment and the quote. A
+segment priced on its own by a single day of an SR1 month moves about 30
+bp per bp, and is refused. Add an SR1 for a month between the two meetings, or drop a
+meeting.
 
 **Calibrate to a swap with `SwapQuoteNode`, not `ParSwapNode`, when you have
 the swap.** `SwapQuoteNode(swap, quote)` fits the pricer's own par rate, so

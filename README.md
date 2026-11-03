@@ -110,8 +110,10 @@ with its units, its default and the commands that read it.
 `fixings.SOFR.values: [{"date": "2025-09-17", "rate": 0.043}, ...]` gives
 `price` and `hedge` the history a swap that has started needs. Dates are
 SIFMA business days and rates are decimals. A row on a closed day, a rate
-beyond 20%, or a last fixing far off the curve's overnight rate is refused
-by its path. With
+beyond 20%, or a recent fixing the swap reads far off the curve's
+overnight rate is refused by its path; when the rate is right and the
+market moved, `fixings.SOFR.check_against_curve: false` waives that last
+check. With
 `--json`, stdout is exactly one parseable document and all narration goes
 to stderr. Exit code 1 means the inputs are unusable, 2 means the
 calculation is impossible.

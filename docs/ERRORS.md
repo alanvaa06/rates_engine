@@ -130,11 +130,12 @@ is required, one dated on it is read if supplied and forecast off the curve
 if not, and anything later is forecast. A forecast in place of a fixing
 dated `as_of` is neither raised nor a degradation: it is the ordinary state
 of that fixing during the day, and the evidence records it
-(`fixings_dated_as_of` for swaps and FRAs; for a cap or floor, the
-period's `fixing_source` is `curve_forward_on_fixing_day`;
-`forecast_days_on_as_of` for the FOMC fit). A snapshot with no series named
-after the index is refused even for that fixing: it is a wrong snapshot,
-not a print still to come.
+(`fixings_dated_as_of`: a record per period for swaps and FRAs, and for
+the FOMC fit the days of each contract that rest on the forecast; for a
+cap or floor, the period's `fixing_source` is
+`curve_forward_on_fixing_day`). A snapshot with no series named after the
+index is refused even for that fixing: it is a wrong snapshot, not a print
+still to come.
 
 - A swap or FRA needs the history of an overnight period up to the first
   day whose rate is not yet published (`as_of` on a business day, the next
@@ -146,7 +147,8 @@ not a print still to come.
   `TIIE_FONDEO`, `TERM_SOFR_3M`, `TIIE_28`) or a date it needs. The message
   names the trade, the period, the fixing date or window, the series and
   the keyword. A snapshot without the index's series is refused even for a
-  term period fixing on `as_of`, which is otherwise forecast.
+  term period fixing on `as_of`, or an overnight period opening on it,
+  whose first day is otherwise forecast.
 - A cap or floor period whose rate fixed before the valuation date is
   valued on its published fixing, so `cap_floor_pv`, `cap_floor_periods`,
   `caplet_pv` and `option_greeks` raise this when `fixings=` is absent or
@@ -242,15 +244,31 @@ layout. Pass `percent=True`, or `percent=False` to keep the values. Below
 0.30% the band cannot tell percent from decimals, which is why the other
 layouts refuse with `UnsupportedConventionError` instead.
 
-The config's `fixings` block has two more checks. Every rate must be
-within `MAX_PLAUSIBLE_OVERNIGHT_FIXING` (20% a year), checked through
-`require_plausible_rate`: 0.43 typed for 0.043 stops there. The latest
-fixing on or before `as_of` is refused when it is more than
-`FIXING_CURVE_FACTOR` (4) times and more than `FIXING_CURVE_GAP` (50 bp)
-away from the curve's overnight forward from `as_of`: a tenfold typo the
-band lets through (0.15 for 0.015 on a curve near 1.5%), or a percent file
-from 2020-22 where 0.05 meant 0.05%. Each message starts with
-`fixings.SOFR.values[i].rate`.
+A `fixings` block in a CLI or MCP config is checked twice, and each
+message starts with `fixings.SOFR.values[i].rate`. Every rate must be
+within `MAX_PLAUSIBLE_OVERNIGHT_FIXING` (20% a year): 0.43 typed for 0.043
+stops there. And the latest fixing the swap reads in the
+`FIXING_CHECK_WINDOW_DAYS` (five) business days before `as_of` must not be
+both more than `FIXING_CURVE_FACTOR` (four) times and more than
+`FIXING_CURVE_GAP` (50 bp) off the curve's overnight forward from `as_of`:
+a tenfold typo the band lets through (0.15 for 0.015 on a curve near
+1.5%), or a percent file from 2020-22, where 0.05 meant 0.05%, which
+passes any band. A row the swap does not read, or an older one, is not
+compared. The comparison cannot tell a unit from a market that moved, as
+on the Monday after the cut of 15 March 2020, so a series can waive it
+with `fixings.<SERIES>.check_against_curve: false`, and the refusal names
+that key. It is the CLI's alone: a `MarketSnapshot` passed to the library
+has no curve of its own to be held against.
+
+The band is the library's too. Wherever a published fixing of a rate
+index is read -- the overnight days an OIS period compounds, the term rate
+an IRS, FRA or caplet period pays -- a value beyond
+`MAX_PLAUSIBLE_OVERNIGHT_FIXING` raises, through
+`pricing.projection.require_plausible_fixing`, naming the series, the date
+and the value, so `pv`, every risk measure and `strip_hedge` refuse a
+`MarketSnapshot` of SOFR at 0.43 or 4.30 as the CLI does. A row the
+pricing does not read is not checked, and `Series` itself is not banded:
+it also holds yields and index levels such as SOFRINDEX, above one.
 
 The error is also raised for a NaN, an infinite, or a too-large-to-price
 input (a finite quote whose residual overflows) before anything is solved:
@@ -317,8 +335,10 @@ applies the same check to one block, for every command or, with
 Once the file has passed that check, `price` and `hedge` read the
 `fixings` block and refuse, each by its path: a date that is not ISO 8601
 or falls on a day the index's calendar closes (no rate is published then);
-a date given twice; a rate that is not a number; or a `data_quality` other
-than observed, synthetic, proxy and assumed. A rate that is a number but
+a date given twice; a rate that is not a number; a `data_quality` other
+than observed, synthetic, proxy and assumed; or a `check_against_curve`
+that is not a JSON boolean (`"false"`, a string, is refused rather than
+read as true). A rate that is a number but
 not a plausible fixing is an `ImplausibleInputError`, above.
 
 Under `--json` the CLI also raises it for a command line its parser
@@ -455,9 +475,18 @@ some other node without a quote of its own. The message names the clashing
 labels or the nodes.
 
 `fit_fomc_step_curve` also raises it for a meeting on or before `as_of`, a
-segment no contract prices a day of, or segments the strip prices only in
+segment no contract prices a day of, segments the strip prices only in
 combinations it cannot separate (the contract-by-segment weight matrix is
-rank deficient); the message names those segments.
+rank deficient), or segments it separates too weakly: a 1 bp move in one
+quote would move a segment by more than `MAX_SEGMENT_AMPLIFICATION` (25 bp
+per bp), measured on the pseudo-inverse of the weights, so quote noise and
+not the market would set its rate. A segment priced on its own by a single
+day of an SR1 month moves about 30 bp per bp, and is refused. The message
+names those segments, and for the last case the quote that moves one most
+and the bp per bp of each; a strip that passes records its figure as
+`segment_amplification_bp_per_bp`. Add a contract that prices the segment
+on its own -- an SR1 for a month between two meetings -- or drop a
+meeting.
 
 ### `NoTenorQuoteSourceError`
 
@@ -529,16 +558,19 @@ message names the gap and what to pass instead: `swap_start=` or
 `swap_end=` for a shorter span, or `require_full_coverage=False`. A gap at
 either end made only of days the swap's roll calendar closes is not
 refused; the evidence lists it under `coverage_tolerated_gaps`. A gap
-between contracts always is. A `RealizedStubNode` covers `as_of` to its
-end, so a swap that has started, whose coverage is checked from `as_of`,
-is covered by the stub and the contracts after it; a day between the
-stub's end and the first contract is a gap. A missing contract is never
-extrapolated from its neighbours, because the hedge would then report as
-complete when it is not.
+between contracts always is. For a swap that has started, whose coverage
+is checked from `as_of`, a `RealizedStubNode` covers `as_of` to its end,
+so the stub and the contracts after it cover the swap; a day between the
+stub's end and the first contract is a gap. A swap that starts on or
+after `as_of` gets nothing from the stub, which no quote moves: its days
+before the first contract are a gap. A span that no contract overlaps at
+all is refused too, rather than hedged with no contracts and reported as
+complete. A missing contract is never extrapolated from its neighbours,
+because the hedge would then report as complete when it is not.
 
-Pass `require_full_coverage=False` when a partial hedge is what you want.
-From a CLI or MCP config, set `"require_full_coverage": false` in the
-`hedge` block.
+Pass `require_full_coverage=False` when a partial hedge is what you want;
+on a span no contract overlaps it sizes the empty hedge. From a CLI or MCP
+config, set `"require_full_coverage": false` in the `hedge` block.
 
 ### `PolicyBreachError`
 

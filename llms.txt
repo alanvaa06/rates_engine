@@ -70,7 +70,9 @@ lognormal, because there is no such conversion. A volatility cube never
 interpolates across expiry or tenor. An asymptotic expansion never returns a
 negative volatility. A swap, FRA, cap, floor or swaption that has started is
 never valued as if it had not: paid periods drop out, fixed ones need their
-published fixing, and an expired swaption is refused. A config key is never
+published fixing, and an expired swaption is refused. A published fixing
+beyond 20% never enters a price, library or CLI. The realised stub never
+counts as hedge cover for a swap that has not started. A config key is never
 silently ignored, and a value of the wrong shape is never read as something
 else. Thirty-three named exceptions, each with an exit code and
 an entry in `docs/ERRORS.md` saying whether it is recoverable and what to do.
